@@ -1158,7 +1158,10 @@ Respond with ONLY the summary text, nothing else.`;
       const notStaged = paths.filter(p => !stagedPaths.includes(p));
       if (notStaged.length > 0) {
         // Some files weren't staged - they might not exist or have no changes
+        // Refresh status to sync UI with actual git state
+        this.handleGitStatus(ws, tabId, workingDir);
         this.send(ws, { type: 'gitError', tabId, data: { error: `Some files could not be staged: ${notStaged.join(', ')}` } });
+        return;
       }
 
       this.send(ws, { type: 'gitStaged', tabId, data: { paths } });

@@ -1,6 +1,6 @@
 # mstro
 
-Luxurious remote interface for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Run AI-powered coding sessions from any browser while Claude executes locally on any of your machines.
+Luxurious remote workspace for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Run AI-powered coding sessions from any browser while Claude executes locally on any of your machines.
 
 **mstro** is the CLI client for [mstro.app](https://mstro.app). It runs on your machine (laptop, cloud VM, CI server) and connects to the mstro.app web interface via a secure relay. You write prompts in the browser, Claude Code runs in your terminal.
 
@@ -25,7 +25,7 @@ Run Claude Code on a powerful remote machine and interact with it from your phon
 ## Installation
 
 ```bash
-npm install -g mstro
+npm install -g mstro-app
 ```
 
 Requires [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated (`claude` CLI available in your PATH).

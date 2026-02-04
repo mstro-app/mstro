@@ -1,0 +1,79 @@
+.DS_Store
+.idea/
+.mstro/
+.mstro-deps/
+.claude
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+node_modules/
+.next/
+.claude/
+.turbo/
+dist/
+build/
+.cache/
+.parcel-cache/
+.nuxt/
+.output/
+.vercel/
+.netlify/
+coverage/
+.nyc_output/
+.vscode/
+*.swp
+*.swo
+__pycache__/
+*.pyc
+.pytest_cache/
+venv/
+.venv/
+*.egg-info/
+
+# egit encryption - NEVER COMMIT
+.egit-passphrase
+.egit-encrypted
+.mstro
+.mstro-deps/
+.claude/
+.npmrc
+
+# Sub-repos (separate git repositories)
+client/
+platform/
+web/
+infra/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Logs directory
+logs/
+
+# Ansible
+infra/vars/secrets.yml
+*.retry

@@ -47,7 +47,6 @@ const USER_CWD = process.cwd();
 const MSTRO_CONFIG_DIR = join(homedir(), '.mstro');
 const MSTRO_FIRST_RUN_FLAG = join(MSTRO_CONFIG_DIR, '.configured');
 const MSTRO_TERMINAL_CHECKED_FLAG = join(MSTRO_CONFIG_DIR, '.terminal-checked');
-const MSTRO_TELEMETRY_NOTICE_FLAG = join(MSTRO_CONFIG_DIR, '.telemetry-notice-shown');
 const CLAUDE_SETTINGS_FILE = join(homedir(), '.claude', 'settings.json');
 const CLAUDE_HOOKS_DIR = join(homedir(), '.claude', 'hooks');
 const BOUNCER_HOOK_FILE = join(CLAUDE_HOOKS_DIR, 'bouncer.sh');
@@ -152,34 +151,6 @@ function showBouncerWarning() {
 }
 
 /**
- * Show telemetry notice on first run (one-time)
- */
-function showTelemetryNotice() {
-  if (existsSync(MSTRO_TELEMETRY_NOTICE_FLAG)) {
-    return; // Already shown
-  }
-
-  log('');
-  log('  Telemetry Notice', colors.bold);
-  log('  Mstro collects anonymous error reports and usage data to improve', colors.dim);
-  log('  the software. No personal data or code is collected.', colors.dim);
-  log('');
-  log('  To disable: mstro telemetry off', colors.dim);
-  log('  Privacy policy: https://github.com/mstro-app/mstro/blob/main/cli/PRIVACY.md', colors.dim);
-  log('');
-
-  // Mark as shown
-  try {
-    if (!existsSync(MSTRO_CONFIG_DIR)) {
-      mkdirSync(MSTRO_CONFIG_DIR, { recursive: true, mode: 0o700 });
-    }
-    writeFileSync(MSTRO_TELEMETRY_NOTICE_FLAG, new Date().toISOString());
-  } catch {
-    // Ignore errors - non-critical
-  }
-}
-
-/**
  * Prompt user to configure hooks
  * Returns: 'configure' | 'skip' | 'never'
  */
@@ -224,7 +195,7 @@ async function promptBouncerSetup() {
 }
 
 function showHelp() {
-  log('\n  Mstro - No-code AI Assistant\n', colors.bold + colors.cyan);
+  log('\n  Mstro - No-code AI Workspace\n', colors.bold + colors.cyan);
   log('  Run Claude Code workflows from your laptop, cloud VM, or any machine.\n', colors.dim);
   log('  Usage:', colors.bold);
   log('    mstro                       Start Mstro (auto-finds available port)', colors.dim);

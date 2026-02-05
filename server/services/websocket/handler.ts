@@ -1036,9 +1036,13 @@ Respond with ONLY the summary text, nothing else.`;
     const unstaged: GitFileStatus[] = [];
     const untracked: GitFileStatus[] = [];
 
-    const lines = porcelainOutput.trim().split('\n').filter(Boolean);
+    // Split by newlines but DON'T trim - the leading space is significant in porcelain format!
+    // Porcelain format: XY PATH where X=index status, Y=worktree status
+    // A leading space means "not modified in index" which is important information
+    const lines = porcelainOutput.split('\n').filter(line => line.length >= 3);
 
     for (const line of lines) {
+      // Minimum valid line: "XY P" (status codes + space + at least 1 char path)
       if (line.length < 4) continue;
 
       const indexStatus = line[0];

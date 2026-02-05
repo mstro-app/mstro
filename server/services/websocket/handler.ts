@@ -1028,6 +1028,63 @@ Respond with ONLY the summary text, nothing else.`;
     });
   }
 
+  /** Map of simple escape sequences to their character values */
+  private static readonly ESCAPE_CHARS: Record<string, string> = {
+    '\\': '\\',
+    '"': '"',
+    'n': '\n',
+    't': '\t',
+    'r': '\r',
+  };
+
+  /**
+   * Unquote a git-quoted path (C-style quoting)
+   * Git quotes paths containing spaces, special chars, or non-ASCII with double quotes
+   * and uses backslash escapes inside (e.g., \", \\, \n, \t, \nnn for octal)
+   */
+  private unquoteGitPath(path: string): string {
+    // If not quoted, return as-is
+    if (!path.startsWith('"') || !path.endsWith('"')) {
+      return path;
+    }
+
+    // Remove surrounding quotes and process escape sequences
+    const inner = path.slice(1, -1);
+    let result = '';
+    let i = 0;
+
+    while (i < inner.length) {
+      if (inner[i] !== '\\' || i + 1 >= inner.length) {
+        result += inner[i];
+        i++;
+        continue;
+      }
+
+      const next = inner[i + 1];
+      const escaped = WebSocketImproviseHandler.ESCAPE_CHARS[next];
+
+      if (escaped !== undefined) {
+        result += escaped;
+        i += 2;
+      } else if (this.isOctalEscape(inner, i)) {
+        result += String.fromCharCode(parseInt(inner.slice(i + 1, i + 4), 8));
+        i += 4;
+      } else {
+        result += inner[i];
+        i++;
+      }
+    }
+
+    return result;
+  }
+
+  /** Check if position i starts an octal escape sequence (\nnn) */
+  private isOctalEscape(str: string, i: number): boolean {
+    return i + 3 < str.length &&
+      /[0-7]/.test(str[i + 1]) &&
+      /[0-7]{2}/.test(str.slice(i + 2, i + 4));
+  }
+
   /**
    * Parse git status --porcelain output into structured format
    */
@@ -1036,26 +1093,25 @@ Respond with ONLY the summary text, nothing else.`;
     const unstaged: GitFileStatus[] = [];
     const untracked: GitFileStatus[] = [];
 
-    // Split by newlines but DON'T trim - the leading space is significant in porcelain format!
-    // Porcelain format: XY PATH where X=index status, Y=worktree status
-    // A leading space means "not modified in index" which is important information
-    const lines = porcelainOutput.split('\n').filter(line => line.length >= 3);
+    const lines = porcelainOutput.trim().split('\n').filter(Boolean);
 
     for (const line of lines) {
-      // Minimum valid line: "XY P" (status codes + space + at least 1 char path)
       if (line.length < 4) continue;
 
       const indexStatus = line[0];
       const workTreeStatus = line[1];
-      const path = line.slice(3);
+      const rawPath = line.slice(3);
 
-      // Handle renamed files (format: "R  old -> new")
+      // Unquote the path (git quotes paths with spaces/special chars)
+      const path = this.unquoteGitPath(rawPath);
+
+      // Handle renamed files (format: "R  old -> new" or R  "old" -> "new")
       let filePath = path;
       let originalPath: string | undefined;
-      if (path.includes(' -> ')) {
-        const parts = path.split(' -> ');
-        originalPath = parts[0];
-        filePath = parts[1];
+      if (rawPath.includes(' -> ')) {
+        const parts = rawPath.split(' -> ');
+        originalPath = this.unquoteGitPath(parts[0]);
+        filePath = this.unquoteGitPath(parts[1]);
       }
 
       // Untracked files
@@ -1162,10 +1218,7 @@ Respond with ONLY the summary text, nothing else.`;
       const notStaged = paths.filter(p => !stagedPaths.includes(p));
       if (notStaged.length > 0) {
         // Some files weren't staged - they might not exist or have no changes
-        // Refresh status to sync UI with actual git state
-        this.handleGitStatus(ws, tabId, workingDir);
         this.send(ws, { type: 'gitError', tabId, data: { error: `Some files could not be staged: ${notStaged.join(', ')}` } });
-        return;
       }
 
       this.send(ws, { type: 'gitStaged', tabId, data: { paths } });

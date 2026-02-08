@@ -480,6 +480,7 @@ async function startServer(envOverrides) {
     writeFileSync(MSTRO_TERMINAL_CHECKED_FLAG, new Date().toISOString());
   }
 
+  showUpdateNotification();
   log('\nStarting Mstro client...', colors.bold + colors.cyan);
   runNpmScript('start', [], envOverrides);
 }

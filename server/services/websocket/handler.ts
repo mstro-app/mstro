@@ -1093,10 +1093,9 @@ Respond with ONLY the summary text, nothing else.`;
     const unstaged: GitFileStatus[] = [];
     const untracked: GitFileStatus[] = [];
 
-    const lines = porcelainOutput.trim().split('\n').filter(Boolean);
+    const lines = porcelainOutput.split('\n').filter(line => line.length >= 4);
 
     for (const line of lines) {
-      if (line.length < 4) continue;
 
       const indexStatus = line[0];
       const workTreeStatus = line[1];
@@ -1196,32 +1195,25 @@ Respond with ONLY the summary text, nothing else.`;
    * Handle git stage request
    */
   private async handleGitStage(ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): Promise<void> {
+    const stageAll = !!msg.data?.stageAll;
     const paths = msg.data?.paths as string[] | undefined;
-    if (!paths || paths.length === 0) {
+
+    if (!stageAll && (!paths || paths.length === 0)) {
       this.send(ws, { type: 'gitError', tabId, data: { error: 'No paths specified for staging' } });
       return;
     }
 
     try {
-      const result = await this.executeGitCommand(['add', '--', ...paths], workingDir);
+      // Use `git add -A` for staging all (handles new, modified, and deleted files reliably)
+      // Use `git add -- ...paths` for staging specific files
+      const args = stageAll ? ['add', '-A'] : ['add', '--', ...paths!];
+      const result = await this.executeGitCommand(args, workingDir);
       if (result.exitCode !== 0) {
         this.send(ws, { type: 'gitError', tabId, data: { error: result.stderr || result.stdout || 'Failed to stage files' } });
         return;
       }
 
-      // Verify files were actually staged by checking status
-      const statusResult = await this.executeGitCommand(['status', '--porcelain=v1'], workingDir);
-      const { staged } = this.parseGitStatus(statusResult.stdout);
-      const stagedPaths = staged.map(f => f.path);
-
-      // Check if all requested files are now staged
-      const notStaged = paths.filter(p => !stagedPaths.includes(p));
-      if (notStaged.length > 0) {
-        // Some files weren't staged - they might not exist or have no changes
-        this.send(ws, { type: 'gitError', tabId, data: { error: `Some files could not be staged: ${notStaged.join(', ')}` } });
-      }
-
-      this.send(ws, { type: 'gitStaged', tabId, data: { paths } });
+      this.send(ws, { type: 'gitStaged', tabId, data: { paths: paths || [] } });
     } catch (error: any) {
       this.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
     }
@@ -1261,22 +1253,10 @@ Respond with ONLY the summary text, nothing else.`;
     }
 
     try {
-      // First check if there are actually staged changes
-      const statusResult = await this.executeGitCommand(['status', '--porcelain=v1'], workingDir);
-      const { staged } = this.parseGitStatus(statusResult.stdout);
-
-      if (staged.length === 0) {
-        // No staged changes - refresh status on client and show clear error
-        this.handleGitStatus(ws, tabId, workingDir);
-        this.send(ws, { type: 'gitError', tabId, data: { error: 'No changes staged for commit. Use "Stage" to add files before committing.' } });
-        return;
-      }
-
+      // Commit all staged changes directly - no pre-check to avoid race conditions
       const result = await this.executeGitCommand(['commit', '-m', message], workingDir);
       if (result.exitCode !== 0) {
-        // Parse the error to provide a cleaner message
         let errorMsg = result.stderr || result.stdout || 'Failed to commit';
-        // If it's a "nothing to commit" error, provide clearer message
         if (errorMsg.includes('nothing to commit') || errorMsg.includes('no changes added')) {
           errorMsg = 'No changes staged for commit. Use "Stage" to add files before committing.';
           // Refresh status to sync UI

@@ -20,7 +20,7 @@ import type {
 } from './types.js';
 
 // Re-export types for backward compatibility
-export type { HeadlessConfig, ImageAttachment, SessionResult, SessionState, ToolUseEvent } from './types.js';
+export type { ExecutionCheckpoint, HeadlessConfig, ImageAttachment, SessionResult, SessionState, ToolTimeoutProfile, ToolUseEvent } from './types.js';
 
 export class HeadlessRunner {
   private config: ResolvedHeadlessConfig;
@@ -51,6 +51,10 @@ export class HeadlessRunner {
       stallMaxExtensions: config.stallMaxExtensions ?? 3,
       stallHardCapMs: config.stallHardCapMs ?? 3_600_000,
       model: config.model,
+      toolTimeoutProfiles: config.toolTimeoutProfiles,
+      enableToolWatchdog: config.enableToolWatchdog !== false,
+      maxAutoRetries: config.maxAutoRetries ?? 2,
+      onToolTimeout: config.onToolTimeout,
     };
   }
 
@@ -84,12 +88,23 @@ export class HeadlessRunner {
     const result = await this.executePromptCommand(enrichedPrompt, 'main', 1);
 
     if (result.exitCode !== 0) {
+      // Build meaningful error: prefer stderr, fall back to non-JSON stdout lines
+      let errorMessage = result.error;
+      if (!errorMessage && result.output) {
+        const plainLines = result.output.split('\n')
+          .filter(l => l.trim() && !l.trim().startsWith('{'))
+          .join('\n')
+          .trim();
+        if (plainLines) {
+          errorMessage = plainLines.slice(0, 500);
+        }
+      }
       return {
         completed: false,
         needsHandoff: false,
         totalTokens: 0,
         sessionId,
-        error: result.error || 'Execution failed',
+        error: errorMessage || `Claude exited with code ${result.exitCode}`,
         assistantResponse: result.assistantResponse,
         thinkingOutput: result.thinkingOutput,
         toolUseHistory: result.toolUseHistory,

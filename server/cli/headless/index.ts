@@ -26,14 +26,20 @@ export {
 } from './prompt-utils.js';
 // Main runner class
 export { HeadlessRunner } from './runner.js';
+// Tool watchdog
+export { ToolWatchdog } from './tool-watchdog.js';
 // Types
 export type {
+  ExecutionCheckpoint,
   ExecutionResult,
   HeadlessConfig,
   ImageAttachment,
-  ResolvedHeadlessConfig, 
+  PendingToolMap,
+  ResolvedHeadlessConfig,
   SessionResult,
   SessionState,
+  ToolDurationTracker,
+  ToolTimeoutProfile,
   ToolUseAccumulator,
   ToolUseEvent
 } from './types.js';

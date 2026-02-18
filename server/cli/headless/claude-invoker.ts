@@ -11,7 +11,8 @@ import { type ChildProcess, spawn } from 'node:child_process';
 import { generateMcpConfig } from './mcp-config.js';
 import { detectErrorInStderr, } from './output-utils.js';
 import { buildMultimodalMessage } from './prompt-utils.js';
-import { assessStall, type StallContext } from './stall-assessor.js';
+import { assessStall, assessToolTimeout, type StallContext } from './stall-assessor.js';
+import { ToolWatchdog } from './tool-watchdog.js';
 import type {
   ExecutionResult,
   ResolvedHeadlessConfig,
@@ -69,15 +70,16 @@ interface StallAssessmentParams {
   now: number;
   extensionsGranted: number;
   maxExtensions: number;
+  toolWatchdogActive?: boolean;
 }
 
 /** Run stall assessment and return updated state if extended, null otherwise */
 async function runStallAssessment(
   params: StallAssessmentParams,
 ): Promise<{ extensionsGranted: number; currentKillDeadline: number } | null> {
-  const { stallCtx, config, now, extensionsGranted, maxExtensions } = params;
+  const { stallCtx, config, now, extensionsGranted, maxExtensions, toolWatchdogActive } = params;
   try {
-    const verdict = await assessStall(stallCtx, config.claudeCommand, config.verbose);
+    const verdict = await assessStall(stallCtx, config.claudeCommand, config.verbose, toolWatchdogActive);
     if (verdict.action === 'extend') {
       const newExtensions = extensionsGranted + 1;
       config.outputCallback?.(
@@ -298,6 +300,20 @@ function processStreamLines(
 }
 
 function processStreamEvent(parsed: any, ctx: StreamHandlerContext): void {
+  // Handle error events from Claude CLI (API errors, model errors, etc.)
+  if (parsed.type === 'error') {
+    const errorMessage = parsed.error?.message || parsed.message || JSON.stringify(parsed);
+    ctx.config.outputCallback?.(`\n[[MSTRO_ERROR:CLAUDE_ERROR]] ${errorMessage}\n`);
+    return;
+  }
+
+  // Handle result events that contain error info
+  if (parsed.type === 'result' && parsed.is_error) {
+    const errorMessage = parsed.error || parsed.result || 'Unknown error in result';
+    ctx.config.outputCallback?.(`\n[[MSTRO_ERROR:CLAUDE_RESULT_ERROR]] ${errorMessage}\n`);
+    return;
+  }
+
   if (parsed.type === 'stream_event' && parsed.event) {
     const event = parsed.event;
     ctx.accumulatedThinking = handleThinkingDelta(event, ctx);
@@ -462,25 +478,117 @@ export async function executeClaudeCommand(
   let currentKillDeadline = Date.now() + (config.stallKillMs ?? 1_800_000);
 
   // Tool activity tracking for stall assessment context
-  let lastToolName: string | undefined;
+  // pendingTools tracks toolId -> toolName for all started-but-not-returned tools
+  const pendingTools = new Map<string, string>();
   let lastToolInputSummary: string | undefined;
-  let pendingToolCount = 0;
   let totalToolCalls = 0;
 
-  // Wrap the existing tool handlers to track activity
+  // Per-tool adaptive timeout watchdog
+  const toolWatchdogActive = config.enableToolWatchdog !== false;
+  const watchdog = toolWatchdogActive
+    ? new ToolWatchdog({
+        profiles: config.toolTimeoutProfiles,
+        verbose: config.verbose,
+        onTiebreaker: async (toolName, toolInput, elapsedMs) => {
+          const verdict = await assessToolTimeout(toolName, toolInput, elapsedMs, config.claudeCommand, config.verbose);
+          return verdict;
+        },
+      })
+    : null;
+
+  // Track tool ID -> name mapping for watchdog (need it at tool_result time)
+  const toolIdToName = new Map<string, string>();
+  // Track tool ID -> complete input (available at tool_complete, needed for watchdog)
+  const toolIdToInput = new Map<string, Record<string, unknown>>();
+
+  // Wrap the existing tool handlers to track activity + watchdog
   const origToolUseCallback = config.toolUseCallback;
   config.toolUseCallback = (event) => {
-    if (event.type === 'tool_start' && event.toolName) {
-      lastToolName = event.toolName;
-      pendingToolCount++;
+    if (event.type === 'tool_start' && event.toolName && event.toolId) {
+      const id = event.toolId;
+      pendingTools.set(id, event.toolName);
       totalToolCalls++;
-    } else if (event.type === 'tool_complete' && event.completeInput) {
+      toolIdToName.set(id, event.toolName);
+      // Start watchdog with empty input (will get complete input at tool_complete)
+      if (watchdog) {
+        watchdog.startWatch(id, event.toolName, {}, () => {
+          handleToolTimeout(id);
+        });
+      }
+    } else if (event.type === 'tool_complete' && event.completeInput && event.toolId) {
+      const id = event.toolId;
       lastToolInputSummary = summarizeToolInput(event.completeInput);
-    } else if (event.type === 'tool_result') {
-      pendingToolCount = Math.max(0, pendingToolCount - 1);
+      toolIdToInput.set(id, event.completeInput);
+      // Restart watchdog with complete input (for better tiebreaker context)
+      if (watchdog) {
+        const toolName = toolIdToName.get(id);
+        if (toolName) {
+          watchdog.startWatch(id, toolName, event.completeInput, () => {
+            handleToolTimeout(id);
+          });
+        }
+      }
+    } else if (event.type === 'tool_result' && event.toolId) {
+      pendingTools.delete(event.toolId);
+      // Grace period: reset stall warning so Claude gets a fresh window to
+      // process the result and generate a response (especially after long Task agents)
+      stallWarningEmitted = false;
+      lastActivityTime = Date.now();
+      // Record completion for EMA tracking
+      const toolEntry = ctx.accumulatedToolUse.find(t => t.toolId === event.toolId);
+      if (watchdog && toolEntry) {
+        const toolName = toolIdToName.get(event.toolId);
+        if (toolName && toolEntry.duration) {
+          watchdog.recordCompletion(toolName, toolEntry.duration);
+        }
+        watchdog.clearWatch(event.toolId);
+      }
     }
     origToolUseCallback?.(event);
   };
+
+  /** Handle a tool timeout from the watchdog */
+  function handleToolTimeout(hungToolId: string): void {
+    if (!watchdog) return;
+
+    const checkpoint = watchdog.buildCheckpoint(
+      prompt,
+      ctx.accumulatedAssistantResponse,
+      ctx.accumulatedThinking,
+      ctx.accumulatedToolUse,
+      hungToolId,
+      sessionCapture.claudeSessionId,
+      perfStart,
+    );
+
+    const toolName = toolIdToName.get(hungToolId) || 'unknown';
+    const toolInput = toolIdToInput.get(hungToolId) || {};
+    const timeoutMs = watchdog.getTimeout(toolName);
+    const url = toolInput.url ? String(toolInput.url) : toolInput.query ? String(toolInput.query) : undefined;
+
+    // Emit tool timeout event via output callback (for web UI display)
+    config.outputCallback?.(
+      `\n[[MSTRO_TOOL_TIMEOUT]] ${toolName} timed out after ${Math.round(timeoutMs / 1000)}s${url ? ` fetching: ${url.slice(0, 100)}` : ''}. ${ctx.accumulatedToolUse.filter(t => t.result !== undefined).length} completed results preserved.\n`
+    );
+
+    // Notify caller via callback
+    if (checkpoint) {
+      config.onToolTimeout?.(checkpoint);
+    }
+
+    // Kill the process
+    if (config.verbose) {
+      console.log(`[WATCHDOG] Killing process due to ${toolName} timeout`);
+    }
+    watchdog.clearAll();
+    clearInterval(stallCheckInterval);
+    claudeProcess.kill('SIGTERM');
+    setTimeout(() => {
+      if (!claudeProcess.killed) {
+        claudeProcess.kill('SIGKILL');
+      }
+    }, 5000);
+  }
 
   claudeProcess.stdout!.on('data', (data) => {
     lastActivityTime = Date.now();
@@ -525,7 +633,9 @@ export async function executeClaudeCommand(
   const maxExtensions = config.stallMaxExtensions ?? 3;
   const stallAssessEnabled = config.stallAssessEnabled !== false;
 
-  const stallCheckInterval = setInterval(async () => {
+  // eslint-disable-next-line prefer-const
+  let stallCheckInterval: ReturnType<typeof setInterval>;
+  stallCheckInterval = setInterval(async () => {
     const now = Date.now();
     const silenceMs = now - lastActivityTime;
     const totalElapsed = now - perfStart;
@@ -562,14 +672,15 @@ export async function executeClaudeCommand(
     const stallCtx: StallContext = {
       originalPrompt: prompt,
       silenceMs,
-      lastToolName,
+      lastToolName: pendingTools.size > 0 ? Array.from(pendingTools.values()).pop() : undefined,
       lastToolInputSummary,
-      pendingToolCount,
+      pendingToolCount: pendingTools.size,
+      pendingToolNames: new Set(pendingTools.values()),
       totalToolCalls,
       elapsedTotalMs: totalElapsed,
     };
 
-    const result = await runStallAssessment({ stallCtx, config, now, extensionsGranted, maxExtensions });
+    const result = await runStallAssessment({ stallCtx, config, now, extensionsGranted, maxExtensions, toolWatchdogActive });
     if (result) {
       extensionsGranted = result.extensionsGranted;
       currentKillDeadline = result.currentKillDeadline;
@@ -581,6 +692,7 @@ export async function executeClaudeCommand(
   return new Promise((resolve, reject) => {
     claudeProcess.on('close', (code) => {
       clearInterval(stallCheckInterval);
+      watchdog?.clearAll();
       if (claudeProcess.pid) {
         runningProcesses.delete(claudeProcess.pid);
       }
@@ -597,6 +709,7 @@ export async function executeClaudeCommand(
 
     claudeProcess.on('error', (error: NodeJS.ErrnoException) => {
       clearInterval(stallCheckInterval);
+      watchdog?.clearAll();
       if (claudeProcess.pid) {
         runningProcesses.delete(claudeProcess.pid);
       }

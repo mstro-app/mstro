@@ -33,6 +33,57 @@ export interface ImageAttachment {
   mimeType?: string;      // MIME type (e.g., "image/png")
 }
 
+/** Per-tool-type timeout configuration with adaptive tracking */
+export interface ToolTimeoutProfile {
+  /** Initial timeout when no prior samples exist (ms) */
+  coldStartMs: number;
+  /** Minimum timeout — never kill before this (ms) */
+  floorMs: number;
+  /** Maximum timeout — always kill after this (ms) */
+  ceilingMs: number;
+  /** Track EMA of past durations and adapt timeout dynamically */
+  useAdaptive: boolean;
+  /** Spawn a Haiku call to assess before killing */
+  useHaikuTiebreaker: boolean;
+}
+
+/** Snapshot of execution state at the moment a tool times out */
+export interface ExecutionCheckpoint {
+  originalPrompt: string;
+  assistantText: string;
+  thinkingText: string;
+  completedTools: Array<{
+    toolName: string;
+    toolId: string;
+    input: Record<string, unknown>;
+    result: string;
+    isError: boolean;
+    durationMs: number;
+  }>;
+  /** Tools that were still running (not the hung tool) when the process was killed */
+  inProgressTools: Array<{
+    toolName: string;
+    toolId: string;
+    input: Record<string, unknown>;
+  }>;
+  hungTool: {
+    toolName: string;
+    toolId: string;
+    input: Record<string, unknown>;
+    timeoutMs: number;
+    url?: string;
+  };
+  claudeSessionId?: string;
+  elapsedMs: number;
+}
+
+/** EMA tracker for a single tool type's completion times */
+export interface ToolDurationTracker {
+  estimatedDuration: number;
+  deviation: number;
+  sampleCount: number;
+}
+
 export interface HeadlessConfig {
   workingDir: string;
   tokenBudgetThreshold: number;
@@ -58,6 +109,14 @@ export interface HeadlessConfig {
   stallHardCapMs?: number;     // Absolute wall-clock kill cap (default: 3600000 = 60 min)
   /** Claude model for main execution (e.g., 'opus', 'sonnet'). 'default' = no --model flag. */
   model?: string;
+  /** Per-tool timeout profiles (merge with defaults) */
+  toolTimeoutProfiles?: Record<string, Partial<ToolTimeoutProfile>>;
+  /** Enable per-tool adaptive timeout watchdog (default: true) */
+  enableToolWatchdog?: boolean;
+  /** Max auto-retries on tool timeout (default: 2) */
+  maxAutoRetries?: number;
+  /** Called when a tool times out with checkpoint data */
+  onToolTimeout?: (checkpoint: ExecutionCheckpoint) => void;
 }
 
 export interface SessionState {
@@ -104,6 +163,9 @@ export interface ToolUseAccumulator {
   duration?: number;
 }
 
+/** Map of toolId -> toolName for currently pending (started but not yet returned) tools */
+export type PendingToolMap = Map<string, string>;
+
 export interface ExecutionResult {
   output: string;
   error?: string;
@@ -115,7 +177,7 @@ export interface ExecutionResult {
 }
 
 /** Resolved config with all defaults applied */
-export type ResolvedHeadlessConfig = Omit<Required<HeadlessConfig>, 'outputCallback' | 'thinkingCallback' | 'toolUseCallback' | 'continueSession' | 'claudeSessionId' | 'imageAttachments' | 'model'> & {
+export type ResolvedHeadlessConfig = Omit<Required<HeadlessConfig>, 'outputCallback' | 'thinkingCallback' | 'toolUseCallback' | 'continueSession' | 'claudeSessionId' | 'imageAttachments' | 'model' | 'toolTimeoutProfiles' | 'onToolTimeout'> & {
   outputCallback?: (text: string) => void;
   thinkingCallback?: (text: string) => void;
   toolUseCallback?: (event: ToolUseEvent) => void;
@@ -123,4 +185,6 @@ export type ResolvedHeadlessConfig = Omit<Required<HeadlessConfig>, 'outputCallb
   claudeSessionId?: string;
   imageAttachments?: ImageAttachment[];
   model?: string;
+  toolTimeoutProfiles?: Record<string, Partial<ToolTimeoutProfile>>;
+  onToolTimeout?: (checkpoint: ExecutionCheckpoint) => void;
 };

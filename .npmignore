@@ -1,0 +1,41 @@
+# Backup files
+*.backup
+*.bak
+*~
+
+# Environment files
+.env
+.env.*
+.env.local
+.env.*.local
+
+# Development files
+*.log
+.DS_Store
+Thumbs.db
+
+# IDE/Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# TypeScript build info
+*.tsbuildinfo
+
+# Test files
+*.test.ts
+*.spec.ts
+__tests__/
+test/
+tests/
+
+# Documentation source (README.md is included by default)
+docs/
+
+# Git
+.git/
+.gitignore
+
+# npm
+.npmrc

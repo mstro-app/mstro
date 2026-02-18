@@ -1,0 +1,74 @@
+{
+  "name": "mstro-app",
+  "version": "0.1.57",
+  "description": "No-code AI workspace - run Claude Code workflows from your laptop, cloud VM, or any machine",
+  "type": "module",
+  "license": "MIT",
+  "author": "Mstro",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mstro-app/mstro.git"
+  },
+  "homepage": "https://mstro.app",
+  "keywords": [
+    "cli",
+    "ai",
+    "claude",
+    "anthropic",
+    "orchestration",
+    "workflow",
+    "mcp",
+    "automation"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "mstro": "./bin/mstro.js"
+  },
+  "files": [
+    "bin/",
+    "server/",
+    "hooks/",
+    "dist/",
+    "!**/*.backup",
+    "!**/*.bak",
+    "!**/.env",
+    "!**/.env.*"
+  ],
+  "scripts": {
+    "postinstall": "node bin/postinstall.js",
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "tsx server/index.ts",
+    "dev:mcp": "tsx server/mcp/server.ts",
+    "start": "NODE_ENV=production tsx server/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "prepublishOnly": "npm run build && npm test",
+    "mstro": "node bin/mstro.js",
+    "mstro:dev": "node bin/mstro.js --dev",
+    "check": "tsc -p tsconfig.build.json && vitest run && biome check . && npm audit --omit=dev"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.19.6",
+    "@modelcontextprotocol/sdk": "^1.21.1",
+    "@sentry/node": "^10.38.0",
+    "fuse.js": "^7.1.0",
+    "hono": "^4.10.6",
+    "posthog-node": "^5.21.2",
+    "tsx": "^4.21.0",
+    "update-notifier": "^7.3.1",
+    "ws": "^8.18.0"
+  },
+  "optionalDependencies": {
+    "node-pty": "^1.1.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.13",
+    "@types/node": "^24.10.7",
+    "@types/ws": "^8.18.1",
+    "typescript": "~5.9.3",
+    "vitest": "4.0.18"
+  }
+}

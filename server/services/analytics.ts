@@ -109,11 +109,15 @@ export async function initAnalytics(): Promise<void> {
   }
 
   client = new PostHog(analyticsConfig.posthogKey, {
-    host: analyticsConfig.posthogHost,
-    // Flush events every 10 seconds or 20 events
+    // Route through platform server proxy (like web/ does) to avoid
+    // direct PostHog DNS lookups and ad-blocker/firewall issues
+    host: `${PLATFORM_URL}/a`,
     flushAt: 20,
     flushInterval: 10000,
   })
+
+  // Silently swallow analytics errors — never surface to user terminal
+  client.on('error', () => {})
 }
 
 /**
@@ -122,7 +126,11 @@ export async function initAnalytics(): Promise<void> {
  */
 export async function shutdownAnalytics(): Promise<void> {
   if (client) {
-    await client.shutdown()
+    try {
+      await client.shutdown()
+    } catch {
+      // Ignore shutdown errors (network may be unavailable)
+    }
     client = null
   }
 }
@@ -263,6 +271,8 @@ export const AnalyticsEvents = {
   IMPROVISE_MOVEMENT_ERROR: 'improvise_movement_error',
   IMPROVISE_SESSION_ENDED: 'improvise_session_ended',
   IMPROVISE_ABORTED: 'improvise_aborted',
+  IMPROVISE_TOOL_TIMEOUT: 'improvise_tool_timeout',
+  IMPROVISE_AUTO_RETRY: 'improvise_auto_retry',
 
   // Terminal events
   TERMINAL_SESSION_CREATED: 'terminal_session_created',

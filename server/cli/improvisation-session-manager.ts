@@ -13,6 +13,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { AnalyticsEvents, trackEvent } from '../services/analytics.js';
 import { HeadlessRunner } from './headless/index.js';
+import type { ExecutionCheckpoint } from './headless/types.js';
 
 export interface ImprovisationOptions {
   workingDir: string;
@@ -266,57 +267,109 @@ export class ImprovisationSessionManager extends EventEmitter {
       // Build prompt with text file attachments prepended
       const promptWithAttachments = this.buildPromptWithAttachments(userPrompt, attachments);
 
-      // PERSISTENT SESSION: Use --resume <sessionId> to maintain conversation history per tab
-      // CRITICAL FIX: Using claudeSessionId ensures each tab resumes its own Claude session
-      // Previously used --continue which resumed the most recent global session, causing cross-tab contamination
-      const runner = new HeadlessRunner({
-        workingDir: this.options.workingDir,
-        tokenBudgetThreshold: this.options.tokenBudgetThreshold,
-        maxSessions: this.options.maxSessions,
-        verbose: this.options.verbose,
-        noColor: this.options.noColor,
-        model: this.options.model,
-        improvisationMode: true,
-        movementNumber: sequenceNumber,
-        continueSession: !this.isFirstPrompt, // Used as fallback only if claudeSessionId is missing
-        claudeSessionId: this.claudeSessionId, // Resume specific session for tab isolation
-        outputCallback: (text: string) => {
-          this.executionEventLog.push({ type: 'output', data: { text, timestamp: Date.now() }, timestamp: Date.now() });
-          this.queueOutput(text);
-          this.flushOutputQueue();
-        },
-        thinkingCallback: (text: string) => {
-          this.executionEventLog.push({ type: 'thinking', data: { text }, timestamp: Date.now() });
-          this.emit('onThinking', text);
-          this.flushOutputQueue();
-        },
-        toolUseCallback: (event) => {
-          this.executionEventLog.push({ type: 'toolUse', data: { ...event, timestamp: Date.now() }, timestamp: Date.now() });
-          this.emit('onToolUse', event);
-          this.flushOutputQueue();
-        },
-        directPrompt: promptWithAttachments,
-        // Pass image attachments for multimodal handling via stream-json
-        imageAttachments: attachments?.filter(a => a.isImage),
-        // Inject historical context on first prompt of a resumed session
-        // This serves as both the primary context mechanism (no claudeSessionId)
-        // and a fallback if claudeSessionId is stale (client restarted since original session)
-        promptContext: (this.isResumedSession && this.isFirstPrompt)
-          ? { accumulatedKnowledge: this.buildHistoricalContext(), filesModified: [] }
-          : undefined
-      });
+      // Checkpoint-and-retry loop: if a tool times out, we capture a checkpoint,
+      // kill the process, and retry with context from successful results
+      const maxRetries = 2;
+      let currentPrompt = promptWithAttachments;
+      let retryNumber = 0;
+      // Object wrapper so TS doesn't narrow the callback-assigned value to `never`
+      const checkpointRef: { value: ExecutionCheckpoint | null } = { value: null };
+      let result: Awaited<ReturnType<HeadlessRunner['run']>>;
 
-      this.currentRunner = runner;
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        checkpointRef.value = null;
 
-      const result = await runner.run();
+        // PERSISTENT SESSION: Use --resume <sessionId> to maintain conversation history per tab
+        // CRITICAL FIX: Using claudeSessionId ensures each tab resumes its own Claude session
+        // On retry: start fresh session (no --resume since old session has incomplete tool call)
+        const runner = new HeadlessRunner({
+          workingDir: this.options.workingDir,
+          tokenBudgetThreshold: this.options.tokenBudgetThreshold,
+          maxSessions: this.options.maxSessions,
+          verbose: this.options.verbose,
+          noColor: this.options.noColor,
+          model: this.options.model,
+          improvisationMode: true,
+          movementNumber: sequenceNumber,
+          // On retry, don't resume the old session (it has an incomplete tool call)
+          continueSession: retryNumber === 0 ? !this.isFirstPrompt : false,
+          claudeSessionId: retryNumber === 0 ? this.claudeSessionId : undefined,
+          outputCallback: (text: string) => {
+            this.executionEventLog.push({ type: 'output', data: { text, timestamp: Date.now() }, timestamp: Date.now() });
+            this.queueOutput(text);
+            this.flushOutputQueue();
+          },
+          thinkingCallback: (text: string) => {
+            this.executionEventLog.push({ type: 'thinking', data: { text }, timestamp: Date.now() });
+            this.emit('onThinking', text);
+            this.flushOutputQueue();
+          },
+          toolUseCallback: (event) => {
+            this.executionEventLog.push({ type: 'toolUse', data: { ...event, timestamp: Date.now() }, timestamp: Date.now() });
+            this.emit('onToolUse', event);
+            this.flushOutputQueue();
+          },
+          directPrompt: currentPrompt,
+          // Pass image attachments for multimodal handling via stream-json (first attempt only)
+          imageAttachments: retryNumber === 0 ? attachments?.filter(a => a.isImage) : undefined,
+          // Inject historical context on first prompt of a resumed session
+          promptContext: (retryNumber === 0 && this.isResumedSession && this.isFirstPrompt)
+            ? { accumulatedKnowledge: this.buildHistoricalContext(), filesModified: [] }
+            : undefined,
+          onToolTimeout: (checkpoint: ExecutionCheckpoint) => {
+            checkpointRef.value = checkpoint;
+          },
+        });
 
-      this.currentRunner = null;
+        this.currentRunner = runner;
+        result = await runner.run();
+        this.currentRunner = null;
+
+        // If no tool timeout occurred, or we've exhausted retries, break
+        if (!checkpointRef.value || retryNumber >= maxRetries) {
+          break;
+        }
+
+        // Tool timed out — extract checkpoint (TS needs this in a separate const after the guard)
+        const cp: ExecutionCheckpoint = checkpointRef.value;
+        retryNumber++;
+        this.emit('onAutoRetry', {
+          retryNumber,
+          maxRetries,
+          toolName: cp.hungTool.toolName,
+          url: cp.hungTool.url,
+          completedCount: cp.completedTools.length,
+        });
+
+        trackEvent(AnalyticsEvents.IMPROVISE_AUTO_RETRY, {
+          retry_number: retryNumber,
+          hung_tool: cp.hungTool.toolName,
+          hung_url: cp.hungTool.url?.slice(0, 200),
+          completed_tools: cp.completedTools.length,
+          elapsed_ms: cp.elapsedMs,
+        });
+
+        currentPrompt = this.buildRetryPrompt(cp, promptWithAttachments);
+
+        this.queueOutput(
+          `\n[[MSTRO_AUTO_RETRY]] Auto-retry ${retryNumber}/${maxRetries}: Continuing with ${cp.completedTools.length} successful results, skipping failed ${cp.hungTool.toolName}.\n`
+        );
+        this.flushOutputQueue();
+      }
 
       // Capture Claude session ID for future prompts in this tab
       // This is critical for tab isolation - each tab maintains its own Claude session
       if (result.claudeSessionId) {
         this.claudeSessionId = result.claudeSessionId;
         this.history.claudeSessionId = result.claudeSessionId;
+      }
+
+      // Surface execution failure to user — without this, failures show as
+      // "Command completed" with no output (the error only existed in errorOutput)
+      if (!result.completed && result.error) {
+        this.queueOutput(`\n[[MSTRO_ERROR:EXECUTION_FAILED]] ${result.error}\n`);
+        this.flushOutputQueue();
       }
 
       // Mark that we've executed at least one prompt
@@ -449,6 +502,73 @@ export class ImprovisationSessionManager extends EventEmitter {
     contextParts.push('');
 
     return contextParts.join('\n');
+  }
+
+  /**
+   * Build a retry prompt from a tool timeout checkpoint.
+   * Injects completed tool results and instructs Claude to skip the failed resource.
+   */
+  private buildRetryPrompt(checkpoint: ExecutionCheckpoint, originalPrompt: string): string {
+    const parts: string[] = [];
+
+    parts.push('## AUTOMATIC RETRY -- Previous Execution Interrupted');
+    parts.push('');
+    parts.push(
+      `The previous execution was interrupted because ${checkpoint.hungTool.toolName} timed out after ${Math.round(checkpoint.hungTool.timeoutMs / 1000)}s${checkpoint.hungTool.url ? ` while fetching: ${checkpoint.hungTool.url}` : ''}.`
+    );
+    parts.push('');
+    parts.push('This URL/resource is unreachable. DO NOT retry the same URL or query.');
+    parts.push('');
+
+    if (checkpoint.completedTools.length > 0) {
+      parts.push('### Results already obtained:');
+      for (const tool of checkpoint.completedTools) {
+        const inputSummary = this.summarizeToolInput(tool.input);
+        const resultPreview = tool.result.length > 500
+          ? `${tool.result.slice(0, 500)}...`
+          : tool.result;
+        parts.push(`- **${tool.toolName}**(${inputSummary}): ${resultPreview}`);
+      }
+      parts.push('');
+    }
+
+    if (checkpoint.inProgressTools && checkpoint.inProgressTools.length > 0) {
+      parts.push('### Tools that were still running (lost when process was killed):');
+      for (const tool of checkpoint.inProgressTools) {
+        const inputSummary = this.summarizeToolInput(tool.input);
+        parts.push(`- **${tool.toolName}**(${inputSummary}) — was in progress, may need re-running`);
+      }
+      parts.push('');
+    }
+
+    if (checkpoint.assistantText) {
+      parts.push('### Your response before interruption:');
+      const preview = checkpoint.assistantText.length > 2000
+        ? `${checkpoint.assistantText.slice(0, 2000)}...`
+        : checkpoint.assistantText;
+      parts.push(preview);
+      parts.push('');
+    }
+
+    parts.push('### Original task (continue from where you left off):');
+    parts.push(originalPrompt);
+    parts.push('');
+    parts.push('INSTRUCTIONS:');
+    parts.push('1. Use the results above -- do not re-fetch content you already have');
+    parts.push('2. Find ALTERNATIVE sources for the content that timed out (different URL, different approach)');
+    parts.push('3. Re-run any in-progress tools that were lost (listed above) if their results are needed');
+    parts.push('4. If no alternative exists, proceed with the results you have and note what was unavailable');
+
+    return parts.join('\n');
+  }
+
+  /** Summarize a tool input for display in retry prompts */
+  private summarizeToolInput(input: Record<string, unknown>): string {
+    if (input.url) return String(input.url).slice(0, 100);
+    if (input.query) return String(input.query).slice(0, 100);
+    if (input.command) return String(input.command).slice(0, 100);
+    if (input.prompt) return String(input.prompt).slice(0, 100);
+    return JSON.stringify(input).slice(0, 100);
   }
 
   /**

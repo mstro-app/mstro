@@ -1,6 +1,6 @@
 {
   "name": "mstro-app",
-  "version": "0.1.57",
+  "version": "0.1.58",
   "description": "No-code AI workspace - run Claude Code workflows from your laptop, cloud VM, or any machine",
   "type": "module",
   "license": "MIT",

@@ -189,7 +189,8 @@ export class ToolWatchdog {
                 if (this.verbose) {
                   console.log(`[WATCHDOG] ${toolName} (${toolId}) still running after extension, killing`);
                 }
-                this.activeWatches.delete(toolId);
+                // Don't delete the watch — buildCheckpoint() needs it.
+                // handleToolTimeout() calls clearAll() after building the checkpoint.
                 onTimeout();
               }
             }, verdict.extensionMs);
@@ -211,7 +212,8 @@ export class ToolWatchdog {
         console.log(`[WATCHDOG] ${toolName} (${toolId}) timed out after ${Math.round(elapsedMs / 1000)}s, killing`);
       }
 
-      this.activeWatches.delete(toolId);
+      // Don't delete the watch here — buildCheckpoint() needs it.
+      // handleToolTimeout() calls clearAll() after building the checkpoint.
       onTimeout();
     }, timeoutMs);
 

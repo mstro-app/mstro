@@ -275,7 +275,16 @@ export class ImprovisationSessionManager extends EventEmitter {
       // Object wrapper so TS doesn't narrow the callback-assigned value to `never`
       const checkpointRef: { value: ExecutionCheckpoint | null } = { value: null };
       let result: Awaited<ReturnType<HeadlessRunner['run']>>;
-      const imageAttachments = attachments?.filter(a => a.isImage);
+      const MAX_IMAGE_ATTACHMENTS = 20;
+      const allImages = attachments?.filter(a => a.isImage);
+      let imageAttachments = allImages;
+      if (allImages && allImages.length > MAX_IMAGE_ATTACHMENTS) {
+        imageAttachments = allImages.slice(-MAX_IMAGE_ATTACHMENTS);
+        this.queueOutput(
+          `\n[[MSTRO_ERROR:TOO_MANY_IMAGES]] ${allImages.length} images attached, limit is ${MAX_IMAGE_ATTACHMENTS}. Using the ${MAX_IMAGE_ATTACHMENTS} most recent.\n`
+        );
+        this.flushOutputQueue();
+      }
 
       // eslint-disable-next-line no-constant-condition
       while (true) {
@@ -550,8 +559,8 @@ export class ImprovisationSessionManager extends EventEmitter {
       parts.push('### Results already obtained:');
       for (const tool of checkpoint.completedTools) {
         const inputSummary = this.summarizeToolInput(tool.input);
-        const resultPreview = tool.result.length > 500
-          ? `${tool.result.slice(0, 500)}...`
+        const resultPreview = tool.result.length > 2000
+          ? `${tool.result.slice(0, 2000)}...`
           : tool.result;
         parts.push(`- **${tool.toolName}**(${inputSummary}): ${resultPreview}`);
       }
@@ -569,8 +578,8 @@ export class ImprovisationSessionManager extends EventEmitter {
 
     if (checkpoint.assistantText) {
       parts.push('### Your response before interruption:');
-      const preview = checkpoint.assistantText.length > 2000
-        ? `${checkpoint.assistantText.slice(0, 2000)}...`
+      const preview = checkpoint.assistantText.length > 8000
+        ? `${checkpoint.assistantText.slice(0, 8000)}...\n(truncated — full response was ${checkpoint.assistantText.length} chars)`
         : checkpoint.assistantText;
       parts.push(preview);
       parts.push('');
@@ -584,6 +593,23 @@ export class ImprovisationSessionManager extends EventEmitter {
     parts.push('2. Find ALTERNATIVE sources for the content that timed out (different URL, different approach)');
     parts.push('3. Re-run any in-progress tools that were lost (listed above) if their results are needed');
     parts.push('4. If no alternative exists, proceed with the results you have and note what was unavailable');
+
+    return parts.join('\n');
+  }
+
+  /**
+   * Build a short retry prompt for --resume sessions.
+   * The session already has full conversation context, so we only need to
+   * explain what timed out and instruct Claude to continue.
+   */
+  private buildResumeRetryPrompt(checkpoint: ExecutionCheckpoint): string {
+    const parts: string[] = [];
+
+    parts.push(
+      `Your previous ${checkpoint.hungTool.toolName} call timed out after ${Math.round(checkpoint.hungTool.timeoutMs / 1000)}s${checkpoint.hungTool.url ? ` fetching: ${checkpoint.hungTool.url}` : ''}.`
+    );
+    parts.push('This URL/resource is unreachable. DO NOT retry the same URL or query.');
+    parts.push('Continue your task — find an alternative source or proceed with the results you already have.');
 
     return parts.join('\n');
   }

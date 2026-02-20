@@ -56,7 +56,6 @@ server/
       types.ts                      # WebSocket types
     terminal/
       pty-manager.ts                # PTY session management
-      tmux-manager.ts               # Tmux integration
   cli/
     improvisation-session-manager.ts # Live improv session management
     headless/                       # Headless runner internals

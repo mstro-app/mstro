@@ -12,15 +12,12 @@
  * - Scrollback buffer is maintained for replay on reconnect
  * - Sessions can be reattached without losing running processes
  *
- * Also supports tmux-backed persistence for sessions that survive server restarts.
- *
  * NOTE: node-pty is an optional dependency requiring native compilation.
  * Terminal features gracefully degrade when node-pty is not available.
  */
 
 import { EventEmitter } from 'node:events';
 import { homedir, platform } from 'node:os';
-import { getTmuxManager, isTmuxAvailable, type TmuxSession } from './tmux-manager.js';
 
 // Try to load node-pty (optional native dependency)
 let pty: typeof import('node-pty') | null = null;
@@ -74,11 +71,6 @@ export function getPtyInstallInstructions(): string {
   return instructions;
 }
 
-// Maximum lines to store in scrollback buffer per terminal
-const MAX_SCROLLBACK_LINES = 5000;
-// Maximum characters per line to prevent memory bloat
-const MAX_LINE_LENGTH = 2000;
-
 // Import type separately for type-checking (doesn't require the module to load)
 type IPty = import('node-pty').IPty;
 
@@ -87,8 +79,6 @@ export interface PTYSession {
   pty: IPty;
   shell: string;
   cwd: string;
-  // Scrollback buffer for replay on reconnect
-  scrollback: string[];
   // Timestamp when session was created
   createdAt: number;
   // Last activity timestamp
@@ -157,41 +147,6 @@ export class PTYManager extends EventEmitter {
   }
 
   /**
-   * Get scrollback buffer for replay on reconnect
-   * Returns the stored output history
-   */
-  getScrollback(terminalId: string): string[] {
-    const session = this.terminals.get(terminalId);
-    if (!session) return [];
-    return [...session.scrollback];
-  }
-
-  /**
-   * Add data to scrollback buffer
-   * Maintains a rolling buffer of recent terminal output
-   */
-  private addToScrollback(session: PTYSession, data: string): void {
-    // Split data into lines
-    const lines = data.split(/\r?\n/);
-
-    for (const line of lines) {
-      // Truncate very long lines to prevent memory issues
-      const truncatedLine = line.length > MAX_LINE_LENGTH
-        ? `${line.slice(0, MAX_LINE_LENGTH)}...`
-        : line;
-
-      session.scrollback.push(truncatedLine);
-    }
-
-    // Trim buffer if it exceeds max size
-    if (session.scrollback.length > MAX_SCROLLBACK_LINES) {
-      session.scrollback = session.scrollback.slice(-MAX_SCROLLBACK_LINES);
-    }
-
-    session.lastActivityAt = Date.now();
-  }
-
-  /**
    * Check if PTY functionality is available
    */
   isPtyAvailable(): boolean {
@@ -257,13 +212,11 @@ export class PTYManager extends EventEmitter {
         },
       });
 
-      // Store the session with scrollback buffer
       const session: PTYSession = {
         id: terminalId,
         pty: ptyProcess,
         shell: getShellName(shell),
         cwd,
-        scrollback: [],
         createdAt: Date.now(),
         lastActivityAt: Date.now(),
         cols,
@@ -271,9 +224,9 @@ export class PTYManager extends EventEmitter {
       };
       this.terminals.set(terminalId, session);
 
-      // Handle data output - store in scrollback and emit
+      // Handle data output
       ptyProcess.onData((data: string) => {
-        this.addToScrollback(session, data);
+        session.lastActivityAt = Date.now();
         this.emit('output', terminalId, data);
       });
 
@@ -381,76 +334,6 @@ export class PTYManager extends EventEmitter {
     }
   }
 
-  /**
-   * Check if tmux persistence is available
-   */
-  isTmuxAvailable(): boolean {
-    return isTmuxAvailable();
-  }
-
-  /**
-   * Get list of persistent tmux sessions that can be restored
-   * These are sessions that survived a server restart
-   */
-  getPersistentSessions(): TmuxSession[] {
-    const tmux = getTmuxManager();
-    return tmux.getActiveSessions();
-  }
-
-  /**
-   * Create a persistent (tmux-backed) terminal session
-   * These sessions survive server restarts
-   */
-  createPersistent(
-    terminalId: string,
-    workingDir: string,
-    cols: number = 80,
-    rows: number = 24,
-    requestedShell?: string
-  ): { shell: string; cwd: string; isReconnect: boolean; persistent: true } {
-    const tmux = getTmuxManager();
-
-    if (!tmux.isAvailable()) {
-      throw new Error('tmux is not available for persistent sessions');
-    }
-
-    const result = tmux.create(terminalId, workingDir, cols, rows, requestedShell);
-    return { ...result, persistent: true };
-  }
-
-  /**
-   * Attach to a persistent (tmux) session
-   * Returns handlers for write, resize, and detach
-   */
-  attachPersistent(
-    terminalId: string,
-    onOutput: (data: string) => void,
-    onExit: (code: number) => void
-  ): { write: (data: string) => void; resize: (cols: number, rows: number) => void; detach: () => void } | null {
-    const tmux = getTmuxManager();
-
-    if (!tmux.exists(terminalId)) {
-      return null;
-    }
-
-    return tmux.attach(terminalId, onOutput, onExit);
-  }
-
-  /**
-   * Get scrollback from a persistent (tmux) session
-   */
-  getPersistentScrollback(terminalId: string): string[] {
-    const tmux = getTmuxManager();
-    return tmux.getScrollback(terminalId);
-  }
-
-  /**
-   * Close a persistent (tmux) session
-   */
-  closePersistent(terminalId: string): boolean {
-    const tmux = getTmuxManager();
-    return tmux.close(terminalId);
-  }
 }
 
 // Singleton instance

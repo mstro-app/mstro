@@ -275,14 +275,35 @@ export class ImprovisationSessionManager extends EventEmitter {
       // Object wrapper so TS doesn't narrow the callback-assigned value to `never`
       const checkpointRef: { value: ExecutionCheckpoint | null } = { value: null };
       let result: Awaited<ReturnType<HeadlessRunner['run']>>;
+      const imageAttachments = attachments?.filter(a => a.isImage);
 
       // eslint-disable-next-line no-constant-condition
       while (true) {
         checkpointRef.value = null;
 
-        // PERSISTENT SESSION: Use --resume <sessionId> to maintain conversation history per tab
-        // CRITICAL FIX: Using claudeSessionId ensures each tab resumes its own Claude session
-        // On retry: start fresh session (no --resume since old session has incomplete tool call)
+        // Determine session resume strategy:
+        // - First attempt: resume the tab's existing Claude session
+        // - Retry when hung tool was the ONLY pending tool (no siblings lost):
+        //   try --resume since the session may be in a valid state
+        // - Retry with in-progress siblings: fresh session (incomplete tool calls break --resume)
+        let useResume = false;
+        let resumeSessionId: string | undefined;
+        if (retryNumber === 0) {
+          useResume = !this.isFirstPrompt;
+          resumeSessionId = this.claudeSessionId;
+        } else if (checkpointRef.value === null) {
+          // Shouldn't happen (we only retry when checkpoint exists), but be safe
+          useResume = false;
+        } else {
+          const cp = checkpointRef.value as ExecutionCheckpoint;
+          // If no sibling tools were in progress, the session might be resumable
+          // (the hung tool timed out on our side but Claude may have received an error result)
+          if (cp.inProgressTools.length === 0 && cp.claudeSessionId) {
+            useResume = true;
+            resumeSessionId = cp.claudeSessionId;
+          }
+        }
+
         const runner = new HeadlessRunner({
           workingDir: this.options.workingDir,
           tokenBudgetThreshold: this.options.tokenBudgetThreshold,
@@ -292,9 +313,8 @@ export class ImprovisationSessionManager extends EventEmitter {
           model: this.options.model,
           improvisationMode: true,
           movementNumber: sequenceNumber,
-          // On retry, don't resume the old session (it has an incomplete tool call)
-          continueSession: retryNumber === 0 ? !this.isFirstPrompt : false,
-          claudeSessionId: retryNumber === 0 ? this.claudeSessionId : undefined,
+          continueSession: useResume,
+          claudeSessionId: resumeSessionId,
           outputCallback: (text: string) => {
             this.executionEventLog.push({ type: 'output', data: { text, timestamp: Date.now() }, timestamp: Date.now() });
             this.queueOutput(text);
@@ -311,8 +331,7 @@ export class ImprovisationSessionManager extends EventEmitter {
             this.flushOutputQueue();
           },
           directPrompt: currentPrompt,
-          // Pass image attachments for multimodal handling via stream-json (first attempt only)
-          imageAttachments: retryNumber === 0 ? attachments?.filter(a => a.isImage) : undefined,
+          imageAttachments,
           // Inject historical context on first prompt of a resumed session
           promptContext: (retryNumber === 0 && this.isResumedSession && this.isFirstPrompt)
             ? { accumulatedKnowledge: this.buildHistoricalContext(), filesModified: [] }
@@ -334,6 +353,8 @@ export class ImprovisationSessionManager extends EventEmitter {
         // Tool timed out — extract checkpoint (TS needs this in a separate const after the guard)
         const cp: ExecutionCheckpoint = checkpointRef.value;
         retryNumber++;
+
+        const canResumeSession = cp.inProgressTools.length === 0 && !!cp.claudeSessionId;
         this.emit('onAutoRetry', {
           retryNumber,
           maxRetries,
@@ -348,12 +369,17 @@ export class ImprovisationSessionManager extends EventEmitter {
           hung_url: cp.hungTool.url?.slice(0, 200),
           completed_tools: cp.completedTools.length,
           elapsed_ms: cp.elapsedMs,
+          resume_attempted: canResumeSession,
         });
 
-        currentPrompt = this.buildRetryPrompt(cp, promptWithAttachments);
+        // When resuming, use a shorter prompt (session already has context).
+        // When starting fresh, inject full checkpoint data.
+        currentPrompt = canResumeSession
+          ? this.buildResumeRetryPrompt(cp)
+          : this.buildRetryPrompt(cp, promptWithAttachments);
 
         this.queueOutput(
-          `\n[[MSTRO_AUTO_RETRY]] Auto-retry ${retryNumber}/${maxRetries}: Continuing with ${cp.completedTools.length} successful results, skipping failed ${cp.hungTool.toolName}.\n`
+          `\n[[MSTRO_AUTO_RETRY]] Auto-retry ${retryNumber}/${maxRetries}: ${canResumeSession ? 'Resuming session' : 'Continuing'} with ${cp.completedTools.length} successful results, skipping failed ${cp.hungTool.toolName}.\n`
         );
         this.flushOutputQueue();
       }

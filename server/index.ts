@@ -429,8 +429,6 @@ async function startServer() {
     await Promise.all([shutdownAnalytics(), flushSentry()])
     platformConnection.disconnect()
     instanceRegistry.unregister()
-    // Close all non-persistent terminal sessions (PTY processes)
-    // Note: Persistent (tmux) sessions are intentionally left running
     getPTYManager().closeAll()
     wss.close()
     console.log('\n\n👋 Shutting down gracefully...\n')
@@ -442,8 +440,6 @@ async function startServer() {
     await Promise.all([shutdownAnalytics(), flushSentry()])
     platformConnection.disconnect()
     instanceRegistry.unregister()
-    // Close all non-persistent terminal sessions (PTY processes)
-    // Note: Persistent (tmux) sessions are intentionally left running
     getPTYManager().closeAll()
     wss.close()
     console.log('\n\n👋 Shutting down gracefully...\n')

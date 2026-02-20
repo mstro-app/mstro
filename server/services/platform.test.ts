@@ -31,10 +31,6 @@ const mockClientId = {
   getClientId: vi.fn(),
 }
 
-const mockTmux = {
-  isTmuxAvailable: vi.fn(),
-}
-
 // Mock fetch globally
 global.fetch = vi.fn()
 
@@ -115,7 +111,6 @@ vi.mock('fs', () => mockFs)
 vi.mock('os', () => mockOs)
 vi.mock('path', () => mockPath)
 vi.mock('./client-id.js', () => mockClientId)
-vi.mock('./terminal/tmux-manager.js', () => mockTmux)
 
 // Mock undici WebSocket for Node 18-20 compatibility
 vi.mock('undici', () => ({
@@ -150,8 +145,6 @@ describe('Platform Connection Service', () => {
     mockOs.type.mockReturnValue('Linux')
     mockOs.arch.mockReturnValue('x64')
     mockClientId.getClientId.mockReturnValue('test-client-id-123')
-    mockTmux.isTmuxAvailable.mockReturnValue(true)
-
     // Mock process.version
     Object.defineProperty(process, 'version', {
       value: 'v22.0.0',
@@ -410,14 +403,11 @@ describe('Platform Connection Service', () => {
           })
         )
 
-        mockTmux.isTmuxAvailable.mockReturnValue(true)
-
         const connection = new PlatformConnection('/test/dir')
         connection.connect()
 
         const wsUrl = WebSocketConstructor.mock.calls[0][0]
         expect(wsUrl).toContain('capabilities=')
-        expect(wsUrl).toContain('tmux')
       })
 
       it('should use custom platform URL when provided', () => {

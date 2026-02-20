@@ -20,7 +20,6 @@ import { basename, join } from 'node:path'
 import { AnalyticsEvents, trackEvent } from './analytics.js'
 import { getClientId } from './client-id.js'
 import { captureException } from './sentry.js'
-import { isTmuxAvailable } from './terminal/tmux-manager.js'
 
 const MSTRO_DIR = join(homedir(), '.mstro')
 const CREDENTIALS_FILE = join(MSTRO_DIR, 'credentials.json')
@@ -242,9 +241,6 @@ export class PlatformConnection {
       return
     }
 
-    // Check for tmux availability (for persistent terminals)
-    const hasTmux = isTmuxAvailable()
-
     // Build URL params WITHOUT the auth token — token is sent post-connection
     // to avoid leaking it in proxy logs, browser history, and server access logs
     const params = new URLSearchParams({
@@ -256,7 +252,7 @@ export class PlatformConnection {
       nodeVersion,
       osType,
       cpuArch,
-      capabilities: JSON.stringify({ tmux: hasTmux })
+      capabilities: JSON.stringify({})
     })
 
     const wsUrl = `${this.platformUrl.replace(/^http/, 'ws')}/ws/client?${params}`

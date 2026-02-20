@@ -44,8 +44,6 @@ export interface WebSocketMessage {
     | 'terminalInit'
     | 'terminalReconnect'
     | 'terminalList'
-    | 'terminalInitPersistent'
-    | 'terminalListPersistent'
     | 'terminalInput'
     | 'terminalResize'
     | 'terminalClose'
@@ -67,6 +65,8 @@ export interface WebSocketMessage {
     | 'gitLog'
     | 'gitDiscoverRepos'
     | 'gitSetDirectory'
+    | 'gitGetRemoteInfo'
+    | 'gitCreatePR'
     // Session sync message types
     | 'getActiveTabs'
     | 'createTab'
@@ -111,9 +111,7 @@ export interface WebSocketResponse {
     | 'terminalReady'
     | 'terminalExit'
     | 'terminalError'
-    | 'terminalScrollback'
     | 'terminalList'
-    | 'terminalListPersistent'
     // File explorer response types
     | 'directoryListing'
     | 'fileWritten'
@@ -137,6 +135,8 @@ export interface WebSocketResponse {
     | 'gitError'
     | 'gitReposDiscovered'
     | 'gitDirectorySet'
+    | 'gitRemoteInfo'
+    | 'gitPRCreated'
     // Session sync response types
     | 'activeTabs'
     | 'tabCreated'
@@ -315,6 +315,8 @@ export interface GitStatusResponse {
   ahead: number;
   /** Number of commits behind remote */
   behind: number;
+  /** Whether the branch has an upstream tracking branch */
+  hasUpstream: boolean;
 }
 
 /**

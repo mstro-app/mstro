@@ -210,8 +210,6 @@ export class WebSocketImproviseHandler {
       case 'terminalInit':
       case 'terminalReconnect':
       case 'terminalList':
-      case 'terminalInitPersistent':
-      case 'terminalListPersistent':
       case 'terminalInput':
       case 'terminalResize':
       case 'terminalClose':
@@ -233,6 +231,8 @@ export class WebSocketImproviseHandler {
       case 'gitLog':
       case 'gitDiscoverRepos':
       case 'gitSetDirectory':
+      case 'gitGetRemoteInfo':
+      case 'gitCreatePR':
         return this.handleGitMessage(ws, msg, tabId, workingDir);
       // Session sync messages
       case 'getActiveTabs':
@@ -381,12 +381,6 @@ export class WebSocketImproviseHandler {
         break;
       case 'terminalList':
         this.handleTerminalList(ws);
-        break;
-      case 'terminalInitPersistent':
-        this.handleTerminalInitPersistent(ws, termId, workingDir, msg.data?.shell, msg.data?.cols, msg.data?.rows);
-        break;
-      case 'terminalListPersistent':
-        this.handleTerminalListPersistent(ws);
         break;
       case 'terminalInput':
         this.handleTerminalInput(ws, termId, msg.data?.input);
@@ -1466,6 +1460,8 @@ Respond with ONLY the summary text, nothing else.`;
       gitLog: () => this.handleGitLog(ws, msg, tabId, gitDir),
       gitDiscoverRepos: () => this.handleGitDiscoverRepos(ws, tabId, workingDir),
       gitSetDirectory: () => this.handleGitSetDirectory(ws, msg, tabId, workingDir),
+      gitGetRemoteInfo: () => this.handleGitGetRemoteInfo(ws, tabId, gitDir),
+      gitCreatePR: () => this.handleGitCreatePR(ws, msg, tabId, gitDir),
     };
     handlers[msg.type]?.();
   }
@@ -1636,14 +1632,22 @@ Respond with ONLY the summary text, nothing else.`;
       const branchResult = await this.executeGitCommand(['rev-parse', '--abbrev-ref', 'HEAD'], workingDir);
       const branch = branchResult.stdout.trim() || 'HEAD';
 
-      // Get ahead/behind counts
+      // Get ahead/behind counts and upstream tracking info
       let ahead = 0;
       let behind = 0;
+      let hasUpstream = false;
       const trackingResult = await this.executeGitCommand(['rev-list', '--left-right', '--count', `${branch}...@{u}`], workingDir);
       if (trackingResult.exitCode === 0) {
+        hasUpstream = true;
         const parts = trackingResult.stdout.trim().split(/\s+/);
         ahead = parseInt(parts[0], 10) || 0;
         behind = parseInt(parts[1], 10) || 0;
+      } else {
+        // No upstream - count local commits as ahead
+        const localResult = await this.executeGitCommand(['rev-list', '--count', 'HEAD'], workingDir);
+        if (localResult.exitCode === 0) {
+          ahead = parseInt(localResult.stdout.trim(), 10) || 0;
+        }
       }
 
       const { staged, unstaged, untracked } = this.parseGitStatus(statusResult.stdout);
@@ -1656,6 +1660,7 @@ Respond with ONLY the summary text, nothing else.`;
         untracked,
         ahead,
         behind,
+        hasUpstream,
       };
 
       this.send(ws, { type: 'gitStatus', tabId, data: response });
@@ -1902,7 +1907,7 @@ Respond with ONLY the commit message, nothing else.`;
     for (const pattern of patterns) {
       const match = output.match(pattern);
       if (match?.[1]) {
-        return match[1].trim();
+        return this.stripCoauthorLines(match[1].trim());
       }
     }
 
@@ -1911,7 +1916,7 @@ Respond with ONLY the commit message, nothing else.`;
 
     // If only one paragraph, return it as-is
     if (paragraphs.length <= 1) {
-      return output.trim();
+      return this.stripCoauthorLines(output.trim());
     }
 
     const firstParagraph = paragraphs[0].trim();
@@ -1938,7 +1943,7 @@ Respond with ONLY the commit message, nothing else.`;
       // Validate the extracted message has a reasonable first line
       const extractedFirstLine = commitMessage.split('\n')[0].trim();
       if (extractedFirstLine.length > 0 && extractedFirstLine.length <= 100) {
-        return commitMessage;
+        return this.stripCoauthorLines(commitMessage);
       }
     }
 
@@ -1953,12 +1958,37 @@ Respond with ONLY the commit message, nothing else.`;
           /^[A-Z][a-z]/.test(secondFirstLine) &&
           !secondFirstLine.endsWith('.')) {
         // Return from second paragraph onwards
-        return paragraphs.slice(1).join('\n\n').trim();
+        return this.stripCoauthorLines(paragraphs.slice(1).join('\n\n').trim());
       }
     }
 
     // Fall back to original output if we can't identify a better message
-    return output.trim();
+    return this.stripCoauthorLines(output.trim());
+  }
+
+  /**
+   * Strip injected coauthor/attribution lines from a commit message.
+   * The Claude Code CLI appends "Co-Authored-By" lines to LLM output.
+   * We detect and remove them by matching known marker strings.
+   */
+  private stripCoauthorLines(message: string): string {
+    const lines = message.split('\n');
+    const markers = ['co-authored', 'authored-by', 'haiku', 'noreply@anthropic.com'];
+    const result: string[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      const lower = lines[i].toLowerCase();
+      if (markers.some(m => lower.includes(m))) {
+        // Also remove a blank line immediately before this one
+        if (result.length > 0 && result[result.length - 1].trim() === '') {
+          result.pop();
+        }
+        continue;
+      }
+      result.push(lines[i]);
+    }
+    // Don't return empty - keep at least the first line of the original
+    if (result.length === 0) return lines[0]?.trim() || message;
+    return result.join('\n').trimEnd();
   }
 
   /**
@@ -1966,7 +1996,15 @@ Respond with ONLY the commit message, nothing else.`;
    */
   private async handleGitPush(ws: WSContext, tabId: string, workingDir: string): Promise<void> {
     try {
-      const result = await this.executeGitCommand(['push'], workingDir);
+      // Check if branch has an upstream, if not use --set-upstream
+      const branchResult = await this.executeGitCommand(['rev-parse', '--abbrev-ref', 'HEAD'], workingDir);
+      const branch = branchResult.stdout.trim();
+
+      const upstreamCheck = await this.executeGitCommand(['rev-parse', '--abbrev-ref', `${branch}@{u}`], workingDir);
+      const hasUpstream = upstreamCheck.exitCode === 0;
+
+      const pushArgs = hasUpstream ? ['push'] : ['push', '-u', 'origin', branch];
+      const result = await this.executeGitCommand(pushArgs, workingDir);
       if (result.exitCode !== 0) {
         this.send(ws, { type: 'gitError', tabId, data: { error: result.stderr || result.stdout || 'Failed to push' } });
         return;
@@ -2117,6 +2155,236 @@ Respond with ONLY the commit message, nothing else.`;
     }
   }
 
+  /**
+   * Get remote info for PR creation (remote URL, provider, default branch)
+   */
+  private async handleGitGetRemoteInfo(ws: WSContext, tabId: string, workingDir: string): Promise<void> {
+    try {
+      const remoteResult = await this.executeGitCommand(['remote', 'get-url', 'origin'], workingDir);
+      if (remoteResult.exitCode !== 0) {
+        this.send(ws, { type: 'gitRemoteInfo', tabId, data: { hasRemote: false } });
+        return;
+      }
+
+      const remoteUrl = remoteResult.stdout.trim();
+
+      // Detect provider from remote URL
+      let provider: 'github' | 'gitlab' | 'unknown' = 'unknown';
+      if (remoteUrl.includes('github.com')) provider = 'github';
+      else if (remoteUrl.includes('gitlab.com') || remoteUrl.includes('gitlab')) provider = 'gitlab';
+
+      // Get default branch (usually main or master)
+      const defaultBranchResult = await this.executeGitCommand(
+        ['symbolic-ref', 'refs/remotes/origin/HEAD', '--short'],
+        workingDir
+      );
+      let defaultBranch = 'main';
+      if (defaultBranchResult.exitCode === 0) {
+        defaultBranch = defaultBranchResult.stdout.trim().replace('origin/', '');
+      }
+
+      // Get current branch
+      const branchResult = await this.executeGitCommand(['rev-parse', '--abbrev-ref', 'HEAD'], workingDir);
+      const currentBranch = branchResult.exitCode === 0 ? branchResult.stdout.trim() : '';
+
+      // Check for CLI tools and auth status
+      let hasGhCli = false;
+      let ghCliAuthenticated = false;
+      let ghCliBinary: 'gh' | 'glab' | undefined;
+
+      const cliBin = provider === 'github' ? 'gh' : provider === 'gitlab' ? 'glab' : null;
+
+      if (cliBin) {
+        // Check if CLI is installed
+        const installed = await this.spawnCheck(cliBin, ['--version']);
+        if (installed) {
+          hasGhCli = true;
+          ghCliBinary = cliBin;
+          // Check if CLI is authenticated
+          ghCliAuthenticated = await this.spawnCheck(cliBin, ['auth', 'status']);
+        }
+      }
+
+      this.send(ws, {
+        type: 'gitRemoteInfo',
+        tabId,
+        data: {
+          hasRemote: true,
+          remoteUrl,
+          provider,
+          defaultBranch,
+          currentBranch,
+          hasGhCli,
+          ghCliAuthenticated,
+          ghCliBinary,
+        },
+      });
+    } catch (error: any) {
+      this.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+    }
+  }
+
+  /** Check if a binary runs successfully (exit code 0) */
+  private spawnCheck(bin: string, args: string[]): Promise<boolean> {
+    return new Promise((resolve) => {
+      const proc = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      proc.on('close', (code) => resolve(code === 0));
+      proc.on('error', () => resolve(false));
+    });
+  }
+
+  /**
+   * Create a pull/merge request using gh CLI (GitHub) or open browser URL (fallback)
+   */
+  private async handleGitCreatePR(ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): Promise<void> {
+    const { title, body, baseBranch, draft } = msg.data ?? {};
+
+    if (!title) {
+      this.send(ws, { type: 'gitError', tabId, data: { error: 'PR title is required' } });
+      return;
+    }
+
+    try {
+      const branchResult = await this.executeGitCommand(['rev-parse', '--abbrev-ref', 'HEAD'], workingDir);
+      if (branchResult.exitCode !== 0) {
+        this.send(ws, { type: 'gitError', tabId, data: { error: 'Failed to detect current branch' } });
+        return;
+      }
+      const headBranch = branchResult.stdout.trim();
+
+      const remoteResult = await this.executeGitCommand(['remote', 'get-url', 'origin'], workingDir);
+      if (remoteResult.exitCode !== 0) {
+        this.send(ws, { type: 'gitError', tabId, data: { error: 'No remote origin configured' } });
+        return;
+      }
+      const remoteUrl = remoteResult.stdout.trim();
+      const isGitHub = remoteUrl.includes('github.com');
+      const isGitLab = remoteUrl.includes('gitlab.com') || remoteUrl.includes('gitlab');
+
+      // Try CLI creation (gh for GitHub, glab for GitLab)
+      const cliResult = await this.tryCliPRCreate(
+        isGitHub ? 'gh' : isGitLab ? 'glab' : null,
+        { title, body, baseBranch, draft, headBranch },
+        workingDir,
+      );
+
+      if (cliResult.created) {
+        this.send(ws, { type: 'gitPRCreated', tabId, data: { url: cliResult.url!, method: isGitHub ? 'gh' : 'glab' } });
+        return;
+      }
+
+      // Surface CLI errors instead of silently falling through
+      if (cliResult.error) {
+        this.send(ws, { type: 'gitError', tabId, data: { error: cliResult.error } });
+        return;
+      }
+
+      // Fallback: construct browser URL (CLI not installed or unknown provider)
+      const prUrl = this.buildBrowserPRUrl(remoteUrl, headBranch, baseBranch, title, body, isGitHub, isGitLab);
+
+      if (prUrl) {
+        this.send(ws, { type: 'gitPRCreated', tabId, data: { url: prUrl, method: 'browser' } });
+      } else {
+        this.send(ws, { type: 'gitError', tabId, data: { error: 'Could not determine remote URL format for PR creation' } });
+      }
+    } catch (error: any) {
+      this.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+    }
+  }
+
+  /** Attempt to create a PR/MR via CLI. Returns { created, url, error } */
+  private async tryCliPRCreate(
+    cliBin: 'gh' | 'glab' | null,
+    opts: { title: string; body?: string; baseBranch?: string; draft?: boolean; headBranch: string },
+    workingDir: string,
+  ): Promise<{ created: boolean; url?: string; error?: string }> {
+    if (!cliBin) return { created: false }; // No CLI for this provider
+
+    // Check if CLI is installed
+    const installed = await this.spawnCheck(cliBin, ['--version']);
+    if (!installed) return { created: false }; // Not installed, fall through to browser
+
+    // Build CLI args
+    const args = cliBin === 'gh'
+      ? ['pr', 'create', '--title', opts.title]
+      : ['mr', 'create', '--title', opts.title, '--yes']; // glab mr create
+
+    if (opts.body) args.push('--body', opts.body);
+    if (opts.baseBranch) {
+      args.push(cliBin === 'gh' ? '--base' : '--target-branch', opts.baseBranch);
+    }
+    if (opts.draft) args.push('--draft');
+
+    const result = await this.spawnWithOutput(cliBin, args, workingDir);
+
+    if (result.exitCode === 0) {
+      const urlMatch = result.stdout.match(/https?:\/\/\S+/);
+      return { created: true, url: urlMatch ? urlMatch[0] : result.stdout.trim() };
+    }
+
+    return { created: false, error: this.classifyCliPRError(cliBin, result, opts.headBranch) };
+  }
+
+  /** Classify a CLI PR creation error into a user-facing message */
+  private classifyCliPRError(
+    cliBin: string,
+    result: { stdout: string; stderr: string },
+    headBranch: string,
+  ): string {
+    const combined = result.stderr + result.stdout;
+    const lower = combined.toLowerCase();
+
+    if (lower.includes('already exists')) {
+      const existingUrl = combined.match(/https?:\/\/\S+/);
+      return existingUrl
+        ? `A pull request already exists for ${headBranch}: ${existingUrl[0]}`
+        : `A pull request already exists for ${headBranch}`;
+    }
+
+    if (lower.includes('auth') || lower.includes('401') || lower.includes('token') || lower.includes('log in')) {
+      return `${cliBin} is not authenticated. Run: ${cliBin} auth login`;
+    }
+
+    if (lower.includes('must first push') || lower.includes('failed to push') || lower.includes('no upstream')) {
+      return `Branch "${headBranch}" has not been pushed to remote. Push first, then create the PR.`;
+    }
+
+    return `${cliBin} failed: ${(result.stderr || result.stdout).trim()}`;
+  }
+
+  /** Spawn a process and capture stdout/stderr */
+  private spawnWithOutput(bin: string, args: string[], cwd: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    return new Promise((resolve) => {
+      const proc = spawn(bin, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+      let stdout = '';
+      let stderr = '';
+      proc.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
+      proc.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
+      proc.on('close', (code) => resolve({ stdout, stderr, exitCode: code ?? 1 }));
+      proc.on('error', (err: Error) => resolve({ stdout: '', stderr: err.message, exitCode: 1 }));
+    });
+  }
+
+  /** Build a browser URL for PR creation (fallback when no CLI) */
+  private buildBrowserPRUrl(
+    remoteUrl: string, headBranch: string, baseBranch: string | undefined,
+    title: string, body: string | undefined, isGitHub: boolean, isGitLab: boolean,
+  ): string {
+    const sshMatch = remoteUrl.match(/[:/]([^/]+)\/([^/.]+)(?:\.git)?$/);
+    if (!sshMatch) return '';
+
+    const [, owner, repo] = sshMatch;
+    const base = baseBranch || 'main';
+
+    if (isGitHub) {
+      return `https://github.com/${owner}/${repo}/compare/${base}...${headBranch}?expand=1&title=${encodeURIComponent(title)}${body ? `&body=${encodeURIComponent(body)}` : ''}`;
+    }
+    if (isGitLab) {
+      return `https://gitlab.com/${owner}/${repo}/-/merge_requests/new?merge_request[source_branch]=${headBranch}&merge_request[target_branch]=${base}&merge_request[title]=${encodeURIComponent(title)}`;
+    }
+    return '';
+  }
+
   // ============================================
   // Terminal handling methods
   // ============================================
@@ -2164,21 +2432,11 @@ Respond with ONLY the commit message, nothing else.`;
         requestedShell
       );
 
-      // If reconnecting, send scrollback buffer to THIS client only
-      if (isReconnect) {
-        const scrollback = ptyManager.getScrollback(terminalId);
-        if (scrollback.length > 0) {
-          this.send(ws, {
-            type: 'terminalScrollback',
-            terminalId,
-            data: { lines: scrollback }
-          });
-        }
-      } else {
+      if (!isReconnect) {
         // New terminal — broadcast to other clients so they can create matching tabs
         this.broadcastToOthers(ws, {
           type: 'terminalCreated',
-          data: { terminalId, shell, cwd, persistent: false }
+          data: { terminalId, shell, cwd }
         });
       }
 
@@ -2227,16 +2485,6 @@ Respond with ONLY the commit message, nothing else.`;
     // Set up broadcast listeners (idempotent — only creates once per terminal)
     this.setupTerminalBroadcastListeners(terminalId);
 
-    // Send scrollback buffer to THIS client only
-    const scrollback = ptyManager.getScrollback(terminalId);
-    if (scrollback.length > 0) {
-      this.send(ws, {
-        type: 'terminalScrollback',
-        terminalId,
-        data: { lines: scrollback }
-      });
-    }
-
     // Send ready message indicating reconnection
     this.send(ws, {
       type: 'terminalReady',
@@ -2282,14 +2530,6 @@ Respond with ONLY the commit message, nothing else.`;
       return;
     }
 
-    // Check if this is a persistent terminal first
-    const persistentHandler = this.persistentHandlers.get(terminalId);
-    if (persistentHandler) {
-      persistentHandler.write(input);
-      return;
-    }
-
-    // Otherwise use regular PTY
     const ptyManager = getPTYManager();
     const success = ptyManager.write(terminalId, input);
 
@@ -2315,14 +2555,6 @@ Respond with ONLY the commit message, nothing else.`;
       return;
     }
 
-    // Check if this is a persistent terminal first
-    const persistentHandler = this.persistentHandlers.get(terminalId);
-    if (persistentHandler) {
-      persistentHandler.resize(cols, rows);
-      return;
-    }
-
-    // Otherwise use regular PTY
     const ptyManager = getPTYManager();
     ptyManager.resize(terminalId, cols, rows);
   }
@@ -2333,26 +2565,16 @@ Respond with ONLY the commit message, nothing else.`;
   private handleTerminalClose(ws: WSContext, terminalId: string): void {
     trackEvent(AnalyticsEvents.TERMINAL_SESSION_CLOSED);
 
-    // Check if this is a persistent terminal first
-    const persistentHandler = this.persistentHandlers.get(terminalId);
-    if (persistentHandler) {
-      persistentHandler.detach();
-      this.persistentHandlers.delete(terminalId);
-      // For persistent terminals, close actually kills the tmux session
-      const ptyManager = getPTYManager();
-      ptyManager.closePersistent(terminalId);
-    } else {
-      // Clean up event listeners
-      const listenerCleanup = this.terminalListenerCleanups.get(terminalId);
-      if (listenerCleanup) {
-        listenerCleanup();
-        this.terminalListenerCleanups.delete(terminalId);
-      }
-
-      // Close regular PTY
-      const ptyManager = getPTYManager();
-      ptyManager.close(terminalId);
+    // Clean up event listeners
+    const listenerCleanup = this.terminalListenerCleanups.get(terminalId);
+    if (listenerCleanup) {
+      listenerCleanup();
+      this.terminalListenerCleanups.delete(terminalId);
     }
+
+    // Close PTY
+    const ptyManager = getPTYManager();
+    ptyManager.close(terminalId);
 
     // Clean up subscribers
     this.terminalSubscribers.delete(terminalId);
@@ -2363,9 +2585,6 @@ Respond with ONLY the commit message, nothing else.`;
       data: { terminalId }
     });
   }
-
-  // Persistent terminal handlers for tmux-backed sessions
-  private persistentHandlers: Map<string, { write: (data: string) => void; resize: (cols: number, rows: number) => void; detach: () => void }> = new Map();
 
   // Track PTY event listener cleanup functions per terminal to prevent duplicate listeners
   private terminalListenerCleanups: Map<string, () => void> = new Map();
@@ -2398,36 +2617,6 @@ Respond with ONLY the commit message, nothing else.`;
     if (cleanup) {
       cleanup();
       this.terminalListenerCleanups.delete(terminalId);
-    }
-  }
-
-  /**
-   * Attach persistent (tmux) terminal handlers for output/exit broadcasting.
-   */
-  private attachPersistentHandlers(terminalId: string, ptyManager: ReturnType<typeof getPTYManager>): void {
-    const handlers = ptyManager.attachPersistent(
-      terminalId,
-      (output: string) => {
-        const subs = this.terminalSubscribers.get(terminalId);
-        if (subs) {
-          for (const sub of subs) {
-            this.send(sub, { type: 'terminalOutput', terminalId, data: { output } });
-          }
-        }
-      },
-      (exitCode: number) => {
-        const subs = this.terminalSubscribers.get(terminalId);
-        if (subs) {
-          for (const sub of subs) {
-            this.send(sub, { type: 'terminalExit', terminalId, data: { exitCode } });
-          }
-        }
-        this.persistentHandlers.delete(terminalId);
-        this.terminalSubscribers.delete(terminalId);
-      }
-    );
-    if (handlers) {
-      this.persistentHandlers.set(terminalId, handlers);
     }
   }
 
@@ -2491,104 +2680,4 @@ Respond with ONLY the commit message, nothing else.`;
     });
   }
 
-  /**
-   * Initialize a persistent (tmux-backed) terminal session
-   * These sessions survive server restarts.
-   * Uses subscriber pattern for multi-client output broadcasting.
-   */
-  private handleTerminalInitPersistent(
-    ws: WSContext,
-    terminalId: string,
-    workingDir: string,
-    requestedShell?: string,
-    cols?: number,
-    rows?: number
-  ): void {
-
-    const ptyManager = getPTYManager();
-
-    // Check if tmux is available
-    if (!ptyManager.isTmuxAvailable()) {
-      this.send(ws, {
-        type: 'terminalError',
-        terminalId,
-        data: { error: 'Persistent terminals require tmux, which is not installed' }
-      });
-      return;
-    }
-
-    // Add this WS as a subscriber for this terminal's output
-    this.addTerminalSubscriber(terminalId, ws);
-
-    try {
-      // Create or reconnect to the persistent session
-      const { shell, cwd, isReconnect } = ptyManager.createPersistent(
-        terminalId,
-        workingDir,
-        cols || 80,
-        rows || 24,
-        requestedShell
-      );
-
-      // Only attach if we don't already have handlers (first subscriber)
-      if (!this.persistentHandlers.has(terminalId)) {
-        this.attachPersistentHandlers(terminalId, ptyManager);
-      }
-
-      // If reconnecting, send scrollback buffer to THIS client only
-      if (isReconnect) {
-        const scrollback = ptyManager.getPersistentScrollback(terminalId);
-        if (scrollback.length > 0) {
-          this.send(ws, {
-            type: 'terminalScrollback',
-            terminalId,
-            data: { lines: scrollback }
-          });
-        }
-      } else {
-        // New terminal — broadcast to other clients so they can create matching tabs
-        this.broadcastToOthers(ws, {
-          type: 'terminalCreated',
-          data: { terminalId, shell, cwd, persistent: true }
-        });
-      }
-
-      // Send ready message to THIS client
-      this.send(ws, {
-        type: 'terminalReady',
-        terminalId,
-        data: { shell, cwd, isReconnect, persistent: true }
-      });
-    } catch (error: any) {
-      console.error(`[WebSocketImproviseHandler] Failed to create persistent terminal:`, error);
-      this.send(ws, {
-        type: 'terminalError',
-        terminalId,
-        data: { error: error.message || 'Failed to create persistent terminal' }
-      });
-      this.removeTerminalSubscriber(terminalId, ws);
-    }
-  }
-
-  /**
-   * List all persistent terminal sessions (including those from previous server runs)
-   */
-  private handleTerminalListPersistent(ws: WSContext): void {
-    const ptyManager = getPTYManager();
-    const sessions = ptyManager.getPersistentSessions();
-
-    this.send(ws, {
-      type: 'terminalListPersistent',
-      data: {
-        available: ptyManager.isTmuxAvailable(),
-        terminals: sessions.map(s => ({
-          id: s.terminalId,
-          shell: s.shell,
-          cwd: s.cwd,
-          createdAt: s.createdAt,
-          lastAttachedAt: s.lastAttachedAt,
-        }))
-      }
-    });
-  }
 }

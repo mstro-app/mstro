@@ -13,7 +13,6 @@
  *   mstro logout              # Sign out
  *   mstro whoami              # Show current user
  *   mstro status              # Show connection status
- *   mstro setup-terminal      # Enable web terminal
  *   mstro -p 4105             # Start on specific port (overrides auto port)
  *   mstro configure-hooks     # Configure Claude Code security hooks
  *   mstro --help              # Show help
@@ -47,7 +46,6 @@ const USER_CWD = process.cwd();
 // First-run detection paths
 const MSTRO_CONFIG_DIR = join(homedir(), '.mstro');
 const MSTRO_FIRST_RUN_FLAG = join(MSTRO_CONFIG_DIR, '.configured');
-const MSTRO_TERMINAL_CHECKED_FLAG = join(MSTRO_CONFIG_DIR, '.terminal-checked');
 const CLAUDE_SETTINGS_FILE = join(homedir(), '.claude', 'settings.json');
 const CLAUDE_HOOKS_DIR = join(homedir(), '.claude', 'hooks');
 const BOUNCER_HOOK_FILE = join(CLAUDE_HOOKS_DIR, 'bouncer.sh');
@@ -205,7 +203,6 @@ function showHelp() {
   log('    mstro whoami                Show current user and device info', colors.dim);
   log('    mstro status                Show connection and auth status', colors.dim);
   log('    mstro telemetry [on|off]    Enable/disable anonymous telemetry', colors.dim);
-  log('    mstro setup-terminal        Enable web terminal (compiles native module)', colors.dim);
   log('    mstro -p 4105               Start on specific port (overrides auto port)', colors.dim);
   log('    mstro configure-hooks       Configure Claude Code security hooks', colors.dim);
   log('    mstro --version             Show version number', colors.dim);
@@ -366,95 +363,6 @@ function showLoginRequired() {
 /**
  * Check if node-pty is loadable (native module compiled correctly)
  */
-async function isNodePtyAvailable() {
-  try {
-    const pty = await import('node-pty');
-    // Verify the native module actually works, not just that it imports
-    const test = pty.spawn('/bin/echo', ['test'], { name: 'xterm', cols: 80, rows: 24 });
-    test.kill();
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Try to rebuild node-pty silently. Returns true on success.
- */
-function tryRebuildNodePty() {
-  try {
-    execSync('npm rebuild node-pty', { cwd: CLIENT_ROOT, stdio: 'pipe' });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Get platform-specific build tool install instructions
- */
-function getBuildToolInstructions() {
-  const os = osPlatform();
-  if (os === 'darwin') {
-    return '    xcode-select --install';
-  } else if (os === 'win32') {
-    return '    npm install -g windows-build-tools';
-  } else {
-    return '    sudo apt install build-essential python3    # Debian/Ubuntu\n    sudo dnf install gcc-c++ make python3       # Fedora/RHEL';
-  }
-}
-
-/**
- * First-run terminal setup check (runs after bouncer setup).
- * Tries to rebuild node-pty automatically. If that fails, shows instructions.
- */
-async function checkTerminalSetup() {
-  if (await isNodePtyAvailable()) {
-    return; // Already working
-  }
-
-  log('\n  Web Terminal', colors.bold + colors.cyan);
-  log('  mstro includes a browser-based terminal (optional).\n', colors.dim);
-  log('  Attempting to compile native module...', colors.dim);
-
-  if (tryRebuildNodePty()) {
-    log('  Terminal support enabled!\n', colors.green);
-    return;
-  }
-
-  log('  Could not compile terminal module.\n', colors.yellow);
-  log('  To enable the web terminal later:', colors.dim);
-  log('  1. Install build tools:', colors.dim);
-  log(getBuildToolInstructions(), colors.dim);
-  log('  2. Run:', colors.dim);
-  log('    mstro setup-terminal\n', colors.dim);
-}
-
-/**
- * Explicit setup-terminal command
- */
-async function setupTerminal() {
-  log('\n  Setting up terminal support...\n', colors.bold + colors.cyan);
-
-  if (await isNodePtyAvailable()) {
-    log('  Terminal support is already enabled.\n', colors.green);
-    return;
-  }
-
-  log('  Rebuilding node-pty native module...', colors.dim);
-
-  if (tryRebuildNodePty()) {
-    log('\n  Terminal support enabled! Restart mstro to use it.\n', colors.green + colors.bold);
-    return;
-  }
-
-  log('\n  Failed to build node-pty.\n', colors.red);
-  log('  Install build tools first:', colors.dim);
-  log(getBuildToolInstructions(), colors.dim);
-  log('\n  Then re-run: mstro setup-terminal\n', colors.dim);
-  process.exit(1);
-}
-
 async function startServer(envOverrides) {
   if (!isLoggedIn()) {
     showLoginRequired();
@@ -471,14 +379,6 @@ async function startServer(envOverrides) {
         return;
       }
     }
-  }
-
-  if (!existsSync(MSTRO_TERMINAL_CHECKED_FLAG)) {
-    await checkTerminalSetup();
-    if (!existsSync(MSTRO_CONFIG_DIR)) {
-      mkdirSync(MSTRO_CONFIG_DIR, { recursive: true, mode: 0o700 });
-    }
-    writeFileSync(MSTRO_TERMINAL_CHECKED_FLAG, new Date().toISOString());
   }
 
   showUpdateNotification();
@@ -518,7 +418,6 @@ async function main() {
       const { telemetry } = await import('./commands/config.js');
       await telemetry(args.slice(args.indexOf('telemetry') + 1));
     }],
-    ['setup-terminal', () => setupTerminal()],
     ['configure-hooks', () => runConfigureHooks(false)],
   ]);
 

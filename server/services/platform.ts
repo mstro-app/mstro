@@ -280,7 +280,7 @@ export class PlatformConnection {
 
     this.ws.onopen = () => {
       clearTimeout(connectionTimeout)
-      console.log(`🌐 Connected to platform`)
+      // Platform WebSocket open — auth will follow
 
       // Send auth token as first message instead of URL param
       this.ws!.send(JSON.stringify({ type: 'auth', token: authToken }))
@@ -345,7 +345,7 @@ export class PlatformConnection {
       case 'paired':
         this.isConnected = true
         this.connectionId = message.connectionId
-        console.log(`⚡ Connected to mstro.app!`)
+        // Connection status printed by onConnected callback
         // Start heartbeat to keep server-side TTL refreshed
         this.startHeartbeat()
         this.callbacks.onConnected?.(message.connectionId)

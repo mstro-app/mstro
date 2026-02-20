@@ -143,7 +143,7 @@ function openBrowser(url) {
 /**
  * Request device code from platform
  */
-async function requestDeviceCode(clientId, platformUrl) {
+async function requestDeviceCode(clientId, platformUrl, force = false) {
   const machineHostname = hostname();
   const osType = type().toLowerCase();
   const cpuArch = arch();
@@ -158,6 +158,7 @@ async function requestDeviceCode(clientId, platformUrl) {
       osType,
       cpuArch,
       nodeVersion,
+      ...(force ? { force: true } : {}),
     }),
   });
 
@@ -259,11 +260,29 @@ export async function login(args = []) {
 
   const clientId = getClientId();
 
+  // If force re-auth and we have existing credentials, deregister the old device first
+  if (forceReauth) {
+    const existingCreds = getCredentials();
+    if (existingCreds?.token) {
+      try {
+        await fetch(`${platformUrl}/api/auth/device/deregister`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${existingCreds.token}`,
+          },
+        });
+      } catch {
+        // Deregister failed (e.g. network issue), force flag on request will handle it
+      }
+    }
+  }
+
   log('  Requesting authorization...', colors.dim);
 
   try {
     // Step 1: Request device code
-    const { deviceCode, userCode, verificationUrlComplete, interval } = await requestDeviceCode(clientId, platformUrl);
+    const { deviceCode, userCode, verificationUrlComplete, interval } = await requestDeviceCode(clientId, platformUrl, forceReauth);
 
     // Step 2: Show code and open browser
     log('');

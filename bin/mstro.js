@@ -288,7 +288,6 @@ function runConfigureHooks(andThenStart = false) {
       markConfigured();
       if (andThenStart) {
         // After configuring, start the server
-        log('\nStarting Mstro client...', colors.bold + colors.cyan);
         const requestedPort = parsePort(process.argv.slice(2));
         const envOverrides = requestedPort ? { PORT: String(requestedPort) } : {};
         runNpmScript('start', [], envOverrides);
@@ -382,7 +381,6 @@ async function startServer(envOverrides) {
   }
 
   showUpdateNotification();
-  log('\nStarting Mstro client...', colors.bold + colors.cyan);
   runNpmScript('start', [], envOverrides);
 }
 
@@ -404,7 +402,7 @@ async function main() {
     }],
     ['logout', async () => {
       const { logout } = await import('./commands/logout.js');
-      await logout();
+      await logout(args.slice(args.indexOf('logout') + 1));
     }],
     ['whoami', async () => {
       const { whoami } = await import('./commands/whoami.js');

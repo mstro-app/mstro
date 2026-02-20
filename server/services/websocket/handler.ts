@@ -273,7 +273,6 @@ export class WebSocketImproviseHandler {
       case 'cancel': {
         const session = this.requireSession(ws, tabId);
         session.cancel();
-        this.send(ws, { type: 'output', tabId, data: { text: '\n⚠️  Operation cancelled\n' } });
         break;
       }
       case 'getHistory': {
@@ -1749,6 +1748,8 @@ Respond with ONLY the summary text, nothing else.`;
       const hash = hashResult.stdout.trim();
 
       this.send(ws, { type: 'gitCommitted', tabId, data: { hash, message } });
+      // Proactively send updated status so the UI reflects new ahead/behind counts
+      this.handleGitStatus(ws, tabId, workingDir);
     } catch (error: any) {
       this.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
     }
@@ -1874,6 +1875,8 @@ Respond with ONLY the commit message, nothing else.`;
           const hash = hashResult.stdout.trim();
 
           this.send(ws, { type: 'gitCommitted', tabId, data: { hash, message: commitMessage } });
+          // Proactively send updated status so the UI reflects new ahead/behind counts
+          this.handleGitStatus(ws, tabId, workingDir);
         }
       });
 

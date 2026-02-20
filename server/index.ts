@@ -8,6 +8,7 @@
 import { randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import type { IncomingMessage } from 'node:http'
+import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 import { serve } from '@hono/node-server'
 import { Hono } from 'hono'
@@ -213,7 +214,6 @@ app.route('/api/notifications', createNotificationRoutes(WORKING_DIR))
 if (IS_PRODUCTION) {
   // For production static file serving, use a reverse proxy like nginx
   // or implement a simple static file middleware if needed
-  console.log('Production mode: serve static files via nginx or similar')
 }
 
 // ========================================
@@ -342,10 +342,9 @@ async function startServer() {
     })
   })
 
-  console.log(`🚀 Mstro Server (Node.js + Hono) on port ${PORT}`)
-  console.log(`📁 Working directory: ${WORKING_DIR}`)
-  console.log(`Runtime: Node.js ${process.version}`)
-  console.log(`Framework: Hono`)
+  const home = homedir()
+  const displayDir = WORKING_DIR.startsWith(home) ? `~${WORKING_DIR.slice(home.length)}` : WORKING_DIR
+  console.log(`Machine: ${displayDir}`)
 
   // Track server started event
   trackEvent(AnalyticsEvents.SERVER_STARTED, {
@@ -364,7 +363,7 @@ async function startServer() {
   // Connect to platform
   const platformConnection = new PlatformConnection(WORKING_DIR, {
     onConnected: (_connectionId) => {
-      console.log(`🎵 Orchestra ready: ${basename(WORKING_DIR)}`)
+      console.log(`Connected: https://mstro.app`)
 
       // Set up usage reporter to send token usage to platform
       wsHandler.setUsageReporter((report) => {

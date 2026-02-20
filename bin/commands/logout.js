@@ -8,6 +8,9 @@ import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
+const PROD_PLATFORM_URL = 'https://api.mstro.app';
+const DEV_PLATFORM_URL = 'http://localhost:4102';
+
 const colors = {
   reset: '\x1b[0m',
   bold: '\x1b[1m',
@@ -40,9 +43,35 @@ function getCredentials() {
 }
 
 /**
+ * Deregister device from the platform server
+ */
+async function deregisterDevice(token, platformUrl) {
+  try {
+    const response = await fetch(`${platformUrl}/api/auth/device/deregister`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+    });
+
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      log(`  Warning: Could not deregister device from server: ${data.error || response.statusText}`, colors.yellow);
+    }
+  } catch {
+    // Network error - proceed with local logout anyway
+    log('  Warning: Could not reach server to deregister device. Local credentials will still be removed.', colors.yellow);
+  }
+}
+
+/**
  * Main logout command
  */
-export async function logout() {
+export async function logout(args = []) {
+  const devMode = Array.isArray(args) && args.includes('--dev');
+  const platformUrl = devMode ? DEV_PLATFORM_URL : PROD_PLATFORM_URL;
+
   log('\n  Mstro Logout\n', colors.bold + colors.cyan);
 
   const creds = getCredentials();
@@ -56,6 +85,11 @@ export async function logout() {
   const email = creds.email;
 
   try {
+    // Deregister device from server so it can be re-registered later
+    if (creds.token) {
+      await deregisterDevice(creds.token, platformUrl);
+    }
+
     // Delete credentials file
     if (existsSync(CREDENTIALS_FILE)) {
       unlinkSync(CREDENTIALS_FILE);

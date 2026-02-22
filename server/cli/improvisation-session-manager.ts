@@ -9,7 +9,7 @@
  */
 
 import { EventEmitter } from 'node:events';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { AnalyticsEvents, trackEvent } from '../services/analytics.js';
 import { HeadlessRunner } from './headless/index.js';
@@ -97,11 +97,11 @@ export class ImprovisationSessionManager extends EventEmitter {
    * The first prompt will include context from the historical session.
    */
   static resumeFromHistory(workingDir: string, historicalSessionId: string, overrides?: Partial<ImprovisationOptions>): ImprovisationSessionManager {
-    const improviseDir = join(workingDir, '.mstro', 'improvise');
+    const historyDir = join(workingDir, '.mstro', 'history');
 
     // Extract timestamp from session ID (format: improv-1234567890123 or just 1234567890123)
     const timestamp = historicalSessionId.replace('improv-', '');
-    const historyPath = join(improviseDir, `history-${timestamp}.json`);
+    const historyPath = join(historyDir, `${timestamp}.json`);
 
     if (!existsSync(historyPath)) {
       throw new Error(`Historical session not found: ${historicalSessionId}`);
@@ -153,10 +153,10 @@ export class ImprovisationSessionManager extends EventEmitter {
     };
 
     this.sessionId = this.options.sessionId;
-    this.improviseDir = join(this.options.workingDir, '.mstro', 'improvise');
-    this.historyPath = join(this.improviseDir, `history-${this.sessionId.replace('improv-', '')}.json`);
+    this.improviseDir = join(this.options.workingDir, '.mstro', 'history');
+    this.historyPath = join(this.improviseDir, `${this.sessionId.replace('improv-', '')}.json`);
 
-    // Ensure improvise directory exists
+    // Ensure history directory exists
     if (!existsSync(this.improviseDir)) {
       mkdirSync(this.improviseDir, { recursive: true });
     }
@@ -197,27 +197,75 @@ export class ImprovisationSessionManager extends EventEmitter {
   }
 
   /**
-   * Build prompt with text file attachments prepended
+   * Build prompt with text file attachments prepended and disk path references
    * Format: each text file is shown as @path followed by content in code block
    */
-  private buildPromptWithAttachments(userPrompt: string, attachments?: FileAttachment[]): string {
-    if (!attachments || attachments.length === 0) {
+  private buildPromptWithAttachments(userPrompt: string, attachments?: FileAttachment[], diskPaths?: string[]): string {
+    if ((!attachments || attachments.length === 0) && (!diskPaths || diskPaths.length === 0)) {
       return userPrompt;
     }
+
+    const parts: string[] = [];
 
     // Filter to text files only (non-images)
-    const textFiles = attachments.filter(a => !a.isImage);
-    if (textFiles.length === 0) {
+    if (attachments) {
+      const textFiles = attachments.filter(a => !a.isImage);
+      for (const file of textFiles) {
+        parts.push(`@${file.filePath}\n\`\`\`\n${file.content}\n\`\`\``);
+      }
+    }
+
+    // Add disk path references for all persisted files
+    if (diskPaths && diskPaths.length > 0) {
+      parts.push(`Attached files saved to disk:\n${diskPaths.map(p => `- ${p}`).join('\n')}`);
+    }
+
+    if (parts.length === 0) {
       return userPrompt;
     }
 
-    // Build file content blocks
-    const fileBlocks = textFiles.map(file => {
-      return `@${file.filePath}\n\`\`\`\n${file.content}\n\`\`\``;
-    }).join('\n\n');
+    return `${parts.join('\n\n')}\n\n${userPrompt}`;
+  }
 
-    // Prepend file content to user prompt
-    return `${fileBlocks}\n\n${userPrompt}`;
+  /**
+   * Write attachments to disk at .mstro/tmp/attachments/{sessionId}/
+   * Returns array of absolute file paths for each persisted attachment.
+   */
+  private persistAttachments(attachments: FileAttachment[]): string[] {
+    if (attachments.length === 0) return [];
+
+    const attachDir = join(this.options.workingDir, '.mstro', 'tmp', 'attachments', this.sessionId);
+    if (!existsSync(attachDir)) {
+      mkdirSync(attachDir, { recursive: true });
+    }
+
+    const paths: string[] = [];
+    for (const attachment of attachments) {
+      const filePath = join(attachDir, attachment.fileName);
+      try {
+        // All paste content arrives as base64 — decode to binary
+        writeFileSync(filePath, Buffer.from(attachment.content, 'base64'));
+        paths.push(filePath);
+      } catch (err) {
+        console.error(`Failed to persist attachment ${attachment.fileName}:`, err);
+      }
+    }
+
+    return paths;
+  }
+
+  /**
+   * Clean up persisted attachments for this session
+   */
+  private cleanupAttachments(): void {
+    const attachDir = join(this.options.workingDir, '.mstro', 'tmp', 'attachments', this.sessionId);
+    if (existsSync(attachDir)) {
+      try {
+        rmSync(attachDir, { recursive: true, force: true });
+      } catch {
+        // Ignore cleanup errors
+      }
+    }
   }
 
   /**
@@ -264,8 +312,11 @@ export class ImprovisationSessionManager extends EventEmitter {
       // This is more effective than analyzing user prompts, which had false positives.
 
 
-      // Build prompt with text file attachments prepended
-      const promptWithAttachments = this.buildPromptWithAttachments(userPrompt, attachments);
+      // Persist all attachments to disk so Claude Code can reference them as files
+      const diskPaths = attachments ? this.persistAttachments(attachments) : [];
+
+      // Build prompt with text file attachments prepended and disk path references
+      const promptWithAttachments = this.buildPromptWithAttachments(userPrompt, attachments, diskPaths);
 
       // Checkpoint-and-retry loop: if a tool times out, we capture a checkpoint,
       // kill the process, and retry with context from successful results
@@ -693,6 +744,7 @@ export class ImprovisationSessionManager extends EventEmitter {
     this.accumulatedKnowledge = '';
     this.isFirstPrompt = true; // Reset to start fresh Claude session
     this.claudeSessionId = undefined; // Clear Claude session ID to start new conversation
+    this.cleanupAttachments();
     this.saveHistory();
     this.emit('onSessionUpdate', this.getHistory());
   }

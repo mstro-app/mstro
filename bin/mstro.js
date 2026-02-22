@@ -215,7 +215,7 @@ function showHelp() {
   log('');
   log('  Authentication:', colors.bold);
   log('    Run "mstro login" to connect this device to your mstro.app account.', colors.dim);
-  log('    Once logged in, orchestras sync automatically with your web dashboard.', colors.dim);
+  log('    Once logged in, machines sync automatically with your web dashboard.', colors.dim);
   log('');
   log('  Security:', colors.bold);
   log('    Mstro includes a Security Bouncer that automatically manages', colors.dim);
@@ -226,7 +226,7 @@ function showHelp() {
 
 function runNpmScript(script, args = [], envOverrides = {}) {
   const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-  const child = spawn(npmCmd, ['run', script, ...args], {
+  const child = spawn(npmCmd, ['run', '--silent', script, ...args], {
     cwd: CLIENT_ROOT,
     stdio: 'inherit',
     env: { ...process.env, MSTRO_WORKING_DIR: USER_CWD, ...envOverrides },

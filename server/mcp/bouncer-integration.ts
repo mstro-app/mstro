@@ -252,6 +252,34 @@ export async function reviewOperation(request: BouncerReviewRequest): Promise<Bo
   }
 
   // ========================================
+  // PRE-CHECK: Malformed/empty tool calls
+  // ========================================
+  // Empty-param Edit/Write calls are no-ops that will fail validation anyway.
+  // Allow immediately instead of wasting ~8s on Haiku analysis.
+  const toolInput = request.context?.toolInput;
+  if (toolInput && typeof toolInput === 'object' && Object.keys(toolInput).length === 0) {
+    console.error('[Bouncer] ⚡ Fast path: Empty tool parameters (no-op)');
+    const latencyMs = Math.round(performance.now() - startTime);
+
+    const decision: BouncerDecision = {
+      decision: 'allow',
+      confidence: 95,
+      reasoning: 'Empty tool parameters - operation is a no-op with no side effects.',
+      threatLevel: 'low'
+    };
+
+    logBouncerDecision(
+      operation,
+      decision.decision,
+      decision.confidence,
+      decision.reasoning,
+      { context: request.context, threatLevel: decision.threatLevel, layer: 'pattern-noop', latencyMs }
+    );
+
+    return decision;
+  }
+
+  // ========================================
   // LAYER 1: Pattern-Based Fast Path (< 5ms)
   // ========================================
 

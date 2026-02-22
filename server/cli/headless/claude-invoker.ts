@@ -442,6 +442,12 @@ export async function executeClaudeCommand(
   });
 
   if (hasImageAttachments && claudeProcess.stdin) {
+    claudeProcess.stdin.on('error', (err) => {
+      if (config.verbose) {
+        console.error('[STDIN] Write error:', err.message);
+      }
+      config.outputCallback?.(`\n[[MSTRO_ERROR:STDIN_WRITE_FAILED]] Failed to send image data to Claude: ${err.message}\n`);
+    });
     const multimodalMessage = buildMultimodalMessage(prompt, config.imageAttachments!);
     claudeProcess.stdin.write(multimodalMessage);
     claudeProcess.stdin.end();

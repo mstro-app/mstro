@@ -187,7 +187,7 @@ export async function status() {
 
   // Quick commands
   log('  Commands', colors.bold);
-  log('    mstro           Start an orchestra', colors.dim);
+  log('    mstro           Start a machine', colors.dim);
   log('    mstro login     Sign in to your account', colors.dim);
   log('    mstro logout    Sign out', colors.dim);
   log('    mstro whoami    Show account details', colors.dim);

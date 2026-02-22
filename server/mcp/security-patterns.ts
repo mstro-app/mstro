@@ -125,6 +125,9 @@ export const SAFE_OPERATIONS: SecurityPattern[] = [
   // Write/Edit to temp directories - ephemeral, low risk
   { pattern: /^(Write|Edit):\s*\/tmp\//i },
   { pattern: /^(Write|Edit):\s*\/var\/tmp\//i },
+
+  // Side-effect-free tools - no dangerous operations possible
+  { pattern: /^(ExitPlanMode|EnterPlanMode|TodoWrite|AskUserQuestion):/i },
 ];
 
 /**
@@ -201,8 +204,11 @@ export function requiresAIReview(operation: string): boolean {
     return !SAFE_RM_PATTERNS.some(p => p.test(operation));
   }
 
-  if (/\$\{.*\}|\$\(.*\)/.test(operation) || /\*\*?/.test(operation)) return true;
-  if (/^Bash:\s*\.\//.test(operation)) return true;
+  // Variable expansion and glob patterns are only concerning in Bash commands
+  if (/^Bash:/.test(operation)) {
+    if (/\$\{.*\}|\$\(.*\)/.test(operation) || /\*\*?/.test(operation)) return true;
+    if (/^Bash:\s*\.\//.test(operation)) return true;
+  }
 
   return false;
 }

@@ -244,10 +244,8 @@ export async function login(args = []) {
   const devMode = args.includes('--dev');
   const platformUrl = devMode ? DEV_PLATFORM_URL : PROD_PLATFORM_URL;
 
-  log('\n  Mstro Login\n', colors.bold + colors.cyan);
-
   if (devMode) {
-    log(`  [DEV MODE] Using ${platformUrl}\n`, colors.yellow);
+    log(`[DEV MODE] Using ${platformUrl}\n`, colors.yellow);
   }
 
   // Check if already logged in
@@ -278,18 +276,17 @@ export async function login(args = []) {
     }
   }
 
-  log('  Requesting authorization...', colors.dim);
+  log('Requesting authorization...', colors.dim);
 
   try {
     // Step 1: Request device code
     const { deviceCode, userCode, verificationUrlComplete, interval } = await requestDeviceCode(clientId, platformUrl, forceReauth);
 
     // Step 2: Show code and open browser
+    log(`Your authorization code: ${userCode}`, colors.bold);
     log('');
-    log(`  Your authorization code: ${userCode}`, colors.bold);
-    log('');
-    log('  Opening browser to complete login...', colors.dim);
-    log(`  If browser doesn't open, visit: ${verificationUrlComplete}`, colors.dim);
+    log('Opening browser to complete login...', colors.dim);
+    log(` If browser doesn't open, visit: ${verificationUrlComplete}`, colors.dim);
     log('');
 
     openBrowser(verificationUrlComplete);
@@ -316,10 +313,7 @@ export async function login(args = []) {
     log('');
     log(`  Logged in as ${result.user.email}`, colors.bold + colors.green);
     log('');
-    log('  This device is now connected to your mstro.app account.', colors.dim);
-    log('  Any "mstro" commands will sync with your web dashboard.', colors.dim);
-    log('');
-    log('  Run "mstro" to start an orchestra.', colors.cyan);
+    log('  Run "mstro" to start a machine.', colors.cyan);
     log('');
   } catch (err) {
     log('');

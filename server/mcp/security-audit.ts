@@ -10,8 +10,8 @@
 import { appendFileSync, existsSync, mkdirSync, } from 'node:fs';
 import { join } from 'node:path';
 
-// Default log directory inside .mstro/ sibling directory
-const DEFAULT_LOG_DIR = './.mstro/logs/security';
+// Default log subdirectory inside .mstro/
+const DEFAULT_LOG_SUBDIR = '.mstro/logs';
 
 export type BouncerLayer = 'pattern-critical' | 'pattern-safe' | 'pattern-default' | 'haiku-ai' | 'ai-disabled' | 'ai-error';
 
@@ -33,7 +33,8 @@ export interface AuditLogEntry {
 export class SecurityAuditLogger {
   private logFile: string;
 
-  constructor(logDir: string = DEFAULT_LOG_DIR) {
+  constructor(workingDir?: string) {
+    const logDir = join(workingDir || process.cwd(), DEFAULT_LOG_SUBDIR);
     this.logFile = join(logDir, 'bouncer-audit.jsonl');
 
     // Ensure log directory exists
@@ -88,12 +89,14 @@ export class SecurityAuditLogger {
 
 }
 
-// Singleton instance
+// Singleton instance (keyed by workingDir to support multiple projects)
 let auditLogger: SecurityAuditLogger | null = null;
+let auditLoggerWorkingDir: string | undefined;
 
-export function getAuditLogger(): SecurityAuditLogger {
-  if (!auditLogger) {
-    auditLogger = new SecurityAuditLogger();
+export function getAuditLogger(workingDir?: string): SecurityAuditLogger {
+  if (!auditLogger || (workingDir && workingDir !== auditLoggerWorkingDir)) {
+    auditLogger = new SecurityAuditLogger(workingDir);
+    auditLoggerWorkingDir = workingDir;
   }
   return auditLogger;
 }
@@ -113,7 +116,8 @@ export function logBouncerDecision(
   const validDecisions = ['allow', 'deny', 'warn_allow'];
   const normalizedDecision = validDecisions.includes(safeDecision) ? safeDecision : 'deny';
 
-  const logger = getAuditLogger();
+  const workingDir = metadata?.context?.workingDirectory;
+  const logger = getAuditLogger(workingDir);
   logger.logDecision(operation, normalizedDecision as 'allow' | 'deny' | 'warn_allow', confidence, reasoning, metadata);
 
   // Also log to console for real-time monitoring

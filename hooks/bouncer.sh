@@ -49,10 +49,17 @@ function output(decision, reason) {
   console.log(JSON.stringify({ decision, reason }));
 }
 
-// Quick path for read-only operations
-const readOnlyOps = ['Read', 'Glob', 'Grep', 'Search', 'List', 'WebFetch', 'WebSearch'];
-if (readOnlyOps.includes(toolName)) {
-  output('allow', 'Read-only operation');
+// Quick path for read-only and side-effect-free operations
+const safeOps = ['Read', 'Glob', 'Grep', 'Search', 'List', 'WebFetch', 'WebSearch',
+  'ExitPlanMode', 'EnterPlanMode', 'TodoWrite', 'AskUserQuestion'];
+if (safeOps.includes(toolName)) {
+  output('allow', 'Safe operation (no dangerous side effects)');
+  process.exit(0);
+}
+
+// Quick path for malformed tool calls with empty params (no-ops)
+if (Object.keys(toolInput).length === 0 && ['Edit', 'Write'].includes(toolName)) {
+  output('allow', 'Empty parameters - no-op');
   process.exit(0);
 }
 

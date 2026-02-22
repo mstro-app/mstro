@@ -844,14 +844,14 @@ export class WebSocketImproviseHandler {
    * Get count of all historical sessions without reading file contents
    */
   private getSessionsCount(workingDir: string): number {
-    const sessionsDir = join(workingDir, '.mstro', 'improvise');
+    const sessionsDir = join(workingDir, '.mstro', 'history');
 
     if (!existsSync(sessionsDir)) {
       return 0;
     }
 
     return readdirSync(sessionsDir)
-      .filter((name: string) => name.startsWith('history-') && name.endsWith('.json'))
+      .filter((name: string) => name.endsWith('.json'))
       .length;
   }
 
@@ -860,7 +860,7 @@ export class WebSocketImproviseHandler {
    * Returns minimal metadata - movements are stripped to just userPrompt preview
    */
   private getSessionsList(workingDir: string, limit: number = 20, offset: number = 0): { sessions: any[]; total: number; hasMore: boolean } {
-    const sessionsDir = join(workingDir, '.mstro', 'improvise');
+    const sessionsDir = join(workingDir, '.mstro', 'history');
 
     if (!existsSync(sessionsDir)) {
       return { sessions: [], total: 0, hasMore: false };
@@ -868,10 +868,10 @@ export class WebSocketImproviseHandler {
 
     // Get sorted file list (newest first) without reading contents
     const historyFiles = readdirSync(sessionsDir)
-      .filter((name: string) => name.startsWith('history-') && name.endsWith('.json'))
+      .filter((name: string) => name.endsWith('.json'))
       .sort((a: string, b: string) => {
-        const timestampA = parseInt(a.replace('history-', '').replace('.json', ''), 10);
-        const timestampB = parseInt(b.replace('history-', '').replace('.json', ''), 10);
+        const timestampA = parseInt(a.replace('.json', ''), 10);
+        const timestampB = parseInt(b.replace('.json', ''), 10);
         return timestampB - timestampA;
       });
 
@@ -916,14 +916,14 @@ export class WebSocketImproviseHandler {
    * Get a full session by ID (includes all movement data)
    */
   private getSessionById(workingDir: string, sessionId: string): any {
-    const sessionsDir = join(workingDir, '.mstro', 'improvise');
+    const sessionsDir = join(workingDir, '.mstro', 'history');
 
     if (!existsSync(sessionsDir)) {
       return null;
     }
 
     const historyFiles = readdirSync(sessionsDir)
-      .filter((name: string) => name.startsWith('history-') && name.endsWith('.json'));
+      .filter((name: string) => name.endsWith('.json'));
 
     for (const filename of historyFiles) {
       const historyPath = join(sessionsDir, filename);
@@ -953,7 +953,7 @@ export class WebSocketImproviseHandler {
    * Delete a single session from disk
    */
   private deleteSession(workingDir: string, sessionId: string): { sessionId: string; success: boolean } {
-    const sessionsDir = join(workingDir, '.mstro', 'improvise');
+    const sessionsDir = join(workingDir, '.mstro', 'history');
 
     if (!existsSync(sessionsDir)) {
       return { sessionId, success: false };
@@ -961,7 +961,7 @@ export class WebSocketImproviseHandler {
 
     try {
       const historyFiles = readdirSync(sessionsDir)
-        .filter((name: string) => name.startsWith('history-') && name.endsWith('.json'));
+        .filter((name: string) => name.endsWith('.json'));
 
       for (const filename of historyFiles) {
         const historyPath = join(sessionsDir, filename);
@@ -987,7 +987,7 @@ export class WebSocketImproviseHandler {
    * Clear all sessions from disk
    */
   private clearAllSessions(workingDir: string): { success: boolean; deletedCount: number } {
-    const sessionsDir = join(workingDir, '.mstro', 'improvise');
+    const sessionsDir = join(workingDir, '.mstro', 'history');
 
     if (!existsSync(sessionsDir)) {
       return { success: true, deletedCount: 0 };
@@ -995,7 +995,7 @@ export class WebSocketImproviseHandler {
 
     try {
       const historyFiles = readdirSync(sessionsDir)
-        .filter((name: string) => name.startsWith('history-') && name.endsWith('.json'));
+        .filter((name: string) => name.endsWith('.json'));
 
       let deletedCount = 0;
       for (const filename of historyFiles) {
@@ -1046,7 +1046,7 @@ export class WebSocketImproviseHandler {
   }
 
   private searchSessions(workingDir: string, query: string, limit: number = 20, offset: number = 0): { sessions: any[]; total: number; hasMore: boolean } {
-    const sessionsDir = join(workingDir, '.mstro', 'improvise');
+    const sessionsDir = join(workingDir, '.mstro', 'history');
 
     if (!existsSync(sessionsDir)) {
       return { sessions: [], total: 0, hasMore: false };
@@ -1056,10 +1056,10 @@ export class WebSocketImproviseHandler {
 
     try {
       const historyFiles = readdirSync(sessionsDir)
-        .filter((name: string) => name.startsWith('history-') && name.endsWith('.json'))
+        .filter((name: string) => name.endsWith('.json'))
         .sort((a: string, b: string) => {
-          const timestampA = parseInt(a.replace('history-', '').replace('.json', ''), 10);
-          const timestampB = parseInt(b.replace('history-', '').replace('.json', ''), 10);
+          const timestampA = parseInt(a.replace('.json', ''), 10);
+          const timestampB = parseInt(b.replace('.json', ''), 10);
           return timestampB - timestampA;
         });
 

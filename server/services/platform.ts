@@ -328,7 +328,7 @@ export class PlatformConnection {
           return
         }
 
-        console.log('Disconnected from platform, reconnecting...')
+        console.log('Disconnected, reconnecting...')
         this.callbacks.onDisconnected?.()
         trackEvent(AnalyticsEvents.PLATFORM_DISCONNECTED)
         this.scheduleReconnect()
@@ -352,13 +352,11 @@ export class PlatformConnection {
         break
 
       case 'web_connected':
-        console.log('🔗 Web client connected')
         this.callbacks.onWebConnected?.()
         trackEvent(AnalyticsEvents.WEB_CLIENT_CONNECTED)
         break
 
       case 'web_disconnected':
-        console.log('🔗 Web client disconnected')
         this.callbacks.onWebDisconnected?.()
         trackEvent(AnalyticsEvents.WEB_CLIENT_DISCONNECTED)
         break

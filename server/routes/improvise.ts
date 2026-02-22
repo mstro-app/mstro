@@ -15,20 +15,20 @@ export function createImproviseRoutes(workingDir: string) {
 
   routes.get('/sessions', async (c) => {
     try {
-      const sessionsDir = join(workingDir, '.mstro', 'improvise')
+      const sessionsDir = join(workingDir, '.mstro', 'history')
       const { readdirSync, existsSync, readFileSync } = await import('node:fs')
 
       if (!existsSync(sessionsDir)) {
         return c.json({ sessions: [] })
       }
 
-      // Look for history-*.json files in the improvise directory
+      // Look for *.json files in the history directory
       const historyFiles = readdirSync(sessionsDir)
-        .filter((name: string) => name.startsWith('history-') && name.endsWith('.json'))
+        .filter((name: string) => name.endsWith('.json'))
         .sort((a: string, b: string) => {
           // Sort by timestamp in filename (newer first)
-          const timestampA = parseInt(a.replace('history-', '').replace('.json', ''), 10)
-          const timestampB = parseInt(b.replace('history-', '').replace('.json', ''), 10)
+          const timestampA = parseInt(a.replace('.json', ''), 10)
+          const timestampB = parseInt(b.replace('.json', ''), 10)
           return timestampB - timestampA
         })
 
@@ -64,7 +64,7 @@ export function createImproviseRoutes(workingDir: string) {
       const { sessionId } = c.req.param()
       // Extract timestamp from sessionId (e.g., "improv-1234567890" -> "1234567890")
       const timestamp = sessionId.replace('improv-', '')
-      const historyPath = join(workingDir, '.mstro', 'improvise', `history-${timestamp}.json`)
+      const historyPath = join(workingDir, '.mstro', 'history', `${timestamp}.json`)
       const { existsSync, readFileSync } = await import('node:fs')
 
       if (!existsSync(historyPath)) {

@@ -67,6 +67,7 @@ export interface WebSocketMessage {
     | 'gitSetDirectory'
     | 'gitGetRemoteInfo'
     | 'gitCreatePR'
+    | 'gitGeneratePRDescription'
     // Session sync message types
     | 'getActiveTabs'
     | 'createTab'
@@ -81,6 +82,8 @@ export interface WebSocketMessage {
   tabId?: string;
   terminalId?: string;
   data?: any;
+  /** Injected by server relay for sandboxed shared users (control + view) */
+  _permission?: 'control' | 'view';
 }
 
 export interface WebSocketResponse {
@@ -137,6 +140,7 @@ export interface WebSocketResponse {
     | 'gitDirectorySet'
     | 'gitRemoteInfo'
     | 'gitPRCreated'
+    | 'gitPRDescription'
     // Session sync response types
     | 'activeTabs'
     | 'tabCreated'

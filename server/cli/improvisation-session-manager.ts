@@ -274,7 +274,7 @@ export class ImprovisationSessionManager extends EventEmitter {
    * Each tab maintains its own claudeSessionId for proper isolation
    * Supports file attachments: text files prepended to prompt, images via stream-json multimodal
    */
-  async executePrompt(userPrompt: string, attachments?: FileAttachment[]): Promise<MovementRecord> {
+  async executePrompt(userPrompt: string, attachments?: FileAttachment[], options?: { sandboxed?: boolean }): Promise<MovementRecord> {
     const _execStart = Date.now();
 
     // Start execution event log for reconnect replay
@@ -399,6 +399,7 @@ export class ImprovisationSessionManager extends EventEmitter {
           onToolTimeout: (checkpoint: ExecutionCheckpoint) => {
             checkpointRef.value = checkpoint;
           },
+          sandboxed: options?.sandboxed,
         });
 
         this.currentRunner = runner;

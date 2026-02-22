@@ -56,6 +56,42 @@ export const DEFAULT_TOOL_TIMEOUT_PROFILES: Record<string, ToolTimeoutProfile> =
     useAdaptive: false,
     useHaikuTiebreaker: true,
   },
+  // Local filesystem tools — adaptive EMA learns actual durations, short cold starts
+  Read: {
+    coldStartMs: 60_000,       // 1 min — local reads should be fast
+    floorMs: 15_000,           // 15s minimum
+    ceilingMs: 300_000,        // 5 min ceiling (large files, slow mounts)
+    useAdaptive: true,
+    useHaikuTiebreaker: false, // local ops don't need AI assessment
+  },
+  Grep: {
+    coldStartMs: 60_000,
+    floorMs: 15_000,
+    ceilingMs: 300_000,
+    useAdaptive: true,
+    useHaikuTiebreaker: false,
+  },
+  Glob: {
+    coldStartMs: 30_000,       // 30s — pattern matching is fast
+    floorMs: 10_000,
+    ceilingMs: 120_000,
+    useAdaptive: true,
+    useHaikuTiebreaker: false,
+  },
+  Edit: {
+    coldStartMs: 30_000,
+    floorMs: 10_000,
+    ceilingMs: 120_000,
+    useAdaptive: true,
+    useHaikuTiebreaker: false,
+  },
+  Write: {
+    coldStartMs: 30_000,
+    floorMs: 10_000,
+    ceilingMs: 120_000,
+    useAdaptive: true,
+    useHaikuTiebreaker: false,
+  },
 };
 
 const DEFAULT_TOOL_TIMEOUT_PROFILE: ToolTimeoutProfile = {

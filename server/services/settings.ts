@@ -26,6 +26,8 @@ export interface MstroSettings {
    * - Any other string is passed as --model <value>
    */
   model: string
+  /** Per-repo preferred PR base branch, keyed by normalized remote URL */
+  prBaseBranches?: Record<string, string>
 }
 
 const DEFAULT_SETTINGS: MstroSettings = {
@@ -85,5 +87,28 @@ export function getModel(): string {
 export function setModel(model: string): void {
   const settings = getSettings()
   settings.model = model
+  saveSettings(settings)
+}
+
+/** Normalize a remote URL into a stable key (e.g. "github.com/owner/repo") */
+function normalizeRemoteUrl(remoteUrl: string): string {
+  return remoteUrl
+    .replace(/^(https?:\/\/|git@)/, '')
+    .replace(/\.git$/, '')
+    .replace(/:/, '/')
+}
+
+/** Get the preferred PR base branch for a repo */
+export function getPrBaseBranch(remoteUrl: string): string | null {
+  const settings = getSettings()
+  const key = normalizeRemoteUrl(remoteUrl)
+  return settings.prBaseBranches?.[key] ?? null
+}
+
+/** Save the preferred PR base branch for a repo */
+export function setPrBaseBranch(remoteUrl: string, branch: string): void {
+  const settings = getSettings()
+  if (!settings.prBaseBranches) settings.prBaseBranches = {}
+  settings.prBaseBranches[normalizeRemoteUrl(remoteUrl)] = branch
   saveSettings(settings)
 }

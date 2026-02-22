@@ -13,6 +13,7 @@ import { detectErrorInStderr, } from './output-utils.js';
 import { buildMultimodalMessage } from './prompt-utils.js';
 import { assessStall, assessToolTimeout, type StallContext } from './stall-assessor.js';
 import { ToolWatchdog } from './tool-watchdog.js';
+import { sanitizeEnvForSandbox } from '../../services/sandbox-utils.js';
 import type {
   ExecutionResult,
   ResolvedHeadlessConfig,
@@ -437,7 +438,9 @@ export async function executeClaudeCommand(
 
   const claudeProcess = spawn(config.claudeCommand, args, {
     cwd: config.workingDir,
-    env: { ...process.env },
+    env: config.sandboxed
+      ? sanitizeEnvForSandbox(process.env, config.workingDir)
+      : { ...process.env },
     stdio: [hasImageAttachments ? 'pipe' : 'ignore', 'pipe', 'pipe']
   });
 

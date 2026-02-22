@@ -117,6 +117,8 @@ export interface HeadlessConfig {
   maxAutoRetries?: number;
   /** Called when a tool times out with checkpoint data */
   onToolTimeout?: (checkpoint: ExecutionCheckpoint) => void;
+  /** When true, spawn Claude with sanitized env (strips secrets, HOME=workingDir) */
+  sandboxed?: boolean;
 }
 
 export interface SessionState {
@@ -177,7 +179,7 @@ export interface ExecutionResult {
 }
 
 /** Resolved config with all defaults applied */
-export type ResolvedHeadlessConfig = Omit<Required<HeadlessConfig>, 'outputCallback' | 'thinkingCallback' | 'toolUseCallback' | 'continueSession' | 'claudeSessionId' | 'imageAttachments' | 'model' | 'toolTimeoutProfiles' | 'onToolTimeout'> & {
+export type ResolvedHeadlessConfig = Omit<Required<HeadlessConfig>, 'outputCallback' | 'thinkingCallback' | 'toolUseCallback' | 'continueSession' | 'claudeSessionId' | 'imageAttachments' | 'model' | 'toolTimeoutProfiles' | 'onToolTimeout' | 'sandboxed'> & {
   outputCallback?: (text: string) => void;
   thinkingCallback?: (text: string) => void;
   toolUseCallback?: (event: ToolUseEvent) => void;
@@ -187,4 +189,5 @@ export type ResolvedHeadlessConfig = Omit<Required<HeadlessConfig>, 'outputCallb
   model?: string;
   toolTimeoutProfiles?: Record<string, Partial<ToolTimeoutProfile>>;
   onToolTimeout?: (checkpoint: ExecutionCheckpoint) => void;
+  sandboxed?: boolean;
 };

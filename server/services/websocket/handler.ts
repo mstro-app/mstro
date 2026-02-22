@@ -22,8 +22,10 @@ import {
   renameFile, 
   writeFile
 } from '../files.js';
+import { validatePathWithinWorkingDir } from '../pathUtils.js';
+import { sanitizeEnvForSandbox } from '../sandbox-utils.js';
 import { captureException } from '../sentry.js';
-import { getModel, getSettings, setModel } from '../settings.js';
+import { getModel, getPrBaseBranch, getSettings, setModel, setPrBaseBranch } from '../settings.js';
 import { getPTYManager } from '../terminal/pty-manager.js';
 import { AutocompleteService } from './autocomplete.js';
 import { readFileContent } from './file-utils.js';
@@ -163,8 +165,11 @@ export class WebSocketImproviseHandler {
     try {
       const msg: WebSocketMessage = JSON.parse(message);
       const tabId = msg.tabId || 'default';
+      // Extract sandbox permission injected by server relay (for sandboxed shared users)
+      const permission = msg._permission;
+      delete msg._permission;
 
-      await this.dispatchMessage(ws, msg, tabId, workingDir);
+      await this.dispatchMessage(ws, msg, tabId, workingDir, permission);
     } catch (error: any) {
       console.error('[WebSocketImproviseHandler] Error handling message:', error);
       captureException(error, { context: 'websocket.handleMessage' });
@@ -178,7 +183,7 @@ export class WebSocketImproviseHandler {
   /**
    * Dispatch a parsed message to the appropriate handler
    */
-  private async dispatchMessage(ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): Promise<void> {
+  private async dispatchMessage(ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string, permission?: 'control' | 'view'): Promise<void> {
     switch (msg.type) {
       case 'ping':
         this.send(ws, { type: 'pong', tabId });
@@ -194,7 +199,7 @@ export class WebSocketImproviseHandler {
       case 'new':
       case 'approve':
       case 'reject':
-        return this.handleSessionMessage(ws, msg, tabId);
+        return this.handleSessionMessage(ws, msg, tabId, permission);
       case 'getSessions':
       case 'getSessionsCount':
       case 'getSessionById':
@@ -206,14 +211,14 @@ export class WebSocketImproviseHandler {
       case 'readFile':
       case 'recordSelection':
       case 'requestNotificationSummary':
-        return this.handleFileMessage(ws, msg, tabId, workingDir);
+        return this.handleFileMessage(ws, msg, tabId, workingDir, permission);
       case 'terminalInit':
       case 'terminalReconnect':
       case 'terminalList':
       case 'terminalInput':
       case 'terminalResize':
       case 'terminalClose':
-        return this.handleTerminalMessage(ws, msg, tabId, workingDir);
+        return this.handleTerminalMessage(ws, msg, tabId, workingDir, permission);
       case 'listDirectory':
       case 'writeFile':
       case 'createFile':
@@ -221,7 +226,7 @@ export class WebSocketImproviseHandler {
       case 'deleteFile':
       case 'renameFile':
       case 'notifyFileOpened':
-        return this.handleFileExplorerMessage(ws, msg, tabId, workingDir);
+        return this.handleFileExplorerMessage(ws, msg, tabId, workingDir, permission);
       case 'gitStatus':
       case 'gitStage':
       case 'gitUnstage':
@@ -233,6 +238,7 @@ export class WebSocketImproviseHandler {
       case 'gitSetDirectory':
       case 'gitGetRemoteInfo':
       case 'gitCreatePR':
+      case 'gitGeneratePRDescription':
         return this.handleGitMessage(ws, msg, tabId, workingDir);
       // Session sync messages
       case 'getActiveTabs':
@@ -262,12 +268,13 @@ export class WebSocketImproviseHandler {
   /**
    * Handle session-related messages (execute, cancel, history, new, approve, reject)
    */
-  private handleSessionMessage(ws: WSContext, msg: WebSocketMessage, tabId: string): void {
+  private handleSessionMessage(ws: WSContext, msg: WebSocketMessage, tabId: string, permission?: 'control' | 'view'): void {
     switch (msg.type) {
       case 'execute': {
         if (!msg.data?.prompt) throw new Error('Prompt is required');
         const session = this.requireSession(ws, tabId);
-        session.executePrompt(msg.data.prompt, msg.data.attachments);
+        const sandboxed = permission === 'control' || permission === 'view';
+        session.executePrompt(msg.data.prompt, msg.data.attachments, { sandboxed });
         break;
       }
       case 'cancel': {
@@ -346,16 +353,26 @@ export class WebSocketImproviseHandler {
   /**
    * Handle file-related messages (autocomplete, readFile, recordSelection, notifications)
    */
-  private handleFileMessage(ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): void {
+  private handleFileMessage(ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string, permission?: 'control' | 'view'): void {
+    const isSandboxed = permission === 'control' || permission === 'view';
     switch (msg.type) {
       case 'autocomplete':
         if (!msg.data?.partialPath) throw new Error('Partial path is required');
         this.send(ws, { type: 'autocomplete', tabId, data: { completions: this.autocompleteService.getFileCompletions(msg.data.partialPath, workingDir) } });
         break;
-      case 'readFile':
+      case 'readFile': {
         if (!msg.data?.filePath) throw new Error('File path is required');
+        // Sandboxed users (control + view) can only read files within the project directory
+        if (isSandboxed) {
+          const validation = validatePathWithinWorkingDir(msg.data.filePath, workingDir);
+          if (!validation.valid) {
+            this.send(ws, { type: 'fileContent', tabId, data: { path: msg.data.filePath, fileName: msg.data.filePath.split('/').pop() || '', content: '', error: 'Sandboxed: path outside project directory' } });
+            break;
+          }
+        }
         this.send(ws, { type: 'fileContent', tabId, data: readFileContent(msg.data.filePath, workingDir) });
         break;
+      }
       case 'recordSelection':
         if (msg.data?.filePath) this.recordFileSelection(msg.data.filePath);
         break;
@@ -369,11 +386,11 @@ export class WebSocketImproviseHandler {
   /**
    * Handle terminal messages
    */
-  private handleTerminalMessage(ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): void {
+  private handleTerminalMessage(ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string, permission?: 'control' | 'view'): void {
     const termId = msg.terminalId || tabId;
     switch (msg.type) {
       case 'terminalInit':
-        this.handleTerminalInit(ws, termId, workingDir, msg.data?.shell, msg.data?.cols, msg.data?.rows);
+        this.handleTerminalInit(ws, termId, workingDir, msg.data?.shell, msg.data?.cols, msg.data?.rows, permission);
         break;
       case 'terminalReconnect':
         this.handleTerminalReconnect(ws, termId);
@@ -489,9 +506,20 @@ export class WebSocketImproviseHandler {
     }
   }
 
-  private handleFileExplorerMessage(ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): void {
+  private handleFileExplorerMessage(ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string, permission?: 'control' | 'view'): void {
+    const isSandboxed = permission === 'control' || permission === 'view';
     const handlers: Record<string, () => void> = {
-      listDirectory: () => this.handleListDirectory(ws, msg, tabId, workingDir),
+      listDirectory: () => {
+        // Sandboxed users can only list directories within the project
+        if (isSandboxed && msg.data?.dirPath) {
+          const validation = validatePathWithinWorkingDir(msg.data.dirPath, workingDir);
+          if (!validation.valid) {
+            this.send(ws, { type: 'directoryListing', tabId, data: { success: false, path: msg.data.dirPath, error: 'Sandboxed: path outside project directory' } });
+            return;
+          }
+        }
+        this.handleListDirectory(ws, msg, tabId, workingDir);
+      },
       writeFile: () => this.handleWriteFile(ws, msg, tabId, workingDir),
       createFile: () => this.handleCreateFile(ws, msg, tabId, workingDir),
       createDirectory: () => this.handleCreateDirectory(ws, msg, tabId, workingDir),
@@ -1461,6 +1489,7 @@ Respond with ONLY the summary text, nothing else.`;
       gitSetDirectory: () => this.handleGitSetDirectory(ws, msg, tabId, workingDir),
       gitGetRemoteInfo: () => this.handleGitGetRemoteInfo(ws, tabId, gitDir),
       gitCreatePR: () => this.handleGitCreatePR(ws, msg, tabId, gitDir),
+      gitGeneratePRDescription: () => this.handleGitGeneratePRDescription(ws, msg, tabId, gitDir),
     };
     handlers[msg.type]?.();
   }
@@ -2208,6 +2237,22 @@ Respond with ONLY the commit message, nothing else.`;
         }
       }
 
+      // List remote branches
+      const remoteBranchResult = await this.executeGitCommand(['branch', '-r', '--list', 'origin/*'], workingDir);
+      const remoteBranches: string[] = [];
+      if (remoteBranchResult.exitCode === 0) {
+        for (const line of remoteBranchResult.stdout.split('\n')) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.includes('->')) continue; // skip HEAD pointer
+          const branch = trimmed.replace('origin/', '');
+          if (branch) remoteBranches.push(branch);
+        }
+        remoteBranches.sort();
+      }
+
+      // Load preferred base branch from settings
+      const preferredBaseBranch = getPrBaseBranch(remoteUrl) ?? undefined;
+
       this.send(ws, {
         type: 'gitRemoteInfo',
         tabId,
@@ -2220,6 +2265,8 @@ Respond with ONLY the commit message, nothing else.`;
           hasGhCli,
           ghCliAuthenticated,
           ghCliBinary,
+          remoteBranches,
+          preferredBaseBranch,
         },
       });
     } catch (error: any) {
@@ -2272,6 +2319,7 @@ Respond with ONLY the commit message, nothing else.`;
       );
 
       if (cliResult.created) {
+        if (baseBranch) setPrBaseBranch(remoteUrl, baseBranch);
         this.send(ws, { type: 'gitPRCreated', tabId, data: { url: cliResult.url!, method: isGitHub ? 'gh' : 'glab' } });
         return;
       }
@@ -2286,6 +2334,7 @@ Respond with ONLY the commit message, nothing else.`;
       const prUrl = this.buildBrowserPRUrl(remoteUrl, headBranch, baseBranch, title, body, isGitHub, isGitLab);
 
       if (prUrl) {
+        if (baseBranch) setPrBaseBranch(remoteUrl, baseBranch);
         this.send(ws, { type: 'gitPRCreated', tabId, data: { url: prUrl, method: 'browser' } });
       } else {
         this.send(ws, { type: 'gitError', tabId, data: { error: 'Could not determine remote URL format for PR creation' } });
@@ -2388,6 +2437,117 @@ Respond with ONLY the commit message, nothing else.`;
     return '';
   }
 
+  /**
+   * Generate a PR title and description using Haiku, based on the diff against the base branch.
+   */
+  private async handleGitGeneratePRDescription(ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): Promise<void> {
+    const baseBranch = msg.data?.baseBranch || 'main';
+
+    try {
+      // Get commit list for context
+      const logResult = await this.executeGitCommand(['log', `${baseBranch}..HEAD`, '--oneline'], workingDir);
+      const commits = logResult.exitCode === 0 ? logResult.stdout.trim() : '';
+
+      if (!commits) {
+        this.send(ws, { type: 'gitError', tabId, data: { error: `No commits found between ${baseBranch} and HEAD` } });
+        return;
+      }
+
+      // Get diff against base
+      const diffResult = await this.executeGitCommand(['diff', `${baseBranch}...HEAD`], workingDir);
+      const diff = diffResult.exitCode === 0 ? diffResult.stdout : '';
+
+      // Get changed files summary
+      const statResult = await this.executeGitCommand(['diff', `${baseBranch}...HEAD`, '--stat'], workingDir);
+      const stat = statResult.exitCode === 0 ? statResult.stdout.trim() : '';
+
+      // Truncate diff if too long (same pattern as commit message generation)
+      let truncatedDiff = diff;
+      if (diff.length > 8000) {
+        truncatedDiff = `${diff.slice(0, 4000)}\n\n... [diff truncated] ...\n\n${diff.slice(-3500)}`;
+      }
+
+      // Build prompt
+      const tempDir = join(workingDir, '.mstro', 'tmp');
+      if (!existsSync(tempDir)) {
+        mkdirSync(tempDir, { recursive: true });
+      }
+
+      const prompt = `You are generating a pull request title and description for the following changes.
+
+COMMITS (${baseBranch}..HEAD):
+${commits}
+
+FILES CHANGED:
+${stat}
+
+DIFF:
+${truncatedDiff}
+
+Generate a pull request title and description following these rules:
+1. TITLE: First line must be the PR title — imperative mood, under 70 characters
+2. Leave a blank line after the title
+3. BODY: Write a concise description in markdown with:
+   - A "## Summary" section with 1-3 bullet points explaining what changed and why
+   - Optionally a "## Details" section if the changes are complex
+4. Focus on the "why" not just the "what"
+5. No emojis
+
+Respond with ONLY the title and description, nothing else.`;
+
+      const promptFile = join(tempDir, `pr-desc-${Date.now()}.txt`);
+      writeFileSync(promptFile, prompt);
+
+      const systemPrompt = 'You are a pull request description assistant. Respond with only the PR title and description, no preamble or explanation.';
+
+      const args = [
+        '--print',
+        '--model', 'haiku',
+        '--system-prompt', systemPrompt,
+        promptFile
+      ];
+
+      const claude = spawn('claude', args, {
+        cwd: workingDir,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+
+      let stdout = '';
+      let stderr = '';
+
+      claude.stdout?.on('data', (data: Buffer) => { stdout += data.toString(); });
+      claude.stderr?.on('data', (data: Buffer) => { stderr += data.toString(); });
+
+      claude.on('close', (code: number | null) => {
+        try { unlinkSync(promptFile); } catch { /* ignore */ }
+
+        if (code !== 0 || !stdout.trim()) {
+          console.error('[WebSocketImproviseHandler] Claude PR description error:', stderr || 'No output');
+          this.send(ws, { type: 'gitError', tabId, data: { error: 'Failed to generate PR description' } });
+          return;
+        }
+
+        // Parse: first line = title, rest = body
+        const output = this.stripCoauthorLines(stdout.trim());
+        const lines = output.split('\n');
+        const title = lines[0].trim();
+        const body = lines.slice(1).join('\n').trim();
+
+        this.send(ws, { type: 'gitPRDescription', tabId, data: { title, body } });
+      });
+
+      claude.on('error', (err: Error) => {
+        console.error('[WebSocketImproviseHandler] Failed to spawn Claude for PR description:', err);
+        this.send(ws, { type: 'gitError', tabId, data: { error: 'Failed to generate PR description' } });
+      });
+
+      setTimeout(() => { claude.kill(); }, 30000);
+
+    } catch (error: any) {
+      this.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+    }
+  }
+
   // ============================================
   // Terminal handling methods
   // ============================================
@@ -2401,7 +2561,8 @@ Respond with ONLY the commit message, nothing else.`;
     workingDir: string,
     requestedShell?: string,
     cols?: number,
-    rows?: number
+    rows?: number,
+    permission?: 'control' | 'view'
   ): void {
 
     const ptyManager = getPTYManager();
@@ -2427,12 +2588,14 @@ Respond with ONLY the commit message, nothing else.`;
 
     try {
       // Create or reconnect to the PTY process
+      // Both 'control' and 'view' users get sandboxed terminals
       const { shell, cwd, isReconnect } = ptyManager.create(
         terminalId,
         workingDir,
         cols || 80,
         rows || 24,
-        requestedShell
+        requestedShell,
+        { sandboxed: permission === 'control' || permission === 'view' }
       );
 
       if (!isReconnect) {

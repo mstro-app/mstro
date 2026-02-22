@@ -18,6 +18,7 @@
 
 import { EventEmitter } from 'node:events';
 import { homedir, platform } from 'node:os';
+import { sanitizeEnvForSandbox } from '../sandbox-utils.js';
 
 // Try to load node-pty (optional native dependency)
 let pty: typeof import('node-pty') | null = null;
@@ -168,7 +169,8 @@ export class PTYManager extends EventEmitter {
     workingDir: string,
     cols: number = 80,
     rows: number = 24,
-    requestedShell?: string
+    requestedShell?: string,
+    options?: { sandboxed?: boolean }
   ): { shell: string; cwd: string; isReconnect: boolean } {
     // Check if node-pty is available
     if (!pty) {
@@ -197,19 +199,23 @@ export class PTYManager extends EventEmitter {
 
 
     try {
+      // Build env: sandboxed sessions get stripped secrets and HOME=projectDir
+      const baseEnv = options?.sandboxed
+        ? sanitizeEnvForSandbox(process.env, cwd)
+        : { ...process.env, HOME: homedir() };
+      const env = {
+        ...baseEnv,
+        TERM: 'xterm-256color',
+        COLORTERM: 'truecolor',
+      };
+
       // Spawn the PTY process
       const ptyProcess = pty.spawn(shell, [], {
         name: 'xterm-256color',
         cols,
         rows,
         cwd,
-        env: {
-          ...process.env,
-          TERM: 'xterm-256color',
-          COLORTERM: 'truecolor',
-          // Ensure home directory is set
-          HOME: homedir(),
-        },
+        env,
       });
 
       const session: PTYSession = {

@@ -7,16 +7,19 @@
  * Utilities for enriching prompts with context from previous conversation.
  */
 
+import { assessApproval } from './stall-assessor.js';
 import type { ImageAttachment, PromptContext } from './types.js';
 
 /**
- * Enrich prompt with context from previous conversation
+ * Enrich prompt with context from previous conversation.
+ * Async because ambiguous short prompts are classified by Haiku.
  */
-export function enrichPromptWithContext(prompt: string, context: PromptContext): string {
+export async function enrichPromptWithContext(prompt: string, context: PromptContext): Promise<string> {
   let enriched = prompt;
 
-  // Detect if this is a continuation/approval prompt
-  const isApprovalOrContinuation = isApprovalPrompt(prompt);
+  // Detect if this is a continuation/approval prompt.
+  // Fast regex path for obvious approvals, Haiku for ambiguous short prompts.
+  const isApprovalOrContinuation = await detectApproval(prompt);
 
   // Add accumulated knowledge from previous prompts
   if (context.accumulatedKnowledge) {
@@ -36,9 +39,38 @@ export function enrichPromptWithContext(prompt: string, context: PromptContext):
 }
 
 /**
- * Detect if a prompt is an approval or continuation
+ * Detect if a prompt is an approval or continuation.
+ * Layer 1: Regex fast path for obvious approvals (free, sync).
+ * Layer 2: Haiku assessment for ambiguous short prompts (<100 chars).
+ */
+async function detectApproval(prompt: string): Promise<boolean> {
+  // Layer 1: fast regex path
+  if (isApprovalPromptFast(prompt)) return true;
+
+  // Layer 2: Haiku for short ambiguous prompts.
+  // Long prompts (>100 chars) are almost certainly new tasks, not approvals.
+  if (prompt.trim().length <= 100) {
+    try {
+      const claudeCmd = process.env.CLAUDE_COMMAND || 'claude';
+      const verdict = await assessApproval(prompt, claudeCmd, false);
+      return verdict.isApproval;
+    } catch {
+      // Haiku failed — fall through to false
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Fast regex-based approval detection (sync, no API call).
+ * Catches obvious affirmatives. Ambiguous cases fall through to Haiku.
  */
 export function isApprovalPrompt(prompt: string): boolean {
+  return isApprovalPromptFast(prompt);
+}
+
+function isApprovalPromptFast(prompt: string): boolean {
   const lower = prompt.toLowerCase().trim();
 
   // Short affirmative responses

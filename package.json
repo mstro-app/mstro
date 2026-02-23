@@ -64,6 +64,9 @@
   "optionalDependencies": {
     "node-pty": "^1.1.0"
   },
+  "overrides": {
+    "minimatch": ">=10.2.1"
+  },
   "devDependencies": {
     "@biomejs/biome": "^2.3.13",
     "@types/node": "^24.10.7",

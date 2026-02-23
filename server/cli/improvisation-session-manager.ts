@@ -13,6 +13,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { join } from 'node:path';
 import { AnalyticsEvents, trackEvent } from '../services/analytics.js';
 import { HeadlessRunner } from './headless/index.js';
+import { assessBestResult, assessContextLoss, type ContextLossContext } from './headless/stall-assessor.js';
 import type { ExecutionCheckpoint } from './headless/types.js';
 
 export interface ImprovisationOptions {
@@ -57,6 +58,7 @@ export interface MovementRecord {
   thinkingOutput?: string;         // Extended thinking
   toolUseHistory?: ToolUseRecord[];// Tool invocations + results
   errorOutput?: string;            // Any errors
+  durationMs?: number;             // Execution duration in milliseconds
 }
 
 export interface SessionHistory {
@@ -68,6 +70,31 @@ export interface SessionHistory {
   claudeSessionId?: string;
 }
 
+
+/** Mutable state for the retry loop in executePrompt */
+interface RetryLoopState {
+  currentPrompt: string;
+  retryNumber: number;
+  checkpointRef: { value: ExecutionCheckpoint | null };
+  contextRecoverySessionId: string | undefined;
+  freshRecoveryMode: boolean;
+  accumulatedToolResults: ToolUseRecord[];
+  contextLost: boolean;
+  lastWatchdogCheckpoint: ExecutionCheckpoint | null;
+  timedOutTools: Array<{ toolName: string; input: Record<string, unknown>; timeoutMs: number }>;
+  bestResult: HeadlessRunResult | null;
+}
+
+/** Type alias for HeadlessRunner execution result */
+type HeadlessRunResult = Awaited<ReturnType<HeadlessRunner['run']>>;
+
+/** Score a run result for best-result tracking (higher = more productive) */
+function scoreRunResult(r: HeadlessRunResult): number {
+  const toolCount = r.toolUseHistory?.filter(t => t.result !== undefined && !t.isError).length ?? 0;
+  const responseLen = Math.min((r.assistantResponse?.length ?? 0) / 50, 100);
+  const hasThinking = r.thinkingOutput ? 20 : 0;
+  return toolCount * 10 + responseLen + hasThinking;
+}
 export class ImprovisationSessionManager extends EventEmitter {
   private sessionId: string;
   private improviseDir: string;
@@ -88,6 +115,8 @@ export class ImprovisationSessionManager extends EventEmitter {
 
   /** Whether a prompt is currently executing */
   private _isExecuting: boolean = false;
+  /** Timestamp when current execution started (for accurate elapsed time across reconnects) */
+  private _executionStartTimestamp: number | undefined;
   /** Buffered events during current execution, for replay on reconnect */
   private executionEventLog: Array<{ type: string; data: any; timestamp: number }> = [];
 
@@ -268,6 +297,7 @@ export class ImprovisationSessionManager extends EventEmitter {
     }
   }
 
+
   /**
    * Execute a user prompt directly (Improvise mode - no score decomposition)
    * Uses persistent Claude sessions via --resume <sessionId> for conversation continuity
@@ -276,255 +306,86 @@ export class ImprovisationSessionManager extends EventEmitter {
    */
   async executePrompt(userPrompt: string, attachments?: FileAttachment[], options?: { sandboxed?: boolean }): Promise<MovementRecord> {
     const _execStart = Date.now();
-
-    // Start execution event log for reconnect replay
     this._isExecuting = true;
+    this._executionStartTimestamp = _execStart;
     this.executionEventLog = [];
 
-    this.emit('onMovementStart', this.history.movements.length + 1, userPrompt);
+    const sequenceNumber = this.history.movements.length + 1;
+    this.emit('onMovementStart', sequenceNumber, userPrompt);
     trackEvent(AnalyticsEvents.IMPROVISE_PROMPT_RECEIVED, {
       prompt_length: userPrompt.length,
       has_attachments: !!(attachments && attachments.length > 0),
       attachment_count: attachments?.length || 0,
       image_attachment_count: attachments?.filter(a => a.isImage).length || 0,
-      sequence_number: this.history.movements.length + 1,
+      sequence_number: sequenceNumber,
       is_resumed_session: this.isResumedSession,
       model: this.options.model || 'default',
     });
 
     try {
-      const sequenceNumber = this.history.movements.length + 1;
-
-      // Log the movement start event
       this.executionEventLog.push({
         type: 'movementStart',
-        data: { sequenceNumber, prompt: userPrompt, timestamp: Date.now() },
+        data: { sequenceNumber, prompt: userPrompt, timestamp: Date.now(), executionStartTimestamp: this._executionStartTimestamp },
         timestamp: Date.now(),
       });
 
-      // DEBUG: Removed "Executing prompt..." message - it serves no purpose now that system responds fast
-      // this.queueOutput(`\n🎵 Executing prompt...\n`);
-      // this.flushOutputQueue();
+      const { prompt: promptWithAttachments, imageAttachments } = this.preparePromptAndAttachments(userPrompt, attachments);
+      const state: RetryLoopState = {
+        currentPrompt: promptWithAttachments,
+        retryNumber: 0,
+        checkpointRef: { value: null },
+        contextRecoverySessionId: undefined,
+        freshRecoveryMode: false,
+        accumulatedToolResults: [],
+        contextLost: false,
+        lastWatchdogCheckpoint: null,
+        timedOutTools: [],
+        bestResult: null,
+      };
 
-      // NOTE: Risk analysis removed - now handled by MCP bouncer at tool-use time
-      // The MCP bouncer intercepts ALL tool calls (Bash, Write, etc.) and uses
-      // Mstro's bouncer-integration.ts for AI-powered approval/denial.
-      // This is more effective than analyzing user prompts, which had false positives.
-
-
-      // Persist all attachments to disk so Claude Code can reference them as files
-      const diskPaths = attachments ? this.persistAttachments(attachments) : [];
-
-      // Build prompt with text file attachments prepended and disk path references
-      const promptWithAttachments = this.buildPromptWithAttachments(userPrompt, attachments, diskPaths);
-
-      // Checkpoint-and-retry loop: if a tool times out, we capture a checkpoint,
-      // kill the process, and retry with context from successful results
-      const maxRetries = 2;
-      let currentPrompt = promptWithAttachments;
-      let retryNumber = 0;
-      // Object wrapper so TS doesn't narrow the callback-assigned value to `never`
-      const checkpointRef: { value: ExecutionCheckpoint | null } = { value: null };
-      let result: Awaited<ReturnType<HeadlessRunner['run']>>;
-      const MAX_IMAGE_ATTACHMENTS = 20;
-      const allImages = attachments?.filter(a => a.isImage);
-      let imageAttachments = allImages;
-      if (allImages && allImages.length > MAX_IMAGE_ATTACHMENTS) {
-        imageAttachments = allImages.slice(-MAX_IMAGE_ATTACHMENTS);
-        this.queueOutput(
-          `\n[[MSTRO_ERROR:TOO_MANY_IMAGES]] ${allImages.length} images attached, limit is ${MAX_IMAGE_ATTACHMENTS}. Using the ${MAX_IMAGE_ATTACHMENTS} most recent.\n`
-        );
-        this.flushOutputQueue();
-      }
+      const maxRetries = 3;
+      let result: HeadlessRunResult;
 
       // eslint-disable-next-line no-constant-condition
       while (true) {
-        checkpointRef.value = null;
+        this.resetIterationState(state);
 
-        // Determine session resume strategy:
-        // - First attempt: resume the tab's existing Claude session
-        // - Retry when hung tool was the ONLY pending tool (no siblings lost):
-        //   try --resume since the session may be in a valid state
-        // - Retry with in-progress siblings: fresh session (incomplete tool calls break --resume)
-        let useResume = false;
-        let resumeSessionId: string | undefined;
-        if (retryNumber === 0) {
-          useResume = !this.isFirstPrompt;
-          resumeSessionId = this.claudeSessionId;
-        } else if (checkpointRef.value === null) {
-          // Shouldn't happen (we only retry when checkpoint exists), but be safe
-          useResume = false;
-        } else {
-          const cp = checkpointRef.value as ExecutionCheckpoint;
-          // If no sibling tools were in progress, the session might be resumable
-          // (the hung tool timed out on our side but Claude may have received an error result)
-          if (cp.inProgressTools.length === 0 && cp.claudeSessionId) {
-            useResume = true;
-            resumeSessionId = cp.claudeSessionId;
-          }
-        }
-
-        const runner = new HeadlessRunner({
-          workingDir: this.options.workingDir,
-          tokenBudgetThreshold: this.options.tokenBudgetThreshold,
-          maxSessions: this.options.maxSessions,
-          verbose: this.options.verbose,
-          noColor: this.options.noColor,
-          model: this.options.model,
-          improvisationMode: true,
-          movementNumber: sequenceNumber,
-          continueSession: useResume,
-          claudeSessionId: resumeSessionId,
-          outputCallback: (text: string) => {
-            this.executionEventLog.push({ type: 'output', data: { text, timestamp: Date.now() }, timestamp: Date.now() });
-            this.queueOutput(text);
-            this.flushOutputQueue();
-          },
-          thinkingCallback: (text: string) => {
-            this.executionEventLog.push({ type: 'thinking', data: { text }, timestamp: Date.now() });
-            this.emit('onThinking', text);
-            this.flushOutputQueue();
-          },
-          toolUseCallback: (event) => {
-            this.executionEventLog.push({ type: 'toolUse', data: { ...event, timestamp: Date.now() }, timestamp: Date.now() });
-            this.emit('onToolUse', event);
-            this.flushOutputQueue();
-          },
-          directPrompt: currentPrompt,
-          imageAttachments,
-          // Inject historical context on first prompt of a resumed session
-          promptContext: (retryNumber === 0 && this.isResumedSession && this.isFirstPrompt)
-            ? { accumulatedKnowledge: this.buildHistoricalContext(), filesModified: [] }
-            : undefined,
-          onToolTimeout: (checkpoint: ExecutionCheckpoint) => {
-            checkpointRef.value = checkpoint;
-          },
-          sandboxed: options?.sandboxed,
-        });
-
+        const { useResume, resumeSessionId } = this.determineResumeStrategy(state);
+        const runner = this.createExecutionRunner(state, sequenceNumber, useResume, resumeSessionId, imageAttachments, options?.sandboxed);
         this.currentRunner = runner;
         result = await runner.run();
         this.currentRunner = null;
 
-        // If no tool timeout occurred, or we've exhausted retries, break
-        if (!checkpointRef.value || retryNumber >= maxRetries) {
-          break;
-        }
+        this.updateBestResult(state, result);
+        const nativeTimeouts = result.nativeTimeoutCount ?? 0;
+        this.detectResumeContextLoss(result, state, useResume, maxRetries, nativeTimeouts);
+        await this.detectNativeTimeoutContextLoss(result, state, maxRetries, nativeTimeouts);
+        this.flushPostTimeoutOutput(result, state);
 
-        // Tool timed out — extract checkpoint (TS needs this in a separate const after the guard)
-        const cp: ExecutionCheckpoint = checkpointRef.value;
-        retryNumber++;
-
-        const canResumeSession = cp.inProgressTools.length === 0 && !!cp.claudeSessionId;
-        this.emit('onAutoRetry', {
-          retryNumber,
-          maxRetries,
-          toolName: cp.hungTool.toolName,
-          url: cp.hungTool.url,
-          completedCount: cp.completedTools.length,
-        });
-
-        trackEvent(AnalyticsEvents.IMPROVISE_AUTO_RETRY, {
-          retry_number: retryNumber,
-          hung_tool: cp.hungTool.toolName,
-          hung_url: cp.hungTool.url?.slice(0, 200),
-          completed_tools: cp.completedTools.length,
-          elapsed_ms: cp.elapsedMs,
-          resume_attempted: canResumeSession,
-        });
-
-        // When resuming, use a shorter prompt (session already has context).
-        // When starting fresh, inject full checkpoint data.
-        currentPrompt = canResumeSession
-          ? this.buildResumeRetryPrompt(cp)
-          : this.buildRetryPrompt(cp, promptWithAttachments);
-
-        this.queueOutput(
-          `\n[[MSTRO_AUTO_RETRY]] Auto-retry ${retryNumber}/${maxRetries}: ${canResumeSession ? 'Resuming session' : 'Continuing'} with ${cp.completedTools.length} successful results, skipping failed ${cp.hungTool.toolName}.\n`
-        );
-        this.flushOutputQueue();
+        if (this.shouldRetryContextLoss(result, state, useResume, nativeTimeouts, maxRetries, promptWithAttachments)) continue;
+        if (this.applyToolTimeoutRetry(state, maxRetries, promptWithAttachments)) continue;
+        break;
       }
 
-      // Capture Claude session ID for future prompts in this tab
-      // This is critical for tab isolation - each tab maintains its own Claude session
-      if (result.claudeSessionId) {
-        this.claudeSessionId = result.claudeSessionId;
-        this.history.claudeSessionId = result.claudeSessionId;
-      }
-
-      // Surface execution failure to user — without this, failures show as
-      // "Command completed" with no output (the error only existed in errorOutput)
-      if (!result.completed && result.error) {
-        this.queueOutput(`\n[[MSTRO_ERROR:EXECUTION_FAILED]] ${result.error}\n`);
-        this.flushOutputQueue();
-      }
-
-      // Mark that we've executed at least one prompt
+      if (state.contextLost) this.claudeSessionId = undefined;
+      result = await this.selectBestResult(state, result, userPrompt);
+      this.captureSessionAndSurfaceErrors(result);
       this.isFirstPrompt = false;
 
-      // Create movement record with accumulated output for persistence
-      const movement: MovementRecord = {
-        id: `prompt-${sequenceNumber}`,
-        sequenceNumber,
-        userPrompt,
-        timestamp: new Date().toISOString(),
-        tokensUsed: result.totalTokens,
-        summary: '', // No summary needed - Claude session maintains context
-        filesModified: [],
-        // Persist accumulated output for history replay
-        assistantResponse: result.assistantResponse,
-        thinkingOutput: result.thinkingOutput,
-        toolUseHistory: result.toolUseHistory?.map(t => ({
-          toolName: t.toolName,
-          toolId: t.toolId,
-          toolInput: t.toolInput,
-          result: t.result,
-          isError: t.isError,
-          duration: t.duration
-        })),
-        errorOutput: result.error
-      };
-
-      // Handle file conflicts if any
-      if (result.conflicts && result.conflicts.length > 0) {
-        this.queueOutput(`\n⚠ File conflicts detected: ${result.conflicts.length}`);
-        result.conflicts.forEach(c => {
-          this.queueOutput(`  - ${c.filePath} (modified by: ${c.modifiedBy.join(', ')})`);
-          if (c.backupPath) {
-            this.queueOutput(`    Backup created: ${c.backupPath}`);
-          }
-        });
-        this.flushOutputQueue();
-      }
-
-      this.history.movements.push(movement);
-      this.history.totalTokens += movement.tokensUsed;
-
-      // Save history
-      this.saveHistory();
-
-      // Completion message is now handled by the client-side movementComplete event handler
-      // This prevents duplicate completion messages (one white, one green)
-      // this.queueOutput(`\n✓ Complete (tokens: ${result.totalTokens.toLocaleString()})\n`);
-      // this.flushOutputQueue();
+      const movement = this.buildMovementRecord(result, userPrompt, sequenceNumber, _execStart);
+      this.handleConflicts(result);
+      this.persistMovement(movement);
 
       this._isExecuting = false;
+      this._executionStartTimestamp = undefined;
       this.executionEventLog = [];
 
-      this.emit('onMovementComplete', movement);
-      trackEvent(AnalyticsEvents.IMPROVISE_MOVEMENT_COMPLETED, {
-        tokens_used: movement.tokensUsed,
-        duration_ms: Date.now() - _execStart,
-        sequence_number: sequenceNumber,
-        tool_count: result.toolUseHistory?.length || 0,
-        model: this.options.model || 'default',
-      });
-      this.emit('onSessionUpdate', this.getHistory());
-
+      this.emitMovementComplete(movement, result, _execStart, sequenceNumber);
       return movement;
 
     } catch (error: any) {
       this._isExecuting = false;
+      this._executionStartTimestamp = undefined;
       this.executionEventLog = [];
       this.currentRunner = null;
       this.emit('onMovementError', error);
@@ -538,9 +399,465 @@ export class ImprovisationSessionManager extends EventEmitter {
       this.flushOutputQueue();
       throw error;
     } finally {
-      // Ensure final flush
       this.flushOutputQueue();
     }
+  }
+
+  // ========== Extracted helpers for executePrompt ==========
+
+  /** Prepare prompt with attachments and limit image count */
+  private preparePromptAndAttachments(
+    userPrompt: string,
+    attachments: FileAttachment[] | undefined,
+  ): { prompt: string; imageAttachments: FileAttachment[] | undefined } {
+    const diskPaths = attachments ? this.persistAttachments(attachments) : [];
+    const prompt = this.buildPromptWithAttachments(userPrompt, attachments, diskPaths);
+
+    const MAX_IMAGE_ATTACHMENTS = 20;
+    const allImages = attachments?.filter(a => a.isImage);
+    let imageAttachments = allImages;
+    if (allImages && allImages.length > MAX_IMAGE_ATTACHMENTS) {
+      imageAttachments = allImages.slice(-MAX_IMAGE_ATTACHMENTS);
+      this.queueOutput(
+        `\n[[MSTRO_ERROR:TOO_MANY_IMAGES]] ${allImages.length} images attached, limit is ${MAX_IMAGE_ATTACHMENTS}. Using the ${MAX_IMAGE_ATTACHMENTS} most recent.\n`
+      );
+      this.flushOutputQueue();
+    }
+
+    return { prompt, imageAttachments };
+  }
+
+  /** Determine whether to use --resume and which session ID */
+  private determineResumeStrategy(state: RetryLoopState): { useResume: boolean; resumeSessionId: string | undefined } {
+    if (state.freshRecoveryMode) {
+      state.freshRecoveryMode = false;
+      return { useResume: false, resumeSessionId: undefined };
+    }
+    if (state.contextRecoverySessionId) {
+      const id = state.contextRecoverySessionId;
+      state.contextRecoverySessionId = undefined;
+      return { useResume: true, resumeSessionId: id };
+    }
+    if (state.retryNumber === 0) {
+      return { useResume: !this.isFirstPrompt, resumeSessionId: this.claudeSessionId };
+    }
+    if (state.lastWatchdogCheckpoint?.inProgressTools.length === 0 && state.lastWatchdogCheckpoint.claudeSessionId) {
+      return { useResume: true, resumeSessionId: state.lastWatchdogCheckpoint.claudeSessionId };
+    }
+    return { useResume: false, resumeSessionId: undefined };
+  }
+
+  /** Create HeadlessRunner for one retry iteration */
+  private createExecutionRunner(
+    state: RetryLoopState,
+    sequenceNumber: number,
+    useResume: boolean,
+    resumeSessionId: string | undefined,
+    imageAttachments: FileAttachment[] | undefined,
+    sandboxed: boolean | undefined,
+  ): HeadlessRunner {
+    return new HeadlessRunner({
+      workingDir: this.options.workingDir,
+      tokenBudgetThreshold: this.options.tokenBudgetThreshold,
+      maxSessions: this.options.maxSessions,
+      verbose: this.options.verbose,
+      noColor: this.options.noColor,
+      model: this.options.model,
+      improvisationMode: true,
+      movementNumber: sequenceNumber,
+      continueSession: useResume,
+      claudeSessionId: resumeSessionId,
+      outputCallback: (text: string) => {
+        this.executionEventLog.push({ type: 'output', data: { text, timestamp: Date.now() }, timestamp: Date.now() });
+        this.queueOutput(text);
+        this.flushOutputQueue();
+      },
+      thinkingCallback: (text: string) => {
+        this.executionEventLog.push({ type: 'thinking', data: { text }, timestamp: Date.now() });
+        this.emit('onThinking', text);
+        this.flushOutputQueue();
+      },
+      toolUseCallback: (event) => {
+        this.executionEventLog.push({ type: 'toolUse', data: { ...event, timestamp: Date.now() }, timestamp: Date.now() });
+        this.emit('onToolUse', event);
+        this.flushOutputQueue();
+      },
+      directPrompt: state.currentPrompt,
+      imageAttachments,
+      promptContext: (state.retryNumber === 0 && this.isResumedSession && this.isFirstPrompt)
+        ? { accumulatedKnowledge: this.buildHistoricalContext(), filesModified: [] }
+        : undefined,
+      onToolTimeout: (checkpoint: ExecutionCheckpoint) => {
+        state.checkpointRef.value = checkpoint;
+      },
+      sandboxed,
+    });
+  }
+
+  /** Save checkpoint and reset per-iteration state before each retry loop pass. */
+  private resetIterationState(state: RetryLoopState): void {
+    if (state.checkpointRef.value) state.lastWatchdogCheckpoint = state.checkpointRef.value;
+    state.checkpointRef.value = null;
+    state.contextLost = false;
+  }
+
+  /** Update best result tracking */
+  private updateBestResult(state: RetryLoopState, result: HeadlessRunResult): void {
+    if (!state.bestResult || scoreRunResult(result) > scoreRunResult(state.bestResult)) {
+      state.bestResult = result;
+    }
+  }
+
+  /** Detect resume context loss (Path 1): session expired on --resume */
+  private detectResumeContextLoss(
+    result: HeadlessRunResult,
+    state: RetryLoopState,
+    useResume: boolean,
+    maxRetries: number,
+    nativeTimeouts: number,
+  ): void {
+    if (!useResume || state.checkpointRef.value || state.retryNumber >= maxRetries || nativeTimeouts > 0) {
+      return;
+    }
+    if (!result.assistantResponse || result.assistantResponse.trim().length === 0) {
+      state.contextLost = true;
+      if (this.options.verbose) console.log('[CONTEXT-RECOVERY] Resume context loss: null/empty response');
+    } else if (result.resumeBufferedOutput !== undefined) {
+      state.contextLost = true;
+      if (this.options.verbose) console.log('[CONTEXT-RECOVERY] Resume context loss: buffer never flushed (no thinking/tools)');
+    } else if (
+      (!result.toolUseHistory || result.toolUseHistory.length === 0) &&
+      !result.thinkingOutput &&
+      result.assistantResponse.length < 500
+    ) {
+      state.contextLost = true;
+      if (this.options.verbose) console.log('[CONTEXT-RECOVERY] Resume context loss: no tools, no thinking, short response');
+    }
+  }
+
+  /** Detect native timeout context loss (Path 2): tool timeouts caused confusion */
+  private async detectNativeTimeoutContextLoss(
+    result: HeadlessRunResult,
+    state: RetryLoopState,
+    maxRetries: number,
+    nativeTimeouts: number,
+  ): Promise<void> {
+    if (state.contextLost) return;
+
+    const toolsWithoutResult = result.toolUseHistory?.filter(t => t.result === undefined).length ?? 0;
+    const effectiveTimeouts = Math.max(nativeTimeouts, toolsWithoutResult);
+
+    if (effectiveTimeouts === 0 || !result.assistantResponse || state.checkpointRef.value || state.retryNumber >= maxRetries) {
+      return;
+    }
+
+    const writeToolNames = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
+    const contextLossCtx: ContextLossContext = {
+      assistantResponse: result.assistantResponse,
+      effectiveTimeouts,
+      nativeTimeoutCount: nativeTimeouts,
+      successfulToolCalls: result.toolUseHistory?.filter(t => t.result !== undefined && !t.isError).length ?? 0,
+      thinkingOutputLength: result.thinkingOutput?.length ?? 0,
+      hasSuccessfulWrite: result.toolUseHistory?.some(
+        t => writeToolNames.has(t.toolName) && t.result !== undefined && !t.isError
+      ) ?? false,
+    };
+
+    const claudeCmd = process.env.CLAUDE_COMMAND || 'claude';
+    const verdict = await assessContextLoss(contextLossCtx, claudeCmd, this.options.verbose);
+    state.contextLost = verdict.contextLost;
+    if (this.options.verbose) {
+      console.log(`[CONTEXT-RECOVERY] Haiku verdict: ${state.contextLost ? 'LOST' : 'OK'} — ${verdict.reason}`);
+    }
+  }
+
+  /** Flush post-timeout output if context wasn't lost */
+  private flushPostTimeoutOutput(result: HeadlessRunResult, state: RetryLoopState): void {
+    if (!state.contextLost && result.postTimeoutOutput) {
+      this.queueOutput(result.postTimeoutOutput);
+      this.flushOutputQueue();
+    }
+  }
+
+  /** Check if context loss recovery should trigger a retry. Returns true if loop should continue. */
+  private shouldRetryContextLoss(
+    result: HeadlessRunResult,
+    state: RetryLoopState,
+    useResume: boolean,
+    nativeTimeouts: number,
+    maxRetries: number,
+    promptWithAttachments: string,
+  ): boolean {
+    if (state.checkpointRef.value || state.retryNumber >= maxRetries || !state.contextLost) {
+      return false;
+    }
+    this.accumulateToolResults(result, state);
+    state.retryNumber++;
+    if (useResume && nativeTimeouts === 0) {
+      this.applyInterMovementRecovery(state, promptWithAttachments);
+    } else {
+      this.applyNativeTimeoutRecovery(result, state, promptWithAttachments);
+    }
+    return true;
+  }
+
+  /** Accumulate completed tool results from a run into the retry state */
+  private accumulateToolResults(result: HeadlessRunResult, state: RetryLoopState): void {
+    if (!result.toolUseHistory) return;
+    for (const t of result.toolUseHistory) {
+      if (t.result !== undefined) {
+        state.accumulatedToolResults.push({
+          toolName: t.toolName,
+          toolId: t.toolId,
+          toolInput: t.toolInput,
+          result: t.result,
+          isError: t.isError,
+          duration: t.duration,
+        });
+      }
+    }
+  }
+
+  /** Handle inter-movement context loss recovery (resume session expired) */
+  private applyInterMovementRecovery(state: RetryLoopState, promptWithAttachments: string): void {
+    this.claudeSessionId = undefined;
+    const historicalResults = this.extractHistoricalToolResults();
+    const allResults = [...historicalResults, ...state.accumulatedToolResults];
+
+    this.emit('onAutoRetry', {
+      retryNumber: state.retryNumber,
+      maxRetries: 3,
+      toolName: 'InterMovementRecovery',
+      completedCount: allResults.length,
+    });
+    this.queueOutput(
+      `\n[[MSTRO_CONTEXT_RECOVERY]] Session context expired — continuing with ${allResults.length} preserved results from prior work (retry ${state.retryNumber}/3).\n`
+    );
+    this.flushOutputQueue();
+
+    state.freshRecoveryMode = true;
+    state.currentPrompt = this.buildInterMovementRecoveryPrompt(promptWithAttachments, allResults);
+  }
+
+  /** Handle native-timeout context loss recovery (tool timeouts caused confusion) */
+  private applyNativeTimeoutRecovery(
+    result: HeadlessRunResult,
+    state: RetryLoopState,
+    promptWithAttachments: string,
+  ): void {
+    const completedCount = state.accumulatedToolResults.length;
+
+    this.emit('onAutoRetry', {
+      retryNumber: state.retryNumber,
+      maxRetries: 3,
+      toolName: 'ContextRecovery',
+      completedCount,
+    });
+
+    if (result.claudeSessionId && state.retryNumber === 1) {
+      this.queueOutput(
+        `\n[[MSTRO_CONTEXT_RECOVERY]] Context loss detected — resuming session with ${completedCount} preserved results (retry ${state.retryNumber}/3).\n`
+      );
+      this.flushOutputQueue();
+      state.contextRecoverySessionId = result.claudeSessionId;
+      this.claudeSessionId = result.claudeSessionId;
+      state.currentPrompt = this.buildContextRecoveryPrompt(promptWithAttachments);
+    } else {
+      this.queueOutput(
+        `\n[[MSTRO_CONTEXT_RECOVERY]] Continuing with fresh context — ${completedCount} preserved results injected (retry ${state.retryNumber}/3).\n`
+      );
+      this.flushOutputQueue();
+      state.freshRecoveryMode = true;
+      state.currentPrompt = this.buildFreshRecoveryPrompt(promptWithAttachments, state.accumulatedToolResults);
+    }
+  }
+
+  /** Handle tool timeout checkpoint. Returns true if loop should continue. */
+  private applyToolTimeoutRetry(
+    state: RetryLoopState,
+    maxRetries: number,
+    promptWithAttachments: string,
+  ): boolean {
+    if (!state.checkpointRef.value || state.retryNumber >= maxRetries) {
+      return false;
+    }
+
+    const cp: ExecutionCheckpoint = state.checkpointRef.value;
+    state.retryNumber++;
+
+    state.timedOutTools.push({
+      toolName: cp.hungTool.toolName,
+      input: cp.hungTool.input ?? {},
+      timeoutMs: cp.hungTool.timeoutMs,
+    });
+
+    const canResumeSession = cp.inProgressTools.length === 0 && !!cp.claudeSessionId;
+    this.emit('onAutoRetry', {
+      retryNumber: state.retryNumber,
+      maxRetries,
+      toolName: cp.hungTool.toolName,
+      url: cp.hungTool.url,
+      completedCount: cp.completedTools.length,
+    });
+
+    trackEvent(AnalyticsEvents.IMPROVISE_AUTO_RETRY, {
+      retry_number: state.retryNumber,
+      hung_tool: cp.hungTool.toolName,
+      hung_url: cp.hungTool.url?.slice(0, 200),
+      completed_tools: cp.completedTools.length,
+      elapsed_ms: cp.elapsedMs,
+      resume_attempted: canResumeSession,
+    });
+
+    state.currentPrompt = canResumeSession
+      ? this.buildResumeRetryPrompt(cp, state.timedOutTools)
+      : this.buildRetryPrompt(cp, promptWithAttachments, state.timedOutTools);
+
+    this.queueOutput(
+      `\n[[MSTRO_AUTO_RETRY]] Auto-retry ${state.retryNumber}/${maxRetries}: ${canResumeSession ? 'Resuming session' : 'Continuing'} with ${cp.completedTools.length} successful results, skipping failed ${cp.hungTool.toolName}.\n`
+    );
+    this.flushOutputQueue();
+
+    return true;
+  }
+
+  /** Select the best result across retries using Haiku assessment */
+  private async selectBestResult(
+    state: RetryLoopState,
+    result: HeadlessRunResult,
+    userPrompt: string,
+  ): Promise<HeadlessRunResult> {
+    if (!state.bestResult || state.bestResult === result || state.retryNumber === 0) {
+      return result;
+    }
+
+    const claudeCmd = process.env.CLAUDE_COMMAND || 'claude';
+    const bestToolCount = state.bestResult.toolUseHistory?.filter(t => t.result !== undefined && !t.isError).length ?? 0;
+    const currentToolCount = result.toolUseHistory?.filter(t => t.result !== undefined && !t.isError).length ?? 0;
+
+    try {
+      const verdict = await assessBestResult({
+        originalPrompt: userPrompt,
+        resultA: {
+          successfulToolCalls: bestToolCount,
+          responseLength: state.bestResult.assistantResponse?.length ?? 0,
+          hasThinking: !!state.bestResult.thinkingOutput,
+          responseTail: (state.bestResult.assistantResponse ?? '').slice(-500),
+        },
+        resultB: {
+          successfulToolCalls: currentToolCount,
+          responseLength: result.assistantResponse?.length ?? 0,
+          hasThinking: !!result.thinkingOutput,
+          responseTail: (result.assistantResponse ?? '').slice(-500),
+        },
+      }, claudeCmd, this.options.verbose);
+
+      if (verdict.winner === 'A') {
+        if (this.options.verbose) console.log(`[BEST-RESULT] Haiku picked earlier attempt: ${verdict.reason}`);
+        return this.mergeResultSessionId(state.bestResult, result.claudeSessionId);
+      }
+      if (this.options.verbose) console.log(`[BEST-RESULT] Haiku picked final attempt: ${verdict.reason}`);
+      return result;
+    } catch {
+      return this.fallbackBestResult(state.bestResult, result);
+    }
+  }
+
+  /** Fallback best result selection using numeric scoring */
+  private fallbackBestResult(bestResult: HeadlessRunResult, result: HeadlessRunResult): HeadlessRunResult {
+    if (scoreRunResult(bestResult) > scoreRunResult(result)) {
+      if (this.options.verbose) {
+        console.log(`[BEST-RESULT] Haiku unavailable, numeric fallback: earlier attempt (score ${scoreRunResult(bestResult)} vs ${scoreRunResult(result)})`);
+      }
+      return this.mergeResultSessionId(bestResult, result.claudeSessionId);
+    }
+    return result;
+  }
+
+  /** Replace a result's claudeSessionId with a newer one */
+  private mergeResultSessionId(result: HeadlessRunResult, sessionId: string | undefined): HeadlessRunResult {
+    if (sessionId) return { ...result, claudeSessionId: sessionId };
+    return result;
+  }
+
+  /** Capture Claude session ID and surface execution failures */
+  private captureSessionAndSurfaceErrors(result: HeadlessRunResult): void {
+    if (result.claudeSessionId) {
+      this.claudeSessionId = result.claudeSessionId;
+      this.history.claudeSessionId = result.claudeSessionId;
+    }
+    if (!result.completed && result.error) {
+      this.queueOutput(`\n[[MSTRO_ERROR:EXECUTION_FAILED]] ${result.error}\n`);
+      this.flushOutputQueue();
+    }
+  }
+
+  /** Build a MovementRecord from execution result */
+  private buildMovementRecord(
+    result: HeadlessRunResult,
+    userPrompt: string,
+    sequenceNumber: number,
+    execStart: number,
+  ): MovementRecord {
+    return {
+      id: `prompt-${sequenceNumber}`,
+      sequenceNumber,
+      userPrompt,
+      timestamp: new Date().toISOString(),
+      tokensUsed: result.totalTokens,
+      summary: '',
+      filesModified: [],
+      assistantResponse: result.assistantResponse,
+      thinkingOutput: result.thinkingOutput,
+      toolUseHistory: result.toolUseHistory?.map(t => ({
+        toolName: t.toolName,
+        toolId: t.toolId,
+        toolInput: t.toolInput,
+        result: t.result,
+        isError: t.isError,
+        duration: t.duration
+      })),
+      errorOutput: result.error,
+      durationMs: Date.now() - execStart,
+    };
+  }
+
+  /** Handle file conflicts from execution result */
+  private handleConflicts(result: HeadlessRunResult): void {
+    if (!result.conflicts || result.conflicts.length === 0) return;
+    this.queueOutput(`\n⚠ File conflicts detected: ${result.conflicts.length}`);
+    result.conflicts.forEach(c => {
+      this.queueOutput(`  - ${c.filePath} (modified by: ${c.modifiedBy.join(', ')})`);
+      if (c.backupPath) {
+        this.queueOutput(`    Backup created: ${c.backupPath}`);
+      }
+    });
+    this.flushOutputQueue();
+  }
+
+  /** Persist movement to history */
+  private persistMovement(movement: MovementRecord): void {
+    this.history.movements.push(movement);
+    this.history.totalTokens += movement.tokensUsed;
+    this.saveHistory();
+  }
+
+  /** Emit movement completion events and analytics */
+  private emitMovementComplete(
+    movement: MovementRecord,
+    result: HeadlessRunResult,
+    execStart: number,
+    sequenceNumber: number,
+  ): void {
+    this.emit('onMovementComplete', movement);
+    trackEvent(AnalyticsEvents.IMPROVISE_MOVEMENT_COMPLETED, {
+      tokens_used: movement.tokensUsed,
+      duration_ms: Date.now() - execStart,
+      sequence_number: sequenceNumber,
+      tool_count: result.toolUseHistory?.length || 0,
+      model: this.options.model || 'default',
+    });
+    this.emit('onSessionUpdate', this.getHistory());
   }
 
   /**
@@ -595,46 +912,38 @@ export class ImprovisationSessionManager extends EventEmitter {
    * Build a retry prompt from a tool timeout checkpoint.
    * Injects completed tool results and instructs Claude to skip the failed resource.
    */
-  private buildRetryPrompt(checkpoint: ExecutionCheckpoint, originalPrompt: string): string {
-    const parts: string[] = [];
+  private buildRetryPrompt(
+    checkpoint: ExecutionCheckpoint,
+    originalPrompt: string,
+    allTimedOut?: Array<{ toolName: string; input: Record<string, unknown>; timeoutMs: number }>,
+  ): string {
+    const urlSuffix = checkpoint.hungTool.url ? ` while fetching: ${checkpoint.hungTool.url}` : '';
+    const parts: string[] = [
+      '## AUTOMATIC RETRY -- Previous Execution Interrupted',
+      '',
+      `The previous execution was interrupted because ${checkpoint.hungTool.toolName} timed out after ${Math.round(checkpoint.hungTool.timeoutMs / 1000)}s${urlSuffix}.`,
+      '',
+    ];
 
-    parts.push('## AUTOMATIC RETRY -- Previous Execution Interrupted');
-    parts.push('');
-    parts.push(
-      `The previous execution was interrupted because ${checkpoint.hungTool.toolName} timed out after ${Math.round(checkpoint.hungTool.timeoutMs / 1000)}s${checkpoint.hungTool.url ? ` while fetching: ${checkpoint.hungTool.url}` : ''}.`
-    );
-    parts.push('');
-    parts.push('This URL/resource is unreachable. DO NOT retry the same URL or query.');
-    parts.push('');
+    if (allTimedOut && allTimedOut.length > 0) {
+      parts.push(...this.formatTimedOutTools(allTimedOut), '');
+    } else {
+      parts.push('This URL/resource is unreachable. DO NOT retry the same URL or query.', '');
+    }
 
     if (checkpoint.completedTools.length > 0) {
-      parts.push('### Results already obtained:');
-      for (const tool of checkpoint.completedTools) {
-        const inputSummary = this.summarizeToolInput(tool.input);
-        const resultPreview = tool.result.length > 2000
-          ? `${tool.result.slice(0, 2000)}...`
-          : tool.result;
-        parts.push(`- **${tool.toolName}**(${inputSummary}): ${resultPreview}`);
-      }
-      parts.push('');
+      parts.push(...this.formatCompletedTools(checkpoint.completedTools), '');
     }
 
     if (checkpoint.inProgressTools && checkpoint.inProgressTools.length > 0) {
-      parts.push('### Tools that were still running (lost when process was killed):');
-      for (const tool of checkpoint.inProgressTools) {
-        const inputSummary = this.summarizeToolInput(tool.input);
-        parts.push(`- **${tool.toolName}**(${inputSummary}) — was in progress, may need re-running`);
-      }
-      parts.push('');
+      parts.push(...this.formatInProgressTools(checkpoint.inProgressTools), '');
     }
 
     if (checkpoint.assistantText) {
-      parts.push('### Your response before interruption:');
       const preview = checkpoint.assistantText.length > 8000
         ? `${checkpoint.assistantText.slice(0, 8000)}...\n(truncated — full response was ${checkpoint.assistantText.length} chars)`
         : checkpoint.assistantText;
-      parts.push(preview);
-      parts.push('');
+      parts.push('### Your response before interruption:', preview, '');
     }
 
     parts.push('### Original task (continue from where you left off):');
@@ -654,14 +963,144 @@ export class ImprovisationSessionManager extends EventEmitter {
    * The session already has full conversation context, so we only need to
    * explain what timed out and instruct Claude to continue.
    */
-  private buildResumeRetryPrompt(checkpoint: ExecutionCheckpoint): string {
+  private buildResumeRetryPrompt(
+    checkpoint: ExecutionCheckpoint,
+    allTimedOut?: Array<{ toolName: string; input: Record<string, unknown>; timeoutMs: number }>,
+  ): string {
     const parts: string[] = [];
 
     parts.push(
       `Your previous ${checkpoint.hungTool.toolName} call timed out after ${Math.round(checkpoint.hungTool.timeoutMs / 1000)}s${checkpoint.hungTool.url ? ` fetching: ${checkpoint.hungTool.url}` : ''}.`
     );
-    parts.push('This URL/resource is unreachable. DO NOT retry the same URL or query.');
+
+    // List all timed-out tools across retries so Claude avoids repeating them
+    if (allTimedOut && allTimedOut.length > 1) {
+      parts.push('');
+      parts.push('All timed-out tools/resources (DO NOT retry any of these):');
+      for (const t of allTimedOut) {
+        const inputSummary = this.summarizeToolInput(t.input);
+        parts.push(`- ${t.toolName}(${inputSummary})`);
+      }
+    } else {
+      parts.push('This URL/resource is unreachable. DO NOT retry the same URL or query.');
+    }
     parts.push('Continue your task — find an alternative source or proceed with the results you already have.');
+
+    return parts.join('\n');
+  }
+
+  // Context loss detection is now handled by assessContextLoss() in stall-assessor.ts
+  // using Haiku assessment instead of brittle regex patterns.
+
+  /**
+   * Build a recovery prompt for --resume after context loss.
+   * Since we're resuming the same session, Claude has full conversation history
+   * (including all preserved tool results). We just need to redirect it back to the task.
+   */
+  private buildContextRecoveryPrompt(originalPrompt: string): string {
+    const parts: string[] = [];
+
+    parts.push('Your previous response indicated you lost context due to tool timeouts, but your full conversation history is preserved — including all successful tool results.');
+    parts.push('');
+    parts.push('Review your conversation history above. You already have results from many successful tool calls. Use those results to continue the task.');
+    parts.push('');
+    parts.push('Original task:');
+    parts.push(originalPrompt);
+    parts.push('');
+    parts.push('INSTRUCTIONS:');
+    parts.push('1. Review your conversation history — all your previous tool results are still available');
+    parts.push('2. Continue from where you left off using the results you already gathered');
+    parts.push('3. If specific tool calls timed out, skip those and work with what you have');
+    parts.push('4. Do NOT start over — build on the work already done');
+    parts.push('5. Do NOT spawn Task subagents for work that previously timed out — do it inline instead');
+    parts.push('6. Prefer multiple small, focused tool calls over single large ones to avoid further timeouts');
+
+    return parts.join('\n');
+  }
+
+  /**
+   * Build a recovery prompt for a fresh session (no --resume) after repeated context loss.
+   * Injects all accumulated tool results from previous attempts so Claude can continue
+   * the task without re-fetching data it already gathered.
+   */
+  private buildFreshRecoveryPrompt(originalPrompt: string, toolResults: ToolUseRecord[]): string {
+    const parts: string[] = [
+      '## CONTINUING LONG-RUNNING TASK',
+      '',
+      'The previous execution encountered tool timeouts and lost context.',
+      'Below are all results gathered before the interruption. Continue the task using these results.',
+      '',
+    ];
+
+    parts.push(...this.formatToolResults(toolResults));
+
+    parts.push('### Original task:');
+    parts.push(originalPrompt);
+    parts.push('');
+    parts.push('INSTRUCTIONS:');
+    parts.push('1. Use the preserved results above \u2014 do NOT re-fetch data you already have');
+    parts.push('2. Continue the task from where it was interrupted');
+    parts.push('3. If you need additional data, fetch it (but try alternative sources if the original timed out)');
+    parts.push('4. Complete the original task fully');
+    parts.push('5. Do NOT spawn Task subagents for work that previously timed out \u2014 do it inline instead');
+    parts.push('6. Prefer multiple small, focused tool calls over single large ones to avoid further timeouts');
+
+    return parts.join('\n');
+  }
+
+  /**
+   * Extract tool results from the last N movements in history.
+   * Used for inter-movement recovery to provide context from prior work
+   * when a resume session is corrupted/expired.
+   */
+  private extractHistoricalToolResults(maxMovements = 3): ToolUseRecord[] {
+    const results: ToolUseRecord[] = [];
+    const recentMovements = this.history.movements.slice(-maxMovements);
+
+    for (const movement of recentMovements) {
+      if (!movement.toolUseHistory) continue;
+      for (const tool of movement.toolUseHistory) {
+        if (tool.result !== undefined && !tool.isError) {
+          results.push({
+            toolName: tool.toolName,
+            toolId: tool.toolId,
+            toolInput: tool.toolInput,
+            result: tool.result,
+            isError: tool.isError,
+            duration: tool.duration,
+          });
+        }
+      }
+    }
+
+    return results;
+  }
+
+  /**
+   * Build a recovery prompt for inter-movement context loss.
+   * The Claude session expired between movements (not due to native timeouts).
+   * Includes prior conversation summary + preserved tool results + anti-timeout guidance.
+   */
+  private buildInterMovementRecoveryPrompt(originalPrompt: string, toolResults: ToolUseRecord[]): string {
+    const parts: string[] = [
+      '## SESSION RECOVERY — Prior Session Expired',
+      '',
+      'Your previous session expired between prompts. Below is a summary of the conversation so far and all preserved tool results.',
+      '',
+    ];
+
+    parts.push(...this.formatConversationHistory(this.history.movements));
+    parts.push(...this.formatToolResults(toolResults));
+
+    parts.push('### Current user prompt:');
+    parts.push(originalPrompt);
+    parts.push('');
+    parts.push('INSTRUCTIONS:');
+    parts.push('1. Use the preserved results above — do NOT re-fetch data you already have');
+    parts.push('2. Continue the conversation naturally based on the history above');
+    parts.push('3. If you need additional data, fetch it with small focused tool calls');
+    parts.push('4. Do NOT spawn Task subagents — do work inline to avoid further timeouts');
+    parts.push('5. Prefer multiple small, focused tool calls over single large ones');
 
     return parts.join('\n');
   }
@@ -673,6 +1112,76 @@ export class ImprovisationSessionManager extends EventEmitter {
     if (input.command) return String(input.command).slice(0, 100);
     if (input.prompt) return String(input.prompt).slice(0, 100);
     return JSON.stringify(input).slice(0, 100);
+  }
+
+  /** Format a list of timed-out tools for retry prompts */
+  private formatTimedOutTools(tools: Array<{ toolName: string; input: Record<string, unknown>; timeoutMs: number }>): string[] {
+    const lines: string[] = [];
+    lines.push('### Tools/resources that have timed out (DO NOT retry these):');
+    for (const t of tools) {
+      const inputSummary = this.summarizeToolInput(t.input);
+      lines.push(`- **${t.toolName}**(${inputSummary}) — timed out after ${Math.round(t.timeoutMs / 1000)}s`);
+    }
+    return lines;
+  }
+
+  /** Format completed checkpoint tools for retry prompts */
+  private formatCompletedTools(tools: Array<{ toolName: string; input: Record<string, unknown>; result: string }>, maxLen = 2000): string[] {
+    const lines: string[] = [];
+    lines.push('### Results already obtained:');
+    for (const tool of tools) {
+      const inputSummary = this.summarizeToolInput(tool.input);
+      const preview = tool.result.length > maxLen ? `${tool.result.slice(0, maxLen)}...` : tool.result;
+      lines.push(`- **${tool.toolName}**(${inputSummary}): ${preview}`);
+    }
+    return lines;
+  }
+
+  /** Format in-progress tools for retry prompts */
+  private formatInProgressTools(tools: Array<{ toolName: string; input: Record<string, unknown> }>): string[] {
+    const lines: string[] = [];
+    lines.push('### Tools that were still running (lost when process was killed):');
+    for (const tool of tools) {
+      const inputSummary = this.summarizeToolInput(tool.input);
+      lines.push(`- **${tool.toolName}**(${inputSummary}) — was in progress, may need re-running`);
+    }
+    return lines;
+  }
+
+  /** Format tool results from ToolUseRecord[] for recovery prompts */
+  private formatToolResults(toolResults: ToolUseRecord[], maxLen = 3000): string[] {
+    const completed = toolResults.filter(t => t.result !== undefined && !t.isError);
+    if (completed.length === 0) return [];
+    const lines: string[] = [`### ${completed.length} preserved results from prior work:`, ''];
+    for (const tool of completed) {
+      const inputSummary = this.summarizeToolInput(tool.toolInput);
+      const preview = tool.result && tool.result.length > maxLen
+        ? `${tool.result.slice(0, maxLen)}...\n(truncated, ${tool.result.length} chars total)`
+        : tool.result || '';
+      lines.push(`**${tool.toolName}**(${inputSummary}):`);
+      lines.push(preview);
+      lines.push('');
+    }
+    return lines;
+  }
+
+  /** Format conversation history for recovery prompts */
+  private formatConversationHistory(movements: MovementRecord[], maxMovements = 5): string[] {
+    const recent = movements.slice(-maxMovements);
+    if (recent.length === 0) return [];
+    const lines: string[] = ['### Conversation so far:'];
+    for (const movement of recent) {
+      const promptText = movement.userPrompt.length > 300 ? `${movement.userPrompt.slice(0, 300)}...` : movement.userPrompt;
+      lines.push(`**User (prompt ${movement.sequenceNumber}):** ${promptText}`);
+      if (movement.assistantResponse) {
+        const response = movement.assistantResponse.length > 1000
+          ? `${movement.assistantResponse.slice(0, 1000)}...\n(truncated, ${movement.assistantResponse.length} chars)`
+          : movement.assistantResponse;
+        lines.push(`**Your response:** ${response}`);
+      }
+      lines.push('');
+    }
+    return lines;
   }
 
   /**
@@ -790,6 +1299,13 @@ export class ImprovisationSessionManager extends EventEmitter {
    */
   get isExecuting(): boolean {
     return this._isExecuting;
+  }
+
+  /**
+   * Timestamp when current execution started (undefined when not executing)
+   */
+  get executionStartTimestamp(): number | undefined {
+    return this._executionStartTimestamp;
   }
 
   /**

@@ -197,60 +197,12 @@ export class ToolWatchdog {
     }
 
     const timer = setTimeout(async () => {
-      const watch = this.activeWatches.get(toolId);
-      if (!watch) return;
-
-      const elapsedMs = Date.now() - watch.startTime;
-
-      // Try Haiku tiebreaker if configured and not already attempted
-      if (profile.useHaikuTiebreaker && this.onTiebreaker && !watch.tiebreakerAttempted) {
-        watch.tiebreakerAttempted = true;
-
-        if (this.verbose) {
-          console.log(`[WATCHDOG] ${toolName} (${toolId}) hit timeout after ${Math.round(elapsedMs / 1000)}s, running tiebreaker...`);
-        }
-
-        try {
-          const verdict = await this.onTiebreaker(toolName, toolInput, elapsedMs);
-
-          if (verdict.action === 'extend') {
-            if (this.verbose) {
-              console.log(`[WATCHDOG] Tiebreaker: extend ${toolName} by ${Math.round(verdict.extensionMs / 1000)}s — ${verdict.reason}`);
-            }
-            // Reschedule with extension
-            const newTimer = setTimeout(() => {
-              // After extension, kill without another tiebreaker
-              const w = this.activeWatches.get(toolId);
-              if (w) {
-                if (this.verbose) {
-                  console.log(`[WATCHDOG] ${toolName} (${toolId}) still running after extension, killing`);
-                }
-                // Don't delete the watch — buildCheckpoint() needs it.
-                // handleToolTimeout() calls clearAll() after building the checkpoint.
-                onTimeout();
-              }
-            }, verdict.extensionMs);
-
-            watch.timer = newTimer;
-            watch.timeoutMs = elapsedMs + verdict.extensionMs;
-            return;
-          }
-
-          if (this.verbose) {
-            console.log(`[WATCHDOG] Tiebreaker: kill ${toolName} — ${verdict.reason}`);
-          }
-        } catch (err) {
-          if (this.verbose) {
-            console.log(`[WATCHDOG] Tiebreaker failed: ${err}, proceeding with kill`);
-          }
-        }
-      } else if (this.verbose) {
-        console.log(`[WATCHDOG] ${toolName} (${toolId}) timed out after ${Math.round(elapsedMs / 1000)}s, killing`);
+      const extended = await this.handleTimeoutWithTiebreaker(toolId, toolName, toolInput, profile, onTimeout);
+      if (!extended) {
+        // Don't delete the watch here — buildCheckpoint() needs it.
+        // handleToolTimeout() calls clearAll() after building the checkpoint.
+        onTimeout();
       }
-
-      // Don't delete the watch here — buildCheckpoint() needs it.
-      // handleToolTimeout() calls clearAll() after building the checkpoint.
-      onTimeout();
     }, timeoutMs);
 
     this.activeWatches.set(toolId, {
@@ -261,6 +213,88 @@ export class ToolWatchdog {
       timeoutMs,
       tiebreakerAttempted: false,
     });
+  }
+
+  /** Handle timeout expiry: attempt tiebreaker if configured, return true if extended */
+  private async handleTimeoutWithTiebreaker(
+    toolId: string,
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    profile: ToolTimeoutProfile,
+    onTimeout: () => void,
+  ): Promise<boolean> {
+    const watch = this.activeWatches.get(toolId);
+    if (!watch) return true;
+
+    const elapsedMs = Date.now() - watch.startTime;
+
+    if (!profile.useHaikuTiebreaker || !this.onTiebreaker || watch.tiebreakerAttempted) {
+      if (this.verbose) {
+        console.log(`[WATCHDOG] ${toolName} (${toolId}) timed out after ${Math.round(elapsedMs / 1000)}s, killing`);
+      }
+      return false;
+    }
+
+    return this.runTiebreaker(watch, toolId, toolName, toolInput, elapsedMs, onTimeout);
+  }
+
+  /** Execute the Haiku tiebreaker and reschedule if extended */
+  private async runTiebreaker(
+    watch: ActiveWatch,
+    toolId: string,
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    elapsedMs: number,
+    onTimeout: () => void,
+  ): Promise<boolean> {
+    watch.tiebreakerAttempted = true;
+
+    if (this.verbose) {
+      console.log(`[WATCHDOG] ${toolName} (${toolId}) hit timeout after ${Math.round(elapsedMs / 1000)}s, running tiebreaker...`);
+    }
+
+    try {
+      const verdict = await this.onTiebreaker!(toolName, toolInput, elapsedMs);
+
+      if (verdict.action === 'extend') {
+        if (this.verbose) {
+          console.log(`[WATCHDOG] Tiebreaker: extend ${toolName} by ${Math.round(verdict.extensionMs / 1000)}s — ${verdict.reason}`);
+        }
+        this.scheduleExtensionTimeout(watch, toolId, toolName, verdict.extensionMs, onTimeout);
+        watch.timeoutMs = elapsedMs + verdict.extensionMs;
+        return true;
+      }
+
+      if (this.verbose) {
+        console.log(`[WATCHDOG] Tiebreaker: kill ${toolName} — ${verdict.reason}`);
+      }
+    } catch (err) {
+      if (this.verbose) {
+        console.log(`[WATCHDOG] Tiebreaker failed: ${err}, proceeding with kill`);
+      }
+    }
+
+    return false;
+  }
+
+  /** Schedule a post-extension timeout that kills without another tiebreaker */
+  private scheduleExtensionTimeout(
+    watch: ActiveWatch,
+    toolId: string,
+    toolName: string,
+    extensionMs: number,
+    onTimeout: () => void,
+  ): void {
+    watch.timer = setTimeout(() => {
+      const w = this.activeWatches.get(toolId);
+      if (!w) return;
+      if (this.verbose) {
+        console.log(`[WATCHDOG] ${toolName} (${toolId}) still running after extension, killing`);
+      }
+      // Don't delete the watch — buildCheckpoint() needs it.
+      // handleToolTimeout() calls clearAll() after building the checkpoint.
+      onTimeout();
+    }, extensionMs);
   }
 
   /** Stop watching a tool (it completed normally) */

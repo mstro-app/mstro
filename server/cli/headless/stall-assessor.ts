@@ -2,16 +2,18 @@
 // Licensed under the MIT License. See LICENSE file for details.
 
 /**
- * Stall Assessor
+ * Stall Assessor & Haiku Assessment Hub
  *
- * Intelligently determines whether a silent Claude Code process is
- * legitimately working or genuinely stalled. Uses a two-layer approach:
+ * Provides Haiku-based intelligent assessment for:
+ * - Stall detection (is a silent process working or hung?)
+ * - Context loss detection (did Claude lose context after timeouts?)
+ * - Approval prompt classification (is a user message an approval or new task?)
+ * - Best result comparison (which retry attempt produced better work?)
+ * - Error classification (what kind of error is in stderr?)
  *
- * 1. Fast heuristic: known long-running patterns (Task subagents, parallel
- *    tool calls) get an automatic extension without any API call.
- *
- * 2. Haiku assessment: for ambiguous cases, spawns a quick Claude Haiku
- *    call to evaluate the situation and recommend an extension (or kill).
+ * Stall detection uses a two-layer approach:
+ * 1. Fast heuristic: known long-running patterns get automatic extensions.
+ * 2. Haiku assessment: ambiguous cases get a quick AI evaluation.
  */
 
 import { type ChildProcess, spawn } from 'node:child_process';
@@ -212,6 +214,88 @@ export async function assessToolTimeout(
   }
 }
 
+// ========== Context Loss Assessment ==========
+
+export interface ContextLossVerdict {
+  /** Whether the agent lost context and needs recovery */
+  contextLost: boolean;
+  /** Human-readable reason for the verdict */
+  reason: string;
+}
+
+/** Enriched context for Haiku-based context loss assessment */
+export interface ContextLossContext {
+  assistantResponse: string;
+  effectiveTimeouts: number;
+  nativeTimeoutCount: number;
+  successfulToolCalls: number;
+  thinkingOutputLength: number;
+  hasSuccessfulWrite: boolean;
+}
+
+/**
+ * Assess whether a Claude Code session lost context after tool timeouts.
+ * Uses Haiku with enriched context signals — replaces brittle hardcoded
+ * thresholds (200 chars thinking, 2x ratio, 500 chars response) with
+ * a single LLM call that sees the full picture.
+ *
+ * Only call this when effectiveTimeouts > 0.
+ */
+export async function assessContextLoss(
+  ctx: ContextLossContext,
+  claudeCommand: string,
+  verbose: boolean,
+): Promise<ContextLossVerdict> {
+  const tail = ctx.assistantResponse.slice(-800);
+
+  const prompt = [
+    'You are analyzing a Claude Code agent session that experienced tool timeouts.',
+    'Determine whether the agent lost context (needs recovery) or is still productively working.',
+    '',
+    'Session signals:',
+    `- ${ctx.effectiveTimeouts} tools timed out (${ctx.nativeTimeoutCount} detected in text stream, ${ctx.effectiveTimeouts - ctx.nativeTimeoutCount} detected structurally)`,
+    `- ${ctx.successfulToolCalls} tools completed successfully`,
+    `- Thinking output: ${ctx.thinkingOutputLength} characters`,
+    `- Response length: ${ctx.assistantResponse.length} characters`,
+    `- Successful file writes (Edit/Write/MultiEdit): ${ctx.hasSuccessfulWrite ? 'YES' : 'NO'}`,
+    '',
+    `Final response (last ${tail.length} chars):`,
+    tail,
+    '',
+    'WORKING signals: continued tool calls after timeouts, substantial thinking about the task, producing code/analysis, writing files, referencing the original task.',
+    'STALLED signals: asking "how can I help?", starting fresh, offering generic help, not referencing the original task, very short response with no substance, task abandoned mid-research.',
+    '',
+    'Respond in EXACTLY this format (2 lines, no extra text):',
+    'VERDICT: WORKING or STALLED',
+    'REASON: <brief one-line explanation>',
+  ].join('\n');
+
+  try {
+    if (verbose) {
+      console.log(`[CONTEXT-ASSESS] Running Haiku assessment (${ctx.effectiveTimeouts} timeouts, ${ctx.successfulToolCalls} successes, ${ctx.thinkingOutputLength} thinking chars)...`);
+    }
+
+    const raw = await spawnHaikuRaw(prompt, claudeCommand, verbose, 'CONTEXT-ASSESS');
+    const parsed = parseVerdictResponse(raw);
+    const contextLost = parsed.verdict === 'STALLED';
+
+    if (verbose) {
+      console.log(`[CONTEXT-ASSESS] Verdict: ${contextLost ? 'LOST' : 'CONTINUED'} — ${parsed.reason}`);
+    }
+
+    return { contextLost, reason: parsed.reason };
+  } catch (err) {
+    if (verbose) {
+      console.log(`[CONTEXT-ASSESS] Haiku assessment failed: ${err}`);
+    }
+    // On failure, assume context was lost (safer to retry than to show a confused response)
+    return {
+      contextLost: true,
+      reason: `Context loss assessment failed: ${err}`,
+    };
+  }
+}
+
 function buildAssessmentPrompt(ctx: StallContext): string {
   const silenceMin = Math.round(ctx.silenceMs / 60_000);
   const totalMin = Math.round(ctx.elapsedTotalMs / 60_000);
@@ -276,13 +360,13 @@ function parseAssessmentResponse(output: string): StallVerdict {
 
 const HAIKU_TIMEOUT_MS = 30_000;
 
-/** Low-level Haiku spawner: runs a prompt through `claude --print --model haiku` and returns parsed verdict */
-function spawnHaikuVerdict(
+/** Low-level Haiku spawner: runs a prompt through `claude --print --model haiku` and returns raw text */
+function spawnHaikuRaw(
   prompt: string,
   claudeCommand: string,
   verbose: boolean,
-  label = 'STALL-ASSESS',
-): Promise<StallVerdict> {
+  label: string,
+): Promise<string> {
   return new Promise((resolve, reject) => {
     let stdout = '';
     let settled = false;
@@ -325,7 +409,7 @@ function spawnHaikuVerdict(
         console.log(`[${label}] Haiku response: ${stdout.trim()}`);
       }
 
-      resolve(parseAssessmentResponse(stdout));
+      resolve(stdout.trim());
     });
 
     proc.on('error', (err) => {
@@ -337,10 +421,256 @@ function spawnHaikuVerdict(
   });
 }
 
+/** Parse VERDICT/REASON format from Haiku response */
+function parseVerdictResponse(raw: string): { verdict: string; reason: string } {
+  const lines = raw.split('\n');
+  let verdict = 'STALLED';
+  let reason = 'Assessment inconclusive';
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('VERDICT:')) {
+      verdict = trimmed.slice('VERDICT:'.length).trim().toUpperCase();
+    } else if (trimmed.startsWith('REASON:')) {
+      reason = trimmed.slice('REASON:'.length).trim();
+    }
+  }
+
+  return { verdict, reason };
+}
+
+/** Haiku spawner that returns a parsed StallVerdict (for stall assessment) */
+async function spawnHaikuVerdict(
+  prompt: string,
+  claudeCommand: string,
+  verbose: boolean,
+  label = 'STALL-ASSESS',
+): Promise<StallVerdict> {
+  const raw = await spawnHaikuRaw(prompt, claudeCommand, verbose, label);
+  return parseAssessmentResponse(raw);
+}
+
 function runHaikuAssessment(
   ctx: StallContext,
   claudeCommand: string,
   verbose: boolean,
 ): Promise<StallVerdict> {
   return spawnHaikuVerdict(buildAssessmentPrompt(ctx), claudeCommand, verbose);
+}
+
+// ========== Approval Prompt Assessment ==========
+
+export interface ApprovalVerdict {
+  isApproval: boolean;
+  reason: string;
+}
+
+/**
+ * Assess whether a user message is an approval/continuation or a new task.
+ * Uses Haiku to classify intent — handles natural language variations that
+ * regex patterns miss ("sounds good", "yep do it", "option 2", etc.).
+ */
+export async function assessApproval(
+  userMessage: string,
+  claudeCommand: string,
+  verbose: boolean,
+): Promise<ApprovalVerdict> {
+  const prompt = [
+    'You are classifying a user message in a multi-turn conversation with a coding assistant.',
+    'The assistant previously proposed a plan or asked a question, and the user is now responding.',
+    '',
+    `User's message: "${userMessage}"`,
+    '',
+    'Is this an approval/continuation (user agrees, says yes, wants to proceed) or a new task/question?',
+    '',
+    'APPROVAL signs: "yes", "sure", "go ahead", "sounds good", "do it", "yep", "option 2", "the first one", "proceed", references to previous proposal, short affirmative with modifications ("yes but use TypeScript").',
+    'NEW_TASK signs: asks a different question, gives new detailed instructions, changes topic, provides new requirements unrelated to any proposal.',
+    '',
+    'Respond in EXACTLY this format (2 lines, no extra text):',
+    'VERDICT: APPROVAL or NEW_TASK',
+    'REASON: <brief one-line explanation>',
+  ].join('\n');
+
+  try {
+    if (verbose) {
+      console.log('[APPROVAL-ASSESS] Running Haiku assessment...');
+    }
+
+    const raw = await spawnHaikuRaw(prompt, claudeCommand, verbose, 'APPROVAL-ASSESS');
+    const parsed = parseVerdictResponse(raw);
+    const isApproval = parsed.verdict.includes('APPROVAL');
+
+    if (verbose) {
+      console.log(`[APPROVAL-ASSESS] Verdict: ${isApproval ? 'APPROVAL' : 'NEW_TASK'} — ${parsed.reason}`);
+    }
+
+    return { isApproval, reason: parsed.reason };
+  } catch (err) {
+    if (verbose) {
+      console.log(`[APPROVAL-ASSESS] Haiku assessment failed: ${err}`);
+    }
+    // On failure, assume not an approval (safer to treat as new task)
+    return { isApproval: false, reason: `Assessment failed: ${err}` };
+  }
+}
+
+// ========== Best Result Comparison ==========
+
+export interface BestResultContext {
+  originalPrompt: string;
+  resultA: {
+    successfulToolCalls: number;
+    responseLength: number;
+    hasThinking: boolean;
+    responseTail: string;
+  };
+  resultB: {
+    successfulToolCalls: number;
+    responseLength: number;
+    hasThinking: boolean;
+    responseTail: string;
+  };
+}
+
+export interface BestResultVerdict {
+  winner: 'A' | 'B';
+  reason: string;
+}
+
+/**
+ * Compare two retry results and determine which made more meaningful progress.
+ * Uses Haiku to evaluate quality — replaces arbitrary numeric scoring
+ * (tool count * 10 + response length / 50 + thinking bonus).
+ */
+export async function assessBestResult(
+  ctx: BestResultContext,
+  claudeCommand: string,
+  verbose: boolean,
+): Promise<BestResultVerdict> {
+  const promptPreview = ctx.originalPrompt.length > 300
+    ? `${ctx.originalPrompt.slice(0, 300)}...`
+    : ctx.originalPrompt;
+
+  const prompt = [
+    'You are comparing two AI assistant responses from retry attempts to determine which made more meaningful progress on the user\'s task.',
+    '',
+    `Original task: ${promptPreview}`,
+    '',
+    `Response A: ${ctx.resultA.successfulToolCalls} successful tool calls, ${ctx.resultA.responseLength} chars, ${ctx.resultA.hasThinking ? 'has' : 'no'} thinking output`,
+    `Last 500 chars of A: ${ctx.resultA.responseTail}`,
+    '',
+    `Response B: ${ctx.resultB.successfulToolCalls} successful tool calls, ${ctx.resultB.responseLength} chars, ${ctx.resultB.hasThinking ? 'has' : 'no'} thinking output`,
+    `Last 500 chars of B: ${ctx.resultB.responseTail}`,
+    '',
+    'Which response made more meaningful progress? Consider:',
+    '- Did it actually work on the task (tool calls, code changes) vs just talking about it?',
+    '- Is it confused/lost context ("How can I help?") vs engaged with the original task?',
+    '- Quality of analysis and output, not just quantity.',
+    '',
+    'Respond in EXACTLY this format (2 lines, no extra text):',
+    'VERDICT: A or B',
+    'REASON: <brief one-line explanation>',
+  ].join('\n');
+
+  try {
+    if (verbose) {
+      console.log('[BEST-RESULT] Running Haiku assessment...');
+    }
+
+    const raw = await spawnHaikuRaw(prompt, claudeCommand, verbose, 'BEST-RESULT');
+    const parsed = parseVerdictResponse(raw);
+    const winner: 'A' | 'B' = parsed.verdict.includes('B') ? 'B' : 'A';
+
+    if (verbose) {
+      console.log(`[BEST-RESULT] Verdict: ${winner} — ${parsed.reason}`);
+    }
+
+    return { winner, reason: parsed.reason };
+  } catch (err) {
+    if (verbose) {
+      console.log(`[BEST-RESULT] Haiku assessment failed: ${err}`);
+    }
+    // On failure, prefer A (the previously-tracked best result)
+    return { winner: 'A', reason: `Assessment failed: ${err}` };
+  }
+}
+
+// ========== Error Classification ==========
+
+export interface ErrorClassification {
+  errorCode: string;
+  message: string;
+}
+
+/**
+ * Classify an unrecognized error from stderr using Haiku.
+ * Called as a fallback when regex patterns in output-utils.ts don't match.
+ * Returns null if the stderr content isn't a real error (just warnings/debug info).
+ */
+export async function classifyError(
+  stderrContent: string,
+  claudeCommand: string,
+  verbose: boolean,
+): Promise<ErrorClassification | null> {
+  const tail = stderrContent.slice(-500);
+  if (!tail.trim()) return null;
+
+  const prompt = [
+    'You are classifying an error message from the Claude Code CLI that did not match known patterns.',
+    '',
+    `stderr (last ${tail.length} chars):`,
+    tail,
+    '',
+    'Classify into one of these categories:',
+    '- AUTH_REQUIRED: Authentication/login issues',
+    '- API_KEY_INVALID: API key problems',
+    '- QUOTA_EXCEEDED: Usage limits, billing, subscription',
+    '- RATE_LIMITED: Too many requests, throttling',
+    '- NETWORK_ERROR: Connection, DNS, timeout issues',
+    '- SSL_ERROR: Certificate/TLS problems',
+    '- SERVICE_UNAVAILABLE: Backend down (502/503/504)',
+    '- INTERNAL_ERROR: Server errors (500)',
+    '- CONTEXT_TOO_LONG: Token/context limit exceeded',
+    '- SESSION_NOT_FOUND: Invalid/expired session',
+    '- UNKNOWN: Cannot determine, not a real error, or just warnings/debug output',
+    '',
+    'If the stderr content is just warnings, debug info, or not an actual error, use UNKNOWN.',
+    '',
+    'Respond in EXACTLY this format (2 lines, no extra text):',
+    'CATEGORY: <one of the above>',
+    'MESSAGE: <brief user-friendly description of the error>',
+  ].join('\n');
+
+  try {
+    if (verbose) {
+      console.log('[ERROR-CLASSIFY] Running Haiku assessment...');
+    }
+
+    const raw = await spawnHaikuRaw(prompt, claudeCommand, verbose, 'ERROR-CLASSIFY');
+    const lines = raw.split('\n');
+    let category = 'UNKNOWN';
+    let message = '';
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('CATEGORY:')) {
+        category = trimmed.slice('CATEGORY:'.length).trim().toUpperCase();
+      } else if (trimmed.startsWith('MESSAGE:')) {
+        message = trimmed.slice('MESSAGE:'.length).trim();
+      }
+    }
+
+    if (category === 'UNKNOWN' || !message) return null;
+
+    if (verbose) {
+      console.log(`[ERROR-CLASSIFY] Verdict: ${category} — ${message}`);
+    }
+
+    return { errorCode: category, message };
+  } catch (err) {
+    if (verbose) {
+      console.log(`[ERROR-CLASSIFY] Haiku assessment failed: ${err}`);
+    }
+    return null;
+  }
 }

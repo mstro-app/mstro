@@ -33,9 +33,9 @@ export class HeadlessRunner {
       maxSessions: config.maxSessions || 50,
       maxRetries: config.maxRetries || 3,
       claudeCommand: config.claudeCommand || process.env.CLAUDE_COMMAND || 'claude',
-      verbose: config.verbose || false,
-      noColor: config.noColor || false,
-      improvisationMode: config.improvisationMode || false,
+      verbose: !!config.verbose,
+      noColor: !!config.noColor,
+      improvisationMode: !!config.improvisationMode,
       movementNumber: config.movementNumber ?? 0,
       outputCallback: config.outputCallback,
       thinkingCallback: config.thinkingCallback,
@@ -83,7 +83,7 @@ export class HeadlessRunner {
     const sessionId = `direct-${Date.now()}`;
 
     const enrichedPrompt = context
-      ? enrichPromptWithContext(userPrompt, context)
+      ? await enrichPromptWithContext(userPrompt, context)
       : userPrompt;
 
     const result = await this.executePromptCommand(enrichedPrompt, 'main', 1);
@@ -109,7 +109,10 @@ export class HeadlessRunner {
         assistantResponse: result.assistantResponse,
         thinkingOutput: result.thinkingOutput,
         toolUseHistory: result.toolUseHistory,
-        claudeSessionId: result.claudeSessionId
+        claudeSessionId: result.claudeSessionId,
+        nativeTimeoutCount: result.nativeTimeoutCount,
+        postTimeoutOutput: result.postTimeoutOutput,
+        resumeBufferedOutput: result.resumeBufferedOutput,
       };
     }
 
@@ -123,7 +126,10 @@ export class HeadlessRunner {
       assistantResponse: result.assistantResponse,
       thinkingOutput: result.thinkingOutput,
       toolUseHistory: result.toolUseHistory,
-      claudeSessionId: result.claudeSessionId
+      claudeSessionId: result.claudeSessionId,
+      nativeTimeoutCount: result.nativeTimeoutCount,
+      postTimeoutOutput: result.postTimeoutOutput,
+      resumeBufferedOutput: result.resumeBufferedOutput,
     };
   }
 

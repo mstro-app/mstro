@@ -153,6 +153,14 @@ export interface SessionResult {
     duration?: number;
   }>;
   claudeSessionId?: string;
+  /** Number of Claude Code native tool timeouts detected during this execution */
+  nativeTimeoutCount?: number;
+  /** Assistant text buffered after native timeouts — not yet shown to user.
+   *  Flush to output if context is OK, discard if context was lost and recovery starts. */
+  postTimeoutOutput?: string;
+  /** Assistant text buffered during resume assessment — held back until thinking/tool activity
+   *  confirms Claude has context. Undefined when not in resume mode or buffer was flushed. */
+  resumeBufferedOutput?: string;
 }
 
 export interface ToolUseAccumulator {
@@ -176,6 +184,14 @@ export interface ExecutionResult {
   thinkingOutput?: string;
   toolUseHistory?: ToolUseAccumulator[];
   claudeSessionId?: string;
+  /** Number of Claude Code native tool timeouts detected during this execution */
+  nativeTimeoutCount?: number;
+  /** Assistant text buffered after native timeouts — not yet sent to outputCallback.
+   *  The session manager should flush this to the client if context is OK, or discard if recovering. */
+  postTimeoutOutput?: string;
+  /** Assistant text buffered during resume assessment — held back until thinking/tool activity
+   *  confirms Claude has context. Undefined when not in resume mode or buffer was flushed. */
+  resumeBufferedOutput?: string;
 }
 
 /** Resolved config with all defaults applied */

@@ -23,7 +23,6 @@ import {
   writeFile
 } from '../files.js';
 import { validatePathWithinWorkingDir } from '../pathUtils.js';
-import { sanitizeEnvForSandbox } from '../sandbox-utils.js';
 import { captureException } from '../sentry.js';
 import { getModel, getPrBaseBranch, getSettings, setModel, setPrBaseBranch } from '../settings.js';
 import { getPTYManager } from '../terminal/pty-manager.js';
@@ -40,24 +39,31 @@ export interface UsageReport {
 
 export type UsageReporter = (report: UsageReport) => void;
 
+/** Convert tool history entries into OutputLine-compatible lines */
+function convertToolHistoryToLines(tools: any[], ts: number): any[] {
+  const lines: any[] = [];
+  for (const tool of tools) {
+    lines.push({ type: 'tool-call', text: '', toolName: tool.toolName, toolInput: tool.toolInput || {}, timestamp: ts });
+    if (tool.result !== undefined) {
+      lines.push({ type: 'tool-result', text: '', toolResult: tool.result || 'No output', toolStatus: tool.isError ? 'error' : 'success', timestamp: ts });
+    }
+  }
+  return lines;
+}
+
 /** Convert a single movement record into OutputLine-compatible entries */
-function convertMovementToLines(movement: { userPrompt: string; timestamp: string; thinkingOutput?: string; toolUseHistory?: any[]; assistantResponse?: string; errorOutput?: string; tokensUsed: number }): any[] {
+function convertMovementToLines(movement: { userPrompt: string; timestamp: string; thinkingOutput?: string; toolUseHistory?: any[]; assistantResponse?: string; errorOutput?: string; tokensUsed: number; durationMs?: number }): any[] {
   const lines: any[] = [];
   const ts = new Date(movement.timestamp).getTime();
 
-  lines.push({ type: 'user', text: `> ${movement.userPrompt}`, timestamp: ts });
+  lines.push({ type: 'user', text: movement.userPrompt, timestamp: ts });
 
   if (movement.thinkingOutput) {
     lines.push({ type: 'thinking', text: '', thinking: movement.thinkingOutput, timestamp: ts });
   }
 
   if (movement.toolUseHistory) {
-    for (const tool of movement.toolUseHistory) {
-      lines.push({ type: 'tool-call', text: '', toolName: tool.toolName, toolInput: tool.toolInput || {}, timestamp: ts });
-      if (tool.result !== undefined) {
-        lines.push({ type: 'tool-result', text: '', toolResult: tool.result || 'No output', toolStatus: tool.isError ? 'error' : 'success', timestamp: ts });
-      }
-    }
+    lines.push(...convertToolHistoryToLines(movement.toolUseHistory, ts));
   }
 
   if (movement.assistantResponse) {
@@ -68,8 +74,18 @@ function convertMovementToLines(movement: { userPrompt: string; timestamp: strin
     lines.push({ type: 'error', text: `Error: ${movement.errorOutput}`, timestamp: ts });
   }
 
-  lines.push({ type: 'system', text: `Command completed (tokens: ${movement.tokensUsed.toLocaleString()})`, timestamp: ts });
+  const durationText = movement.durationMs
+    ? `Completed in ${(movement.durationMs / 1000).toFixed(2)}s`
+    : 'Completed';
+  lines.push({ type: 'system', text: durationText, timestamp: ts });
   return lines;
+}
+
+/** Detect git provider from remote URL */
+function detectGitProvider(remoteUrl: string): 'github' | 'gitlab' | 'unknown' {
+  if (remoteUrl.includes('github.com')) return 'github';
+  if (remoteUrl.includes('gitlab.com') || remoteUrl.includes('gitlab')) return 'gitlab';
+  return 'unknown';
 }
 
 export class WebSocketImproviseHandler {
@@ -354,25 +370,14 @@ export class WebSocketImproviseHandler {
    * Handle file-related messages (autocomplete, readFile, recordSelection, notifications)
    */
   private handleFileMessage(ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string, permission?: 'control' | 'view'): void {
-    const isSandboxed = permission === 'control' || permission === 'view';
     switch (msg.type) {
       case 'autocomplete':
         if (!msg.data?.partialPath) throw new Error('Partial path is required');
         this.send(ws, { type: 'autocomplete', tabId, data: { completions: this.autocompleteService.getFileCompletions(msg.data.partialPath, workingDir) } });
         break;
-      case 'readFile': {
-        if (!msg.data?.filePath) throw new Error('File path is required');
-        // Sandboxed users (control + view) can only read files within the project directory
-        if (isSandboxed) {
-          const validation = validatePathWithinWorkingDir(msg.data.filePath, workingDir);
-          if (!validation.valid) {
-            this.send(ws, { type: 'fileContent', tabId, data: { path: msg.data.filePath, fileName: msg.data.filePath.split('/').pop() || '', content: '', error: 'Sandboxed: path outside project directory' } });
-            break;
-          }
-        }
-        this.send(ws, { type: 'fileContent', tabId, data: readFileContent(msg.data.filePath, workingDir) });
+      case 'readFile':
+        this.handleReadFile(ws, msg, tabId, workingDir, permission);
         break;
-      }
       case 'recordSelection':
         if (msg.data?.filePath) this.recordFileSelection(msg.data.filePath);
         break;
@@ -381,6 +386,19 @@ export class WebSocketImproviseHandler {
         this.generateNotificationSummary(ws, tabId, msg.data.prompt, msg.data.output, workingDir);
         break;
     }
+  }
+
+  private handleReadFile(ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string, permission?: 'control' | 'view'): void {
+    if (!msg.data?.filePath) throw new Error('File path is required');
+    const isSandboxed = permission === 'control' || permission === 'view';
+    if (isSandboxed) {
+      const validation = validatePathWithinWorkingDir(msg.data.filePath, workingDir);
+      if (!validation.valid) {
+        this.send(ws, { type: 'fileContent', tabId, data: { path: msg.data.filePath, fileName: msg.data.filePath.split('/').pop() || '', content: '', error: 'Sandboxed: path outside project directory' } });
+        return;
+      }
+    }
+    this.send(ws, { type: 'fileContent', tabId, data: readFileContent(msg.data.filePath, workingDir) });
   }
 
   /**
@@ -555,10 +573,10 @@ export class WebSocketImproviseHandler {
     });
 
     session.on('onMovementStart', (sequenceNumber: number, prompt: string) => {
-      this.send(ws, { type: 'movementStart', tabId, data: { sequenceNumber, prompt, timestamp: Date.now() } });
+      this.send(ws, { type: 'movementStart', tabId, data: { sequenceNumber, prompt, timestamp: Date.now(), executionStartTimestamp: session.executionStartTimestamp } });
       // Broadcast execution state to ALL clients so tab indicators update
       // even if per-tab event subscriptions aren't ready yet (e.g., newly discovered tabs)
-      this.broadcastToAll({ type: 'tabStateChanged', data: { tabId, isExecuting: true } });
+      this.broadcastToAll({ type: 'tabStateChanged', data: { tabId, isExecuting: true, executionStartTimestamp: session.executionStartTimestamp } });
     });
 
     session.on('onMovementComplete', (movement: any) => {
@@ -776,6 +794,7 @@ export class WebSocketImproviseHandler {
         outputHistory,
         isExecuting: session.isExecuting,
         executionEvents,
+        ...(session.isExecuting && session.executionStartTimestamp ? { executionStartTimestamp: session.executionStartTimestamp } : {}),
       }
     });
   }
@@ -1154,6 +1173,7 @@ export class WebSocketImproviseHandler {
           isExecuting: session.isExecuting,
           outputHistory: this.buildOutputHistory(session),
           executionEvents: session.isExecuting ? session.getExecutionEventLog() : undefined,
+          ...(session.isExecuting && session.executionStartTimestamp ? { executionStartTimestamp: session.executionStartTimestamp } : {}),
         };
       } else {
         // Session not in memory — try to provide basic info from registry
@@ -2199,58 +2219,12 @@ Respond with ONLY the commit message, nothing else.`;
       }
 
       const remoteUrl = remoteResult.stdout.trim();
-
-      // Detect provider from remote URL
-      let provider: 'github' | 'gitlab' | 'unknown' = 'unknown';
-      if (remoteUrl.includes('github.com')) provider = 'github';
-      else if (remoteUrl.includes('gitlab.com') || remoteUrl.includes('gitlab')) provider = 'gitlab';
-
-      // Get default branch (usually main or master)
-      const defaultBranchResult = await this.executeGitCommand(
-        ['symbolic-ref', 'refs/remotes/origin/HEAD', '--short'],
-        workingDir
-      );
-      let defaultBranch = 'main';
-      if (defaultBranchResult.exitCode === 0) {
-        defaultBranch = defaultBranchResult.stdout.trim().replace('origin/', '');
-      }
-
-      // Get current branch
+      const provider = detectGitProvider(remoteUrl);
+      const defaultBranch = await this.getDefaultBranch(workingDir);
       const branchResult = await this.executeGitCommand(['rev-parse', '--abbrev-ref', 'HEAD'], workingDir);
       const currentBranch = branchResult.exitCode === 0 ? branchResult.stdout.trim() : '';
-
-      // Check for CLI tools and auth status
-      let hasGhCli = false;
-      let ghCliAuthenticated = false;
-      let ghCliBinary: 'gh' | 'glab' | undefined;
-
-      const cliBin = provider === 'github' ? 'gh' : provider === 'gitlab' ? 'glab' : null;
-
-      if (cliBin) {
-        // Check if CLI is installed
-        const installed = await this.spawnCheck(cliBin, ['--version']);
-        if (installed) {
-          hasGhCli = true;
-          ghCliBinary = cliBin;
-          // Check if CLI is authenticated
-          ghCliAuthenticated = await this.spawnCheck(cliBin, ['auth', 'status']);
-        }
-      }
-
-      // List remote branches
-      const remoteBranchResult = await this.executeGitCommand(['branch', '-r', '--list', 'origin/*'], workingDir);
-      const remoteBranches: string[] = [];
-      if (remoteBranchResult.exitCode === 0) {
-        for (const line of remoteBranchResult.stdout.split('\n')) {
-          const trimmed = line.trim();
-          if (!trimmed || trimmed.includes('->')) continue; // skip HEAD pointer
-          const branch = trimmed.replace('origin/', '');
-          if (branch) remoteBranches.push(branch);
-        }
-        remoteBranches.sort();
-      }
-
-      // Load preferred base branch from settings
+      const cliStatus = await this.checkGitCliStatus(provider);
+      const remoteBranches = await this.listRemoteBranches(workingDir);
       const preferredBaseBranch = getPrBaseBranch(remoteUrl) ?? undefined;
 
       this.send(ws, {
@@ -2262,9 +2236,7 @@ Respond with ONLY the commit message, nothing else.`;
           provider,
           defaultBranch,
           currentBranch,
-          hasGhCli,
-          ghCliAuthenticated,
-          ghCliBinary,
+          ...cliStatus,
           remoteBranches,
           preferredBaseBranch,
         },
@@ -2274,6 +2246,37 @@ Respond with ONLY the commit message, nothing else.`;
     }
   }
 
+  private async getDefaultBranch(workingDir: string): Promise<string> {
+    const result = await this.executeGitCommand(
+      ['symbolic-ref', 'refs/remotes/origin/HEAD', '--short'],
+      workingDir
+    );
+    return result.exitCode === 0 ? result.stdout.trim().replace('origin/', '') : 'main';
+  }
+
+  private async checkGitCliStatus(provider: 'github' | 'gitlab' | 'unknown'): Promise<{ hasGhCli: boolean; ghCliAuthenticated: boolean; ghCliBinary?: 'gh' | 'glab' }> {
+    const cliBin = provider === 'github' ? 'gh' : provider === 'gitlab' ? 'glab' : null;
+    if (!cliBin) return { hasGhCli: false, ghCliAuthenticated: false };
+
+    const installed = await this.spawnCheck(cliBin, ['--version']);
+    if (!installed) return { hasGhCli: false, ghCliAuthenticated: false };
+
+    const authenticated = await this.spawnCheck(cliBin, ['auth', 'status']);
+    return { hasGhCli: true, ghCliAuthenticated: authenticated, ghCliBinary: cliBin };
+  }
+
+  private async listRemoteBranches(workingDir: string): Promise<string[]> {
+    const result = await this.executeGitCommand(['branch', '-r', '--list', 'origin/*'], workingDir);
+    if (result.exitCode !== 0) return [];
+
+    return result.stdout.split('\n')
+      .map(line => line.trim())
+      .filter(line => line && !line.includes('->'))
+      .map(line => line.replace('origin/', ''))
+      .filter(Boolean)
+      .sort();
+  }
+
   /** Check if a binary runs successfully (exit code 0) */
   private spawnCheck(bin: string, args: string[]): Promise<boolean> {
     return new Promise((resolve) => {
@@ -2281,6 +2284,23 @@ Respond with ONLY the commit message, nothing else.`;
       proc.on('close', (code) => resolve(code === 0));
       proc.on('error', () => resolve(false));
     });
+  }
+
+  /** Detect which CLI binary to use for PR creation based on remote URL */
+  private detectPRCliBin(remoteUrl: string): { cliBin: 'gh' | 'glab' | null; isGitHub: boolean; isGitLab: boolean } {
+    const isGitHub = remoteUrl.includes('github.com');
+    const isGitLab = remoteUrl.includes('gitlab.com') || remoteUrl.includes('gitlab');
+    const cliBin = isGitHub ? 'gh' as const : isGitLab ? 'glab' as const : null;
+    return { cliBin, isGitHub, isGitLab };
+  }
+
+  /** Send PR success and optionally persist base branch */
+  private sendPRCreated(
+    ws: WSContext, tabId: string, url: string, method: string,
+    remoteUrl: string, baseBranch?: string,
+  ): void {
+    if (baseBranch) setPrBaseBranch(remoteUrl, baseBranch);
+    this.send(ws, { type: 'gitPRCreated', tabId, data: { url, method } });
   }
 
   /**
@@ -2300,42 +2320,31 @@ Respond with ONLY the commit message, nothing else.`;
         this.send(ws, { type: 'gitError', tabId, data: { error: 'Failed to detect current branch' } });
         return;
       }
-      const headBranch = branchResult.stdout.trim();
 
       const remoteResult = await this.executeGitCommand(['remote', 'get-url', 'origin'], workingDir);
       if (remoteResult.exitCode !== 0) {
         this.send(ws, { type: 'gitError', tabId, data: { error: 'No remote origin configured' } });
         return;
       }
-      const remoteUrl = remoteResult.stdout.trim();
-      const isGitHub = remoteUrl.includes('github.com');
-      const isGitLab = remoteUrl.includes('gitlab.com') || remoteUrl.includes('gitlab');
 
-      // Try CLI creation (gh for GitHub, glab for GitLab)
-      const cliResult = await this.tryCliPRCreate(
-        isGitHub ? 'gh' : isGitLab ? 'glab' : null,
-        { title, body, baseBranch, draft, headBranch },
-        workingDir,
-      );
+      const headBranch = branchResult.stdout.trim();
+      const remoteUrl = remoteResult.stdout.trim();
+      const { cliBin, isGitHub, isGitLab } = this.detectPRCliBin(remoteUrl);
+
+      const cliResult = await this.tryCliPRCreate(cliBin, { title, body, baseBranch, draft, headBranch }, workingDir);
 
       if (cliResult.created) {
-        if (baseBranch) setPrBaseBranch(remoteUrl, baseBranch);
-        this.send(ws, { type: 'gitPRCreated', tabId, data: { url: cliResult.url!, method: isGitHub ? 'gh' : 'glab' } });
+        this.sendPRCreated(ws, tabId, cliResult.url!, isGitHub ? 'gh' : 'glab', remoteUrl, baseBranch);
         return;
       }
-
-      // Surface CLI errors instead of silently falling through
       if (cliResult.error) {
         this.send(ws, { type: 'gitError', tabId, data: { error: cliResult.error } });
         return;
       }
 
-      // Fallback: construct browser URL (CLI not installed or unknown provider)
       const prUrl = this.buildBrowserPRUrl(remoteUrl, headBranch, baseBranch, title, body, isGitHub, isGitLab);
-
       if (prUrl) {
-        if (baseBranch) setPrBaseBranch(remoteUrl, baseBranch);
-        this.send(ws, { type: 'gitPRCreated', tabId, data: { url: prUrl, method: 'browser' } });
+        this.sendPRCreated(ws, tabId, prUrl, 'browser', remoteUrl, baseBranch);
       } else {
         this.send(ws, { type: 'gitError', tabId, data: { error: 'Could not determine remote URL format for PR creation' } });
       }

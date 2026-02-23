@@ -8,16 +8,17 @@
  */
 
 import { type ChildProcess, spawn } from 'node:child_process';
+import { sanitizeEnvForSandbox } from '../../services/sandbox-utils.js';
 import { generateMcpConfig } from './mcp-config.js';
 import { detectErrorInStderr, } from './output-utils.js';
 import { buildMultimodalMessage } from './prompt-utils.js';
-import { assessStall, assessToolTimeout, type StallContext } from './stall-assessor.js';
+import { assessStall, assessToolTimeout, classifyError, type StallContext } from './stall-assessor.js';
 import { ToolWatchdog } from './tool-watchdog.js';
-import { sanitizeEnvForSandbox } from '../../services/sandbox-utils.js';
 import type {
   ExecutionResult,
   ResolvedHeadlessConfig,
   ToolUseAccumulator,
+  ToolUseEvent,
 } from './types.js';
 
 export interface ClaudeInvokerOptions {
@@ -83,9 +84,20 @@ async function runStallAssessment(
     const verdict = await assessStall(stallCtx, config.claudeCommand, config.verbose, toolWatchdogActive);
     if (verdict.action === 'extend') {
       const newExtensions = extensionsGranted + 1;
-      config.outputCallback?.(
-        `\n[[MSTRO_STALL_EXTENDED]] Assessment: process likely working. ${verdict.reason}. Extension ${newExtensions}/${maxExtensions}.\n`
-      );
+      const elapsedMin = Math.round(stallCtx.elapsedTotalMs / 60_000);
+      const pendingNames = stallCtx.pendingToolNames ?? new Set<string>();
+
+      // Emit a progress message instead of a scary stall warning.
+      // Task subagents get a friendlier message since long silence is expected.
+      if (pendingNames.has('Task')) {
+        config.outputCallback?.(
+          `\n[[MSTRO_STALL_EXTENDED]] Task subagent still running (${elapsedMin} min elapsed). ${verdict.reason}.\n`
+        );
+      } else {
+        config.outputCallback?.(
+          `\n[[MSTRO_STALL_EXTENDED]] Process still working (${elapsedMin} min elapsed). ${verdict.reason}. Extension ${newExtensions}/${maxExtensions}.\n`
+        );
+      }
       if (config.verbose) {
         console.log(`[STALL] Extended by ${Math.round(verdict.extensionMs / 60_000)} min: ${verdict.reason}`);
       }
@@ -105,6 +117,136 @@ async function runStallAssessment(
   return null;
 }
 
+// ========== Native Timeout Detection ==========
+
+/** Regex matching Claude Code's internal tool timeout messages */
+const NATIVE_TIMEOUT_PATTERN = /^(\w+) timed out — (continuing|retrying) with (\d+) results? preserved$/;
+
+/** Quick prefix check: does incomplete text look like it might be a timeout? */
+const TIMEOUT_PREFIX_PATTERN = /^(\w+) timed/;
+
+/** Known tool names that Claude Code may report timeouts for */
+const NATIVE_TIMEOUT_TOOL_NAMES = new Set([
+  'Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash',
+  'WebFetch', 'WebSearch', 'Task', 'TodoRead', 'TodoWrite',
+  'NotebookEdit', 'MultiEdit',
+]);
+
+interface NativeTimeoutEvent {
+  toolName: string;
+  action: 'continuing' | 'retrying';
+  preservedCount: number;
+}
+
+/**
+ * Detects Claude Code's internal tool timeout messages in the text stream.
+ *
+ * Buffers text at newline boundaries to detect complete timeout lines.
+ * Non-matching text is forwarded immediately to minimize streaming latency.
+ */
+class NativeTimeoutDetector {
+  private lineBuffer = '';
+  private detectedTimeouts: NativeTimeoutEvent[] = [];
+  /** Text buffered after native timeouts — held back from streaming until context is assessed */
+  private postTimeoutBuffer = '';
+
+  /**
+   * Process a text_delta chunk.
+   * Returns passthrough text (for outputCallback) and any detected timeouts.
+   *
+   * After the first native timeout is detected, subsequent passthrough text
+   * is held in postTimeoutBuffer instead of returned as passthrough. This
+   * prevents confused "What were you working on?" responses from streaming
+   * to the user before context loss can be assessed.
+   */
+  processChunk(text: string): { passthrough: string; timeouts: NativeTimeoutEvent[] } {
+    const timeouts: NativeTimeoutEvent[] = [];
+    let passthrough = '';
+
+    this.lineBuffer += text;
+
+    const lines = this.lineBuffer.split('\n');
+    const incomplete = lines.pop() ?? '';
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      const match = trimmed.match(NATIVE_TIMEOUT_PATTERN);
+
+      if (match) {
+        const event: NativeTimeoutEvent = {
+          toolName: match[1],
+          action: match[2] as 'continuing' | 'retrying',
+          preservedCount: parseInt(match[3], 10),
+        };
+        timeouts.push(event);
+        this.detectedTimeouts.push(event);
+        // Suppress this line from passthrough — replaced by structured marker
+      } else {
+        passthrough += `${line}\n`;
+      }
+    }
+
+    // Handle incomplete trailing text
+    if (incomplete) {
+      const prefixMatch = incomplete.match(TIMEOUT_PREFIX_PATTERN);
+      if (prefixMatch && NATIVE_TIMEOUT_TOOL_NAMES.has(prefixMatch[1])) {
+        // Looks like the start of a timeout message — hold it
+        this.lineBuffer = incomplete;
+      } else {
+        passthrough += incomplete;
+        this.lineBuffer = '';
+      }
+    } else {
+      this.lineBuffer = '';
+    }
+
+    // After native timeouts, buffer passthrough text instead of returning it.
+    // The session manager will assess context loss and either flush or discard.
+    if (this.detectedTimeouts.length > 0 && passthrough) {
+      this.postTimeoutBuffer += passthrough;
+      passthrough = '';
+    }
+
+    return { passthrough, timeouts };
+  }
+
+  /** Flush any held buffer (call on stream end).
+   *  Also checks remaining buffer for timeout patterns so the last
+   *  timeout message (without trailing newline) is always counted.
+   */
+  flush(): string {
+    const remaining = this.lineBuffer;
+    this.lineBuffer = '';
+
+    // Check if the unflushed buffer IS a timeout message
+    if (remaining) {
+      const trimmed = remaining.trim();
+      const match = trimmed.match(NATIVE_TIMEOUT_PATTERN);
+      if (match) {
+        this.detectedTimeouts.push({
+          toolName: match[1],
+          action: match[2] as 'continuing' | 'retrying',
+          preservedCount: parseInt(match[3], 10),
+        });
+        // Return empty — this was a timeout message, not user-visible text
+        return '';
+      }
+    }
+
+    return remaining;
+  }
+
+  /** Get count of detected timeouts */
+  get timeoutCount(): number {
+    return this.detectedTimeouts.length;
+  }
+
+  /** Get buffered post-timeout text (for session manager to flush or discard) */
+  get bufferedPostTimeoutOutput(): string {
+    return this.postTimeoutBuffer;
+  }
+}
+
 // ========== Stream Event Handlers ==========
 
 interface StreamHandlerContext {
@@ -113,6 +255,12 @@ interface StreamHandlerContext {
   accumulatedThinking: string;
   accumulatedToolUse: ToolUseAccumulator[];
   toolInputBuffers: Map<number, { name: string; id: string; inputJson: string; startTime: number }>;
+  nativeTimeoutDetector: NativeTimeoutDetector;
+  /** When true, assistant text is buffered instead of forwarded to outputCallback.
+   *  Active during resume mode until thinking/tool activity confirms Claude has context. */
+  resumeAssessmentActive: boolean;
+  /** Buffered assistant text during resume assessment */
+  resumeAssessmentBuffer: string;
 }
 
 function handleSessionCapture(
@@ -134,6 +282,15 @@ function handleThinkingDelta(event: any, ctx: StreamHandlerContext): string {
     !event.delta?.thinking
   ) {
     return ctx.accumulatedThinking;
+  }
+
+  // Thinking activity confirms Claude has context — flush resume buffer
+  if (ctx.resumeAssessmentActive) {
+    ctx.resumeAssessmentActive = false;
+    if (ctx.resumeAssessmentBuffer) {
+      ctx.config.outputCallback?.(ctx.resumeAssessmentBuffer);
+      ctx.resumeAssessmentBuffer = '';
+    }
   }
 
   const thinking = event.delta.thinking;
@@ -160,10 +317,33 @@ function handleTextDelta(event: any, ctx: StreamHandlerContext): string {
   }
 
   const text = event.delta.text;
+
+  // Always accumulate raw text for checkpoint context
   const updated = ctx.accumulatedAssistantResponse + text;
 
-  if (ctx.config.outputCallback) {
-    ctx.config.outputCallback(text);
+  // Route through native timeout detector to intercept Claude Code's internal timeout messages
+  const { passthrough, timeouts } = ctx.nativeTimeoutDetector.processChunk(text);
+
+  // Emit structured markers for detected native timeouts
+  for (const timeout of timeouts) {
+    ctx.config.outputCallback?.(
+      `\n[[MSTRO_NATIVE_TIMEOUT]] ${timeout.toolName} timed out \u2014 ${timeout.action} with ${timeout.preservedCount} results preserved\n`
+    );
+  }
+
+  // When resume assessment is active, buffer text instead of forwarding.
+  // This prevents confused "What were you working on?" responses from streaming
+  // to the user before we can assess whether Claude retained context.
+  if (ctx.resumeAssessmentActive) {
+    if (passthrough) {
+      ctx.resumeAssessmentBuffer += passthrough;
+    }
+    return updated;
+  }
+
+  // Forward non-timeout text to output
+  if (passthrough && ctx.config.outputCallback) {
+    ctx.config.outputCallback(passthrough);
   }
 
   return updated;
@@ -175,6 +355,15 @@ function handleToolStart(event: any, ctx: StreamHandlerContext): void {
     event.content_block?.type !== 'tool_use'
   ) {
     return;
+  }
+
+  // Tool activity confirms Claude has context — flush resume buffer
+  if (ctx.resumeAssessmentActive) {
+    ctx.resumeAssessmentActive = false;
+    if (ctx.resumeAssessmentBuffer) {
+      ctx.config.outputCallback?.(ctx.resumeAssessmentBuffer);
+      ctx.resumeAssessmentBuffer = '';
+    }
   }
 
   const toolName = event.content_block.name;
@@ -326,6 +515,42 @@ function processStreamEvent(parsed: any, ctx: StreamHandlerContext): void {
   handleToolResult(parsed, ctx);
 }
 
+// ========== Close Handler Helpers ==========
+
+/** Flush native timeout detector buffers and return post-timeout output if any */
+function flushNativeTimeoutBuffers(ctx: StreamHandlerContext): string | undefined {
+  const remaining = ctx.nativeTimeoutDetector.flush();
+  const buffered = ctx.nativeTimeoutDetector.bufferedPostTimeoutOutput;
+  const postTimeout = (buffered + remaining) || undefined;
+
+  // Only flush remaining text if there were no native timeouts
+  // (when there are timeouts, the session manager decides what to show)
+  if (!postTimeout && remaining) {
+    ctx.config.outputCallback?.(remaining);
+  }
+
+  return postTimeout;
+}
+
+/** Classify unmatched stderr via Haiku when process exits with error */
+async function classifyUnmatchedStderr(
+  stderr: string,
+  errorAlreadySurfaced: boolean,
+  code: number | null,
+  config: ResolvedHeadlessConfig,
+): Promise<void> {
+  if (!stderr || errorAlreadySurfaced || code === 0) return;
+
+  try {
+    const classified = await classifyError(stderr, config.claudeCommand, config.verbose);
+    if (classified) {
+      config.outputCallback?.(`\n[[MSTRO_ERROR:${classified.errorCode}]] ${classified.message}\n`);
+    }
+  } catch {
+    // Haiku classification failed — proceed without it
+  }
+}
+
 // ========== Error Handling ==========
 
 const SPAWN_ERROR_MAP: Record<string, { code: string; message: string }> = {
@@ -403,6 +628,317 @@ function buildClaudeArgs(
   return args;
 }
 
+/** Write image attachments to the Claude process stdin as stream-json */
+function writeImageAttachmentsToStdin(
+  claudeProcess: ChildProcess,
+  prompt: string,
+  config: ResolvedHeadlessConfig,
+): void {
+  claudeProcess.stdin!.on('error', (err) => {
+    if (config.verbose) {
+      console.error('[STDIN] Write error:', err.message);
+    }
+    config.outputCallback?.(`\n[[MSTRO_ERROR:STDIN_WRITE_FAILED]] Failed to send image data to Claude: ${err.message}\n`);
+  });
+  const multimodalMessage = buildMultimodalMessage(prompt, config.imageAttachments!);
+  claudeProcess.stdin!.write(multimodalMessage);
+  claudeProcess.stdin!.end();
+}
+
+/** Mutable state for stall detection, shared between the interval callback and the outer function */
+interface StallState {
+  lastActivityTime: number;
+  stallWarningEmitted: boolean;
+  assessmentInProgress: boolean;
+  extensionsGranted: number;
+  currentKillDeadline: number;
+  nextWarningAfter: number;
+}
+
+/** Run a single stall-check tick. Extracted to reduce cognitive complexity of executeClaudeCommand. */
+async function runStallCheckTick(
+  state: StallState,
+  opts: {
+    perfStart: number;
+    stallWarningMs: number;
+    stallHardCapMs: number;
+    maxExtensions: number;
+    stallAssessEnabled: boolean;
+    toolWatchdogActive: boolean;
+    prompt: string;
+    pendingTools: Map<string, string>;
+    lastToolInputSummary: string | undefined;
+    totalToolCalls: number;
+    claudeProcess: ChildProcess;
+    stallCheckInterval: ReturnType<typeof setInterval>;
+    config: ResolvedHeadlessConfig;
+  },
+): Promise<void> {
+  const now = Date.now();
+  const silenceMs = now - state.lastActivityTime;
+  const totalElapsed = now - opts.perfStart;
+
+  if (totalElapsed >= opts.stallHardCapMs) {
+    terminateStallProcess(opts.claudeProcess, opts.stallCheckInterval, opts.config,
+      `\n[[MSTRO_ERROR:EXECUTION_STALLED]] Hard time limit reached (${Math.round(opts.stallHardCapMs / 60000)} min total). Terminating process.\n`
+    );
+    return;
+  }
+
+  if (now >= state.currentKillDeadline) {
+    terminateStallProcess(opts.claudeProcess, opts.stallCheckInterval, opts.config,
+      `\n[[MSTRO_ERROR:EXECUTION_STALLED]] No output for ${Math.round(silenceMs / 60_000)} minutes. Terminating process.\n`
+    );
+    return;
+  }
+
+  if (silenceMs < opts.stallWarningMs || state.stallWarningEmitted || now < state.nextWarningAfter || state.assessmentInProgress) return;
+
+  const stallCtx: StallContext = {
+    originalPrompt: opts.prompt,
+    silenceMs,
+    lastToolName: opts.pendingTools.size > 0 ? Array.from(opts.pendingTools.values()).pop() : undefined,
+    lastToolInputSummary: opts.lastToolInputSummary,
+    pendingToolCount: opts.pendingTools.size,
+    pendingToolNames: new Set(opts.pendingTools.values()),
+    totalToolCalls: opts.totalToolCalls,
+    elapsedTotalMs: totalElapsed,
+  };
+
+  if (opts.stallAssessEnabled && state.extensionsGranted < opts.maxExtensions) {
+    state.assessmentInProgress = true;
+    const result = await runStallAssessment({ stallCtx, config: opts.config, now, extensionsGranted: state.extensionsGranted, maxExtensions: opts.maxExtensions, toolWatchdogActive: opts.toolWatchdogActive });
+    state.assessmentInProgress = false;
+
+    if (result) {
+      state.extensionsGranted = result.extensionsGranted;
+      state.currentKillDeadline = result.currentKillDeadline;
+      state.nextWarningAfter = now + opts.stallWarningMs;
+      return;
+    }
+  }
+
+  state.stallWarningEmitted = true;
+  const killIn = Math.round((state.currentKillDeadline - now) / 60_000);
+  opts.config.outputCallback?.(
+    `\n[[MSTRO_ERROR:EXECUTION_STALLED]] No output for ${Math.round(silenceMs / 60_000)} minutes. Will terminate in ${killIn} minutes if no activity.\n`
+  );
+}
+
+// ========== Tool Tracking Setup ==========
+
+/** Shared mutable state for tool event handlers */
+interface ToolTrackingState {
+  pendingTools: Map<string, string>;
+  counters: { lastToolInputSummary: string | undefined; totalToolCalls: number };
+  toolIdToName: Map<string, string>;
+  toolIdToInput: Map<string, Record<string, unknown>>;
+  watchdog: ToolWatchdog | null;
+  stallState: StallState;
+  ctx: StreamHandlerContext;
+  onTimeout: (hungToolId: string) => void;
+}
+
+interface ToolTrackingResult {
+  pendingTools: Map<string, string>;
+  watchdog: ToolWatchdog | null;
+  toolWatchdogActive: boolean;
+  counters: { lastToolInputSummary: string | undefined; totalToolCalls: number };
+  /** Must be called after stallCheckInterval is created, to wire up the kill handler */
+  setKillContext: (claudeProcess: ChildProcess, stallCheckInterval: ReturnType<typeof setInterval>) => void;
+}
+
+/** Handle tool_start events. Extracted to reduce cognitive complexity. */
+function onToolStart(event: ToolUseEvent, s: ToolTrackingState): void {
+  const id = event.toolId!;
+  s.pendingTools.set(id, event.toolName!);
+  s.counters.totalToolCalls++;
+  s.toolIdToName.set(id, event.toolName!);
+  if (s.watchdog) {
+    s.watchdog.startWatch(id, event.toolName!, {}, () => { s.onTimeout(id); });
+  }
+}
+
+/** Handle tool_complete events. Extracted to reduce cognitive complexity. */
+function onToolComplete(event: ToolUseEvent, s: ToolTrackingState): void {
+  const id = event.toolId!;
+  s.counters.lastToolInputSummary = summarizeToolInput(event.completeInput);
+  s.toolIdToInput.set(id, event.completeInput);
+  if (!s.watchdog) return;
+  const toolName = s.toolIdToName.get(id);
+  if (toolName) {
+    s.watchdog.startWatch(id, toolName, event.completeInput, () => { s.onTimeout(id); });
+  }
+}
+
+/** Handle tool_result events. Extracted to reduce cognitive complexity. */
+function onToolResult(event: ToolUseEvent, s: ToolTrackingState): void {
+  const id = event.toolId!;
+  s.pendingTools.delete(id);
+  s.stallState.stallWarningEmitted = false;
+  s.stallState.lastActivityTime = Date.now();
+  const toolEntry = s.ctx.accumulatedToolUse.find(t => t.toolId === id);
+  if (!s.watchdog || !toolEntry) return;
+  const toolName = s.toolIdToName.get(id);
+  if (toolName && toolEntry.duration) {
+    s.watchdog.recordCompletion(toolName, toolEntry.duration);
+  }
+  s.watchdog.clearWatch(id);
+}
+
+/** Resolve a display URL from tool input for timeout messages */
+function resolveToolUrl(toolInput: Record<string, unknown>): string | undefined {
+  if (toolInput.url) return String(toolInput.url);
+  if (toolInput.query) return String(toolInput.query);
+  return undefined;
+}
+
+/** Handle a tool timeout by building a checkpoint and killing the process. */
+function executeToolTimeout(
+  hungToolId: string,
+  watchdog: ToolWatchdog,
+  killCtx: { claudeProcess: ChildProcess; stallCheckInterval: ReturnType<typeof setInterval> },
+  s: ToolTrackingState,
+  config: ResolvedHeadlessConfig,
+  prompt: string,
+  sessionCapture: { claudeSessionId?: string },
+  perfStart: number,
+): void {
+  const checkpoint = watchdog.buildCheckpoint(
+    prompt, s.ctx.accumulatedAssistantResponse, s.ctx.accumulatedThinking,
+    s.ctx.accumulatedToolUse, hungToolId, sessionCapture.claudeSessionId, perfStart,
+  );
+
+  const toolName = s.toolIdToName.get(hungToolId) || 'unknown';
+  const toolInput = s.toolIdToInput.get(hungToolId) || {};
+  const timeoutMs = watchdog.getTimeout(toolName);
+  const url = resolveToolUrl(toolInput);
+
+  config.outputCallback?.(
+    `\n[[MSTRO_TOOL_TIMEOUT]] ${toolName} timed out after ${Math.round(timeoutMs / 1000)}s${url ? ` fetching: ${url.slice(0, 100)}` : ''}. ${s.ctx.accumulatedToolUse.filter(t => t.result !== undefined).length} completed results preserved.\n`
+  );
+
+  if (checkpoint) {
+    config.onToolTimeout?.(checkpoint);
+  }
+
+  verboseLog(config.verbose, `[WATCHDOG] Killing process due to ${toolName} timeout`);
+  watchdog.clearAll();
+  clearInterval(killCtx.stallCheckInterval);
+  killCtx.claudeProcess.kill('SIGTERM');
+  const proc = killCtx.claudeProcess;
+  setTimeout(() => { if (!proc.killed) proc.kill('SIGKILL'); }, 5000);
+}
+
+/** Set up tool activity tracking and watchdog. Extracted to reduce cognitive complexity. */
+function setupToolTracking(
+  config: ResolvedHeadlessConfig,
+  stallState: StallState,
+  ctx: StreamHandlerContext,
+  sessionCapture: { claudeSessionId?: string },
+  prompt: string,
+  perfStart: number,
+): ToolTrackingResult {
+  const pendingTools = new Map<string, string>();
+  const counters = { lastToolInputSummary: undefined as string | undefined, totalToolCalls: 0 };
+
+  const toolWatchdogActive = config.enableToolWatchdog !== false;
+  const watchdog = toolWatchdogActive
+    ? new ToolWatchdog({
+        profiles: config.toolTimeoutProfiles,
+        verbose: config.verbose,
+        onTiebreaker: async (toolName, toolInput, elapsedMs) => {
+          return assessToolTimeout(toolName, toolInput, elapsedMs, config.claudeCommand, config.verbose);
+        },
+      })
+    : null;
+
+  // Deferred kill context — set after stallCheckInterval is created
+  let killCtx: { claudeProcess: ChildProcess; stallCheckInterval: ReturnType<typeof setInterval> } | null = null;
+
+  const trackingState: ToolTrackingState = {
+    pendingTools, counters,
+    toolIdToName: new Map(), toolIdToInput: new Map(),
+    watchdog, stallState, ctx,
+    onTimeout: (hungToolId) => {
+      if (!watchdog || !killCtx) return;
+      executeToolTimeout(hungToolId, watchdog, killCtx, trackingState, config, prompt, sessionCapture, perfStart);
+    },
+  };
+
+  const origToolUseCallback = config.toolUseCallback;
+
+  config.toolUseCallback = (event) => {
+    if (event.type === 'tool_start' && event.toolName && event.toolId) {
+      onToolStart(event, trackingState);
+    } else if (event.type === 'tool_complete' && event.completeInput && event.toolId) {
+      onToolComplete(event, trackingState);
+    } else if (event.type === 'tool_result' && event.toolId) {
+      onToolResult(event, trackingState);
+    }
+    origToolUseCallback?.(event);
+  };
+
+  return {
+    pendingTools, watchdog, toolWatchdogActive, counters,
+    setKillContext: (claudeProcess, stallCheckInterval) => {
+      killCtx = { claudeProcess, stallCheckInterval };
+    },
+  };
+}
+
+/** Log messages when verbose mode is enabled. Extracted to reduce cognitive complexity. */
+function verboseLog(verbose: boolean | undefined, ...msgs: string[]): void {
+  if (verbose) {
+    for (const msg of msgs) console.log(msg);
+  }
+}
+
+/** Spawn the Claude CLI process and register it. Extracted to reduce cognitive complexity. */
+function spawnAndRegister(
+  config: ResolvedHeadlessConfig,
+  prompt: string,
+  hasImageAttachments: boolean,
+  useStreamJson: boolean,
+  runningProcesses: Map<number, ChildProcess>,
+  perfStart: number,
+): ChildProcess {
+  const mcpConfigPath = generateMcpConfig(config.workingDir, config.verbose);
+
+  if (!mcpConfigPath && config.outputCallback) {
+    config.outputCallback(
+      '\n[[MSTRO_ERROR:BOUNCER_UNAVAILABLE]] Security bouncer not available. Running with limited permissions — file edits allowed, but shell commands may be restricted.\n'
+    );
+  }
+
+  const args = buildClaudeArgs(config, prompt, hasImageAttachments, useStreamJson, mcpConfigPath);
+
+  verboseLog(config.verbose,
+    `[PERF] About to spawn: ${Date.now() - perfStart}ms`,
+    `[PERF] Command: ${config.claudeCommand} ${args.join(' ')}`,
+  );
+
+  const claudeProcess = spawn(config.claudeCommand, args, {
+    cwd: config.workingDir,
+    env: config.sandboxed
+      ? sanitizeEnvForSandbox(process.env, config.workingDir)
+      : { ...process.env },
+    stdio: [hasImageAttachments ? 'pipe' : 'ignore', 'pipe', 'pipe']
+  });
+
+  if (hasImageAttachments && claudeProcess.stdin) {
+    writeImageAttachmentsToStdin(claudeProcess, prompt, config);
+  }
+
+  if (claudeProcess.pid) {
+    runningProcesses.set(claudeProcess.pid, claudeProcess);
+  }
+
+  verboseLog(config.verbose, `[PERF] Spawned: ${Date.now() - perfStart}ms`);
+
+  return claudeProcess;
+}
+
 /**
  * Execute a Claude CLI command for a single movement
  * Supports multimodal prompts via --input-format stream-json when image attachments are present
@@ -415,54 +951,12 @@ export async function executeClaudeCommand(
 ): Promise<ExecutionResult> {
   const { config, runningProcesses } = options;
   const perfStart = Date.now();
-  if (config.verbose) {
-    console.log(`[PERF] executeMovement started`);
-  }
+  verboseLog(config.verbose, `[PERF] executeMovement started`);
 
   const hasImageAttachments = config.imageAttachments && config.imageAttachments.length > 0;
   const useStreamJson = hasImageAttachments || config.thinkingCallback || config.outputCallback || config.toolUseCallback;
-  const mcpConfigPath = generateMcpConfig(config.workingDir, config.verbose);
 
-  if (!mcpConfigPath && config.outputCallback) {
-    config.outputCallback(
-      '\n[[MSTRO_ERROR:BOUNCER_UNAVAILABLE]] Security bouncer not available. Running with limited permissions — file edits allowed, but shell commands may be restricted.\n'
-    );
-  }
-
-  const args = buildClaudeArgs(config, prompt, !!hasImageAttachments, !!useStreamJson, mcpConfigPath);
-
-  if (config.verbose) {
-    console.log(`[PERF] About to spawn: ${Date.now() - perfStart}ms`);
-    console.log(`[PERF] Command: ${config.claudeCommand} ${args.join(' ')}`);
-  }
-
-  const claudeProcess = spawn(config.claudeCommand, args, {
-    cwd: config.workingDir,
-    env: config.sandboxed
-      ? sanitizeEnvForSandbox(process.env, config.workingDir)
-      : { ...process.env },
-    stdio: [hasImageAttachments ? 'pipe' : 'ignore', 'pipe', 'pipe']
-  });
-
-  if (hasImageAttachments && claudeProcess.stdin) {
-    claudeProcess.stdin.on('error', (err) => {
-      if (config.verbose) {
-        console.error('[STDIN] Write error:', err.message);
-      }
-      config.outputCallback?.(`\n[[MSTRO_ERROR:STDIN_WRITE_FAILED]] Failed to send image data to Claude: ${err.message}\n`);
-    });
-    const multimodalMessage = buildMultimodalMessage(prompt, config.imageAttachments!);
-    claudeProcess.stdin.write(multimodalMessage);
-    claudeProcess.stdin.end();
-  }
-
-  if (claudeProcess.pid) {
-    runningProcesses.set(claudeProcess.pid, claudeProcess);
-  }
-
-  if (config.verbose) {
-    console.log(`[PERF] Spawned: ${Date.now() - perfStart}ms`);
-  }
+  const claudeProcess = spawnAndRegister(config, prompt, !!hasImageAttachments, !!useStreamJson, runningProcesses, perfStart);
 
   let stdout = '';
   let stderr = '';
@@ -471,146 +965,48 @@ export async function executeClaudeCommand(
   let errorAlreadySurfaced = false;
 
   const sessionCapture: { claudeSessionId?: string } = {};
+  // Activate resume assessment buffering when resuming a session.
+  // Text is held until thinking/tool activity confirms Claude has context.
+  const isResumeMode = !!(config.continueSession && config.claudeSessionId);
+
   const ctx: StreamHandlerContext = {
     config,
     accumulatedAssistantResponse: '',
     accumulatedThinking: '',
     accumulatedToolUse: [],
     toolInputBuffers: new Map(),
+    nativeTimeoutDetector: new NativeTimeoutDetector(),
+    resumeAssessmentActive: isResumeMode,
+    resumeAssessmentBuffer: '',
   };
 
-  // Stall detection state
-  let lastActivityTime = Date.now();
-  let stallWarningEmitted = false;
-  let assessmentInProgress = false;
-  let extensionsGranted = 0;
-  let currentKillDeadline = Date.now() + (config.stallKillMs ?? 1_800_000);
+  // Stall detection state (mutable object shared with runStallCheckTick)
+  const stallState: StallState = {
+    lastActivityTime: Date.now(),
+    stallWarningEmitted: false,
+    assessmentInProgress: false,
+    extensionsGranted: 0,
+    currentKillDeadline: Date.now() + (config.stallKillMs ?? 1_800_000),
+    nextWarningAfter: 0,
+  };
 
   // Tool activity tracking for stall assessment context
-  // pendingTools tracks toolId -> toolName for all started-but-not-returned tools
-  const pendingTools = new Map<string, string>();
-  let lastToolInputSummary: string | undefined;
-  let totalToolCalls = 0;
-
-  // Per-tool adaptive timeout watchdog
-  const toolWatchdogActive = config.enableToolWatchdog !== false;
-  const watchdog = toolWatchdogActive
-    ? new ToolWatchdog({
-        profiles: config.toolTimeoutProfiles,
-        verbose: config.verbose,
-        onTiebreaker: async (toolName, toolInput, elapsedMs) => {
-          const verdict = await assessToolTimeout(toolName, toolInput, elapsedMs, config.claudeCommand, config.verbose);
-          return verdict;
-        },
-      })
-    : null;
-
-  // Track tool ID -> name mapping for watchdog (need it at tool_result time)
-  const toolIdToName = new Map<string, string>();
-  // Track tool ID -> complete input (available at tool_complete, needed for watchdog)
-  const toolIdToInput = new Map<string, Record<string, unknown>>();
-
-  // Wrap the existing tool handlers to track activity + watchdog
-  const origToolUseCallback = config.toolUseCallback;
-  config.toolUseCallback = (event) => {
-    if (event.type === 'tool_start' && event.toolName && event.toolId) {
-      const id = event.toolId;
-      pendingTools.set(id, event.toolName);
-      totalToolCalls++;
-      toolIdToName.set(id, event.toolName);
-      // Start watchdog with empty input (will get complete input at tool_complete)
-      if (watchdog) {
-        watchdog.startWatch(id, event.toolName, {}, () => {
-          handleToolTimeout(id);
-        });
-      }
-    } else if (event.type === 'tool_complete' && event.completeInput && event.toolId) {
-      const id = event.toolId;
-      lastToolInputSummary = summarizeToolInput(event.completeInput);
-      toolIdToInput.set(id, event.completeInput);
-      // Restart watchdog with complete input (for better tiebreaker context)
-      if (watchdog) {
-        const toolName = toolIdToName.get(id);
-        if (toolName) {
-          watchdog.startWatch(id, toolName, event.completeInput, () => {
-            handleToolTimeout(id);
-          });
-        }
-      }
-    } else if (event.type === 'tool_result' && event.toolId) {
-      pendingTools.delete(event.toolId);
-      // Grace period: reset stall warning so Claude gets a fresh window to
-      // process the result and generate a response (especially after long Task agents)
-      stallWarningEmitted = false;
-      lastActivityTime = Date.now();
-      // Record completion for EMA tracking
-      const toolEntry = ctx.accumulatedToolUse.find(t => t.toolId === event.toolId);
-      if (watchdog && toolEntry) {
-        const toolName = toolIdToName.get(event.toolId);
-        if (toolName && toolEntry.duration) {
-          watchdog.recordCompletion(toolName, toolEntry.duration);
-        }
-        watchdog.clearWatch(event.toolId);
-      }
-    }
-    origToolUseCallback?.(event);
-  };
-
-  /** Handle a tool timeout from the watchdog */
-  function handleToolTimeout(hungToolId: string): void {
-    if (!watchdog) return;
-
-    const checkpoint = watchdog.buildCheckpoint(
-      prompt,
-      ctx.accumulatedAssistantResponse,
-      ctx.accumulatedThinking,
-      ctx.accumulatedToolUse,
-      hungToolId,
-      sessionCapture.claudeSessionId,
-      perfStart,
-    );
-
-    const toolName = toolIdToName.get(hungToolId) || 'unknown';
-    const toolInput = toolIdToInput.get(hungToolId) || {};
-    const timeoutMs = watchdog.getTimeout(toolName);
-    const url = toolInput.url ? String(toolInput.url) : toolInput.query ? String(toolInput.query) : undefined;
-
-    // Emit tool timeout event via output callback (for web UI display)
-    config.outputCallback?.(
-      `\n[[MSTRO_TOOL_TIMEOUT]] ${toolName} timed out after ${Math.round(timeoutMs / 1000)}s${url ? ` fetching: ${url.slice(0, 100)}` : ''}. ${ctx.accumulatedToolUse.filter(t => t.result !== undefined).length} completed results preserved.\n`
-    );
-
-    // Notify caller via callback
-    if (checkpoint) {
-      config.onToolTimeout?.(checkpoint);
-    }
-
-    // Kill the process
-    if (config.verbose) {
-      console.log(`[WATCHDOG] Killing process due to ${toolName} timeout`);
-    }
-    watchdog.clearAll();
-    clearInterval(stallCheckInterval);
-    claudeProcess.kill('SIGTERM');
-    setTimeout(() => {
-      if (!claudeProcess.killed) {
-        claudeProcess.kill('SIGKILL');
-      }
-    }, 5000);
-  }
+  const toolTracking = setupToolTracking(config, stallState, ctx, sessionCapture, prompt, perfStart);
+  const { pendingTools, watchdog, toolWatchdogActive } = toolTracking;
+  // Mutable counters accessed by stall check tick
+  const toolCounters = toolTracking.counters;
 
   claudeProcess.stdout!.on('data', (data) => {
-    lastActivityTime = Date.now();
-    stallWarningEmitted = false;
+    stallState.lastActivityTime = Date.now();
+    stallState.stallWarningEmitted = false;
+    stallState.nextWarningAfter = 0; // Real activity resets throttle
     // Push kill deadline forward on any activity
     const killMs = config.stallKillMs ?? 1_800_000;
-    currentKillDeadline = Date.now() + killMs;
+    stallState.currentKillDeadline = Date.now() + killMs;
 
     if (!firstStdoutReceived) {
       firstStdoutReceived = true;
-      if (config.verbose) {
-        console.log(`[PERF] First stdout data: ${Date.now() - perfStart}ms`);
-      }
+      verboseLog(config.verbose, `[PERF] First stdout data: ${Date.now() - perfStart}ms`);
     }
 
     const chunk = data.toString();
@@ -644,64 +1040,26 @@ export async function executeClaudeCommand(
 
   // eslint-disable-next-line prefer-const
   let stallCheckInterval: ReturnType<typeof setInterval>;
-  stallCheckInterval = setInterval(async () => {
-    const now = Date.now();
-    const silenceMs = now - lastActivityTime;
-    const totalElapsed = now - perfStart;
-
-    // Hard cap: absolute wall-clock limit regardless of extensions
-    if (totalElapsed >= stallHardCapMs) {
-      terminateStallProcess(claudeProcess, stallCheckInterval, config,
-        `\n[[MSTRO_ERROR:EXECUTION_STALLED]] Hard time limit reached (${Math.round(stallHardCapMs / 60000)} min total). Terminating process.\n`
-      );
-      return;
-    }
-
-    // Kill deadline reached
-    if (now >= currentKillDeadline) {
-      terminateStallProcess(claudeProcess, stallCheckInterval, config,
-        `\n[[MSTRO_ERROR:EXECUTION_STALLED]] No output for ${Math.round(silenceMs / 60_000)} minutes. Terminating process.\n`
-      );
-      return;
-    }
-
-    // Warning + assessment trigger
-    if (silenceMs < stallWarningMs || stallWarningEmitted) return;
-
-    stallWarningEmitted = true;
-    const killIn = Math.round((currentKillDeadline - now) / 60_000);
-    config.outputCallback?.(
-      `\n[[MSTRO_ERROR:EXECUTION_STALLED]] No output for ${Math.round(silenceMs / 60_000)} minutes. Will terminate in ${killIn} minutes if no activity.\n`
-    );
-
-    // Run stall assessment if enabled and we haven't exhausted extensions
-    if (!stallAssessEnabled || assessmentInProgress || extensionsGranted >= maxExtensions) return;
-
-    assessmentInProgress = true;
-    const stallCtx: StallContext = {
-      originalPrompt: prompt,
-      silenceMs,
-      lastToolName: pendingTools.size > 0 ? Array.from(pendingTools.values()).pop() : undefined,
-      lastToolInputSummary,
-      pendingToolCount: pendingTools.size,
-      pendingToolNames: new Set(pendingTools.values()),
-      totalToolCalls,
-      elapsedTotalMs: totalElapsed,
-    };
-
-    const result = await runStallAssessment({ stallCtx, config, now, extensionsGranted, maxExtensions, toolWatchdogActive });
-    if (result) {
-      extensionsGranted = result.extensionsGranted;
-      currentKillDeadline = result.currentKillDeadline;
-      stallWarningEmitted = false; // Allow re-warning after extension
-    }
-    assessmentInProgress = false;
+  stallCheckInterval = setInterval(() => {
+    runStallCheckTick(stallState, {
+      perfStart, stallWarningMs, stallHardCapMs, maxExtensions, stallAssessEnabled,
+      toolWatchdogActive, prompt, pendingTools, lastToolInputSummary: toolCounters.lastToolInputSummary, totalToolCalls: toolCounters.totalToolCalls,
+      claudeProcess, stallCheckInterval, config,
+    });
   }, 10_000);
 
+  // Wire up the kill context now that stallCheckInterval exists
+  toolTracking.setKillContext(claudeProcess, stallCheckInterval);
+
   return new Promise((resolve, reject) => {
-    claudeProcess.on('close', (code) => {
+    claudeProcess.on('close', async (code) => {
       clearInterval(stallCheckInterval);
       watchdog?.clearAll();
+
+      const postTimeout = flushNativeTimeoutBuffers(ctx);
+      await classifyUnmatchedStderr(stderr, errorAlreadySurfaced, code, config);
+      const resumeBuffered = ctx.resumeAssessmentActive ? (ctx.resumeAssessmentBuffer || undefined) : undefined;
+
       if (claudeProcess.pid) {
         runningProcesses.delete(claudeProcess.pid);
       }
@@ -712,7 +1070,10 @@ export async function executeClaudeCommand(
         assistantResponse: ctx.accumulatedAssistantResponse || undefined,
         thinkingOutput: ctx.accumulatedThinking || undefined,
         toolUseHistory: ctx.accumulatedToolUse.length > 0 ? ctx.accumulatedToolUse : undefined,
-        claudeSessionId: sessionCapture.claudeSessionId
+        claudeSessionId: sessionCapture.claudeSessionId,
+        nativeTimeoutCount: ctx.nativeTimeoutDetector.timeoutCount || undefined,
+        postTimeoutOutput: postTimeout,
+        resumeBufferedOutput: resumeBuffered,
       });
     });
 

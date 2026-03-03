@@ -26,6 +26,17 @@ export interface ClaudeInvokerOptions {
   runningProcesses: Map<number, ChildProcess>;
 }
 
+// ========== Signal Helpers ==========
+
+/** Map a Node.js signal name to its numeric value for exit code computation */
+function signalToNumber(signal: string): number | undefined {
+  const map: Record<string, number> = {
+    SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGABRT: 6,
+    SIGKILL: 9, SIGTERM: 15, SIGUSR1: 10, SIGUSR2: 12,
+  };
+  return map[signal];
+}
+
 // ========== Stall Detection Helpers ==========
 
 /** Summarize a tool's input for stall assessment context */
@@ -1052,7 +1063,7 @@ export async function executeClaudeCommand(
   toolTracking.setKillContext(claudeProcess, stallCheckInterval);
 
   return new Promise((resolve, reject) => {
-    claudeProcess.on('close', async (code) => {
+    claudeProcess.on('close', async (code, signal) => {
       clearInterval(stallCheckInterval);
       watchdog?.clearAll();
 
@@ -1063,10 +1074,13 @@ export async function executeClaudeCommand(
       if (claudeProcess.pid) {
         runningProcesses.delete(claudeProcess.pid);
       }
+      // When killed by signal, code is null — use signal-derived exit code (128 + signal number)
+      const exitCode = code ?? (signal ? 128 + (signalToNumber(signal) ?? 0) : 0);
       resolve({
         output: stdout,
         error: stderr || undefined,
-        exitCode: code || 0,
+        exitCode,
+        signalName: signal || undefined,
         assistantResponse: ctx.accumulatedAssistantResponse || undefined,
         thinkingOutput: ctx.accumulatedThinking || undefined,
         toolUseHistory: ctx.accumulatedToolUse.length > 0 ? ctx.accumulatedToolUse : undefined,

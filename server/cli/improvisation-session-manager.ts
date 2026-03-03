@@ -364,6 +364,7 @@ export class ImprovisationSessionManager extends EventEmitter {
 
         if (this.shouldRetryContextLoss(result, state, useResume, nativeTimeouts, maxRetries, promptWithAttachments)) continue;
         if (this.applyToolTimeoutRetry(state, maxRetries, promptWithAttachments)) continue;
+        if (this.shouldRetrySignalCrash(result, state, maxRetries, promptWithAttachments)) continue;
         break;
       }
 
@@ -719,6 +720,115 @@ export class ImprovisationSessionManager extends EventEmitter {
     this.flushOutputQueue();
 
     return true;
+  }
+
+  /**
+   * Detect and retry after a signal crash (e.g., SIGTERM exit code 143).
+   * When the Claude process is killed externally (OOM, system signal, internal timeout
+   * that bypasses our watchdog), no existing recovery path catches it because contextLost
+   * is never set and no checkpoint is created. This adds a dedicated recovery path.
+   */
+  private shouldRetrySignalCrash(
+    result: HeadlessRunResult,
+    state: RetryLoopState,
+    maxRetries: number,
+    promptWithAttachments: string,
+  ): boolean {
+    // Only trigger for signal-killed processes (exit code 128+) that weren't already
+    // handled by context-loss or tool-timeout recovery paths
+    const isSignalCrash = result.signalName || (!result.completed && !result.error?.includes('No prompt provided'));
+    const exitCodeSignal = !result.completed && !result.signalName && result.error?.match(/exited with code (1[2-9]\d|[2-9]\d{2})/);
+    if ((!isSignalCrash && !exitCodeSignal) || state.retryNumber >= maxRetries) {
+      return false;
+    }
+    // Don't re-trigger if context loss or tool timeout already handled this iteration
+    if (state.contextLost || state.checkpointRef.value) {
+      return false;
+    }
+
+    this.accumulateToolResults(result, state);
+    state.retryNumber++;
+
+    const completedCount = state.accumulatedToolResults.length;
+    const signalInfo = result.signalName || 'unknown signal';
+
+    this.emit('onAutoRetry', {
+      retryNumber: state.retryNumber,
+      maxRetries,
+      toolName: `SignalCrash(${signalInfo})`,
+      completedCount,
+    });
+
+    trackEvent(AnalyticsEvents.IMPROVISE_AUTO_RETRY, {
+      retry_number: state.retryNumber,
+      hung_tool: `signal_crash:${signalInfo}`,
+      completed_tools: completedCount,
+      resume_attempted: !!result.claudeSessionId,
+    });
+
+    // If we have a session ID, try resuming first (preserves full context)
+    if (result.claudeSessionId && state.retryNumber === 1) {
+      this.queueOutput(
+        `\n[[MSTRO_SIGNAL_RECOVERY]] Process killed (${signalInfo}) — resuming session with ${completedCount} preserved results (retry ${state.retryNumber}/${maxRetries}).\n`
+      );
+      this.flushOutputQueue();
+      state.contextRecoverySessionId = result.claudeSessionId;
+      this.claudeSessionId = result.claudeSessionId;
+      state.currentPrompt = this.buildSignalCrashRecoveryPrompt(promptWithAttachments, true);
+    } else {
+      // Fresh start with accumulated results injected
+      this.queueOutput(
+        `\n[[MSTRO_SIGNAL_RECOVERY]] Process killed (${signalInfo}) — restarting with ${completedCount} preserved results (retry ${state.retryNumber}/${maxRetries}).\n`
+      );
+      this.flushOutputQueue();
+      state.freshRecoveryMode = true;
+      const allResults = [...this.extractHistoricalToolResults(), ...state.accumulatedToolResults];
+      state.currentPrompt = this.buildSignalCrashRecoveryPrompt(promptWithAttachments, false, allResults);
+    }
+
+    return true;
+  }
+
+  /** Build a recovery prompt after signal crash */
+  private buildSignalCrashRecoveryPrompt(
+    originalPrompt: string,
+    isResume: boolean,
+    toolResults?: ToolUseRecord[],
+  ): string {
+    const parts: string[] = [];
+
+    if (isResume) {
+      parts.push('Your previous execution was interrupted by a system signal (the process was killed externally).');
+      parts.push('Your full conversation history is preserved — including all successful tool results.');
+      parts.push('');
+      parts.push('Review your conversation history above and continue from where you left off.');
+    } else {
+      parts.push('## AUTOMATIC RETRY — Previous Execution Interrupted');
+      parts.push('');
+      parts.push('The previous execution was interrupted by a system signal (process killed).');
+      if (toolResults && toolResults.length > 0) {
+        parts.push(`${toolResults.length} tool results were preserved from prior work.`);
+        parts.push('');
+        parts.push('### Preserved results:');
+        for (const t of toolResults.slice(-20)) {
+          const inputSummary = JSON.stringify(t.toolInput).slice(0, 120);
+          const resultPreview = (t.result ?? '').slice(0, 200);
+          parts.push(`- **${t.toolName}**(${inputSummary}): ${resultPreview}`);
+        }
+      }
+    }
+
+    parts.push('');
+    parts.push('### Original task:');
+    parts.push(originalPrompt);
+    parts.push('');
+    parts.push('INSTRUCTIONS:');
+    parts.push('1. Use the results above -- do not re-fetch content you already have');
+    parts.push('2. Continue from where you left off');
+    parts.push('3. Prefer multiple small, focused tool calls over single large ones');
+    parts.push('4. Do NOT spawn Task subagents — do work inline to avoid further interruptions');
+
+    return parts.join('\n');
   }
 
   /** Select the best result across retries using Haiku assessment */

@@ -97,6 +97,8 @@ export interface HeadlessConfig {
   outputCallback?: (text: string) => void;
   thinkingCallback?: (text: string) => void;
   toolUseCallback?: (event: ToolUseEvent) => void;
+  /** Called with cumulative API token counts as they arrive from the stream */
+  tokenUsageCallback?: (usage: { inputTokens: number; outputTokens: number }) => void;
   directPrompt?: string;
   promptContext?: PromptContext;
   continueSession?: boolean;
@@ -196,13 +198,16 @@ export interface ExecutionResult {
   /** Assistant text buffered during resume assessment — held back until thinking/tool activity
    *  confirms Claude has context. Undefined when not in resume mode or buffer was flushed. */
   resumeBufferedOutput?: string;
+  /** Actual API token usage from Claude Code stream events (summed across all turns) */
+  apiTokenUsage?: { inputTokens: number; outputTokens: number };
 }
 
 /** Resolved config with all defaults applied */
-export type ResolvedHeadlessConfig = Omit<Required<HeadlessConfig>, 'outputCallback' | 'thinkingCallback' | 'toolUseCallback' | 'continueSession' | 'claudeSessionId' | 'imageAttachments' | 'model' | 'toolTimeoutProfiles' | 'onToolTimeout' | 'sandboxed'> & {
+export type ResolvedHeadlessConfig = Omit<Required<HeadlessConfig>, 'outputCallback' | 'thinkingCallback' | 'toolUseCallback' | 'tokenUsageCallback' | 'continueSession' | 'claudeSessionId' | 'imageAttachments' | 'model' | 'toolTimeoutProfiles' | 'onToolTimeout' | 'sandboxed'> & {
   outputCallback?: (text: string) => void;
   thinkingCallback?: (text: string) => void;
   toolUseCallback?: (event: ToolUseEvent) => void;
+  tokenUsageCallback?: (usage: { inputTokens: number; outputTokens: number }) => void;
   continueSession?: boolean;
   claudeSessionId?: string;
   imageAttachments?: ImageAttachment[];

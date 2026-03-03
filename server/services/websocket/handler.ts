@@ -11,7 +11,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { ImprovisationSessionManager } from '../../cli/improvisation-session-manager.js';
 import { AnalyticsEvents, trackEvent } from '../analytics.js';
 import {
@@ -29,7 +29,7 @@ import { getPTYManager } from '../terminal/pty-manager.js';
 import { AutocompleteService } from './autocomplete.js';
 import { readFileContent } from './file-utils.js';
 import { SessionRegistry } from './session-registry.js';
-import type { FrecencyData, GitDirectorySetResponse, GitFileStatus, GitLogEntry, GitRepoInfo, GitReposDiscoveredResponse, GitStatusResponse, WebSocketMessage, WebSocketResponse, WSContext } from './types.js';
+import type { FrecencyData, GitBranchEntry, GitDirectorySetResponse, GitFileStatus, GitLogEntry, GitRepoInfo, GitReposDiscoveredResponse, GitStatusResponse, GitTagEntry, MergePreviewResult, WebSocketMessage, WebSocketResponse, WorktreeInfo, WorktreeMergeResult, WSContext } from './types.js';
 
 export interface UsageReport {
   tokensUsed: number;
@@ -100,6 +100,8 @@ export class WebSocketImproviseHandler {
   private sessionRegistry: SessionRegistry | null = null;
   /** All connected WS contexts (for broadcasting to all clients) */
   private allConnections: Set<WSContext> = new Set();
+  /** Active search processes per tabId (for cancellation) */
+  private activeSearches: Map<string, import('node:child_process').ChildProcess> = new Map();
 
   constructor() {
     this.frecencyPath = join(homedir(), '.mstro', 'autocomplete-frecency.json');
@@ -242,6 +244,9 @@ export class WebSocketImproviseHandler {
       case 'deleteFile':
       case 'renameFile':
       case 'notifyFileOpened':
+      case 'searchFileContents':
+      case 'cancelSearch':
+      case 'findDefinition':
         return this.handleFileExplorerMessage(ws, msg, tabId, workingDir, permission);
       case 'gitStatus':
       case 'gitStage':
@@ -255,6 +260,24 @@ export class WebSocketImproviseHandler {
       case 'gitGetRemoteInfo':
       case 'gitCreatePR':
       case 'gitGeneratePRDescription':
+      case 'gitListBranches':
+      case 'gitCheckout':
+      case 'gitCreateBranch':
+      case 'gitDeleteBranch':
+      case 'gitDiff':
+      case 'gitListTags':
+      case 'gitCreateTag':
+      case 'gitPushTag':
+      case 'gitWorktreeList':
+      case 'gitWorktreeCreate':
+      case 'gitWorktreeRemove':
+      case 'tabWorktreeSwitch':
+      case 'gitWorktreePush':
+      case 'gitWorktreeCreatePR':
+      case 'gitMergePreview':
+      case 'gitWorktreeMerge':
+      case 'gitMergeAbort':
+      case 'gitMergeComplete':
         return this.handleGitMessage(ws, msg, tabId, workingDir);
       // Session sync messages
       case 'getActiveTabs':
@@ -524,6 +547,367 @@ export class WebSocketImproviseHandler {
     }
   }
 
+  private handleSearchFileContents(ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): void {
+    const query = msg.data?.query;
+    if (!query) {
+      this.send(ws, { type: 'contentSearchError', tabId, data: { error: 'Search query is required' } });
+      return;
+    }
+
+    // Cancel any existing search for this tab
+    this.handleCancelSearch(tabId);
+
+    const options = msg.data.options || {};
+    const startTime = Date.now();
+    let totalMatches = 0;
+    let fileCount = 0;
+    const seenFiles = new Set<string>();
+    const maxResults = options.maxResults || 5000;
+    let batch: Array<{ filePath: string; line: number; column: number; lineContent: string; contextBefore: string[]; contextAfter: string[] }> = [];
+
+    // Build ripgrep args
+    const args: string[] = ['--json', '--no-heading'];
+    if (!options.caseSensitive) args.push('-i');
+    if (options.wholeWord) args.push('-w');
+    if (!options.regex) args.push('-F');
+    if (options.contextLines !== undefined) {
+      args.push('-C', String(options.contextLines));
+    } else {
+      args.push('-C', '1');
+    }
+    if (options.includeGlob) {
+      for (const glob of options.includeGlob.split(',')) {
+        const trimmed = glob.trim();
+        if (trimmed) args.push('--glob', trimmed);
+      }
+    }
+    if (options.excludeGlob) {
+      for (const glob of options.excludeGlob.split(',')) {
+        const trimmed = glob.trim();
+        if (trimmed) args.push('--glob', `!${trimmed}`);
+      }
+    }
+    args.push('--', query, '.');
+
+    const rgProcess = spawn('rg', args, { cwd: workingDir, stdio: ['ignore', 'pipe', 'pipe'] });
+    this.activeSearches.set(tabId, rgProcess);
+
+    let buffer = '';
+    const contextMap = new Map<string, { before: string[]; after: string[] }>();
+
+    const flushBatch = () => {
+      if (batch.length > 0) {
+        this.send(ws, { type: 'contentSearchResults', tabId, data: { matches: batch, partial: true } });
+        batch = [];
+      }
+    };
+
+    rgProcess.stdout?.on('data', (chunk: Buffer) => {
+      buffer += chunk.toString();
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const parsed = JSON.parse(line);
+
+          if (parsed.type === 'match') {
+            const filePath = relative(workingDir, parsed.data.path.text);
+            const lineNumber = parsed.data.line_number;
+            const lineContent = parsed.data.lines.text.replace(/\n$/, '');
+            const column = parsed.data.submatches?.[0]?.start ?? 0;
+
+            if (!seenFiles.has(filePath)) {
+              seenFiles.add(filePath);
+              fileCount++;
+            }
+            totalMatches++;
+
+            // Get context from map
+            const key = `${filePath}:${lineNumber}`;
+            const ctx = contextMap.get(key) || { before: [], after: [] };
+
+            batch.push({
+              filePath,
+              line: lineNumber,
+              column: column + 1,
+              lineContent,
+              contextBefore: ctx.before,
+              contextAfter: [],
+            });
+
+            if (totalMatches >= maxResults) {
+              flushBatch();
+              rgProcess.kill();
+              return;
+            }
+
+            if (batch.length >= 50) {
+              flushBatch();
+            }
+          } else if (parsed.type === 'context') {
+            // Context lines come before or after matches
+            const filePath = relative(workingDir, parsed.data.path.text);
+            const lineNumber = parsed.data.line_number;
+            const lineContent = parsed.data.lines.text.replace(/\n$/, '');
+
+            // Attach context to most recent match in batch if it belongs to same file
+            const lastMatch = batch[batch.length - 1];
+            if (lastMatch && lastMatch.filePath === filePath) {
+              if (lineNumber < lastMatch.line) {
+                lastMatch.contextBefore.push(lineContent);
+              } else {
+                lastMatch.contextAfter.push(lineContent);
+              }
+            }
+          }
+        } catch {
+          // Skip malformed JSON lines
+        }
+      }
+    });
+
+    rgProcess.stderr?.on('data', (chunk: Buffer) => {
+      const errText = chunk.toString().trim();
+      // rg returns exit code 1 for "no matches" — not an error
+      if (errText && !errText.includes('No files were searched')) {
+        console.error(`[Search] rg stderr: ${errText}`);
+      }
+    });
+
+    rgProcess.on('close', (code) => {
+      this.activeSearches.delete(tabId);
+      flushBatch();
+
+      this.send(ws, {
+        type: 'contentSearchComplete',
+        tabId,
+        data: {
+          totalMatches,
+          fileCount,
+          truncated: totalMatches >= maxResults,
+          durationMs: Date.now() - startTime,
+        },
+      });
+    });
+
+    rgProcess.on('error', (err) => {
+      this.activeSearches.delete(tabId);
+      // Fallback to grep if rg is not found
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        this.handleSearchFallback(ws, query, options, tabId, workingDir);
+      } else {
+        this.send(ws, { type: 'contentSearchError', tabId, data: { error: err.message } });
+      }
+    });
+  }
+
+  private handleSearchFallback(ws: WSContext, query: string, options: Record<string, unknown>, tabId: string, workingDir: string): void {
+    const startTime = Date.now();
+    const args: string[] = ['-rn'];
+    if (!options.caseSensitive) args.push('-i');
+    if (options.includeGlob) {
+      for (const glob of String(options.includeGlob).split(',')) {
+        const trimmed = glob.trim();
+        if (trimmed) args.push(`--include=${trimmed}`);
+      }
+    }
+    args.push('--', query, '.');
+
+    const grepProcess = spawn('grep', args, { cwd: workingDir, stdio: ['ignore', 'pipe', 'pipe'] });
+    this.activeSearches.set(tabId, grepProcess);
+
+    let buffer = '';
+    let totalMatches = 0;
+    let fileCount = 0;
+    const seenFiles = new Set<string>();
+    const maxResults = (options.maxResults as number) || 5000;
+    let batch: Array<{ filePath: string; line: number; column: number; lineContent: string; contextBefore: string[]; contextAfter: string[] }> = [];
+
+    grepProcess.stdout?.on('data', (chunk: Buffer) => {
+      buffer += chunk.toString();
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        // grep -rn outputs: file:line:content
+        const match = line.match(/^\.\/(.+?):(\d+):(.*)$/);
+        if (match) {
+          const filePath = match[1];
+          const lineNumber = parseInt(match[2], 10);
+          const lineContent = match[3];
+
+          if (!seenFiles.has(filePath)) {
+            seenFiles.add(filePath);
+            fileCount++;
+          }
+          totalMatches++;
+
+          batch.push({ filePath, line: lineNumber, column: 1, lineContent, contextBefore: [], contextAfter: [] });
+
+          if (totalMatches >= maxResults) {
+            if (batch.length > 0) {
+              this.send(ws, { type: 'contentSearchResults', tabId, data: { matches: batch, partial: true } });
+              batch = [];
+            }
+            grepProcess.kill();
+            return;
+          }
+
+          if (batch.length >= 50) {
+            this.send(ws, { type: 'contentSearchResults', tabId, data: { matches: batch, partial: true } });
+            batch = [];
+          }
+        }
+      }
+    });
+
+    grepProcess.on('close', () => {
+      this.activeSearches.delete(tabId);
+      if (batch.length > 0) {
+        this.send(ws, { type: 'contentSearchResults', tabId, data: { matches: batch, partial: true } });
+      }
+      this.send(ws, {
+        type: 'contentSearchComplete',
+        tabId,
+        data: { totalMatches, fileCount, truncated: totalMatches >= maxResults, durationMs: Date.now() - startTime },
+      });
+    });
+
+    grepProcess.on('error', (err) => {
+      this.activeSearches.delete(tabId);
+      this.send(ws, { type: 'contentSearchError', tabId, data: { error: `Search unavailable: ${err.message}` } });
+    });
+  }
+
+  private handleCancelSearch(tabId: string): void {
+    const process = this.activeSearches.get(tabId);
+    if (process) {
+      process.kill();
+      this.activeSearches.delete(tabId);
+    }
+  }
+
+  private handleFindDefinition(ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): void {
+    const symbol = msg.data?.symbol;
+    const language = msg.data?.language || 'typescript';
+    const currentFile = msg.data?.currentFile || '';
+
+    if (!symbol) {
+      this.send(ws, { type: 'definitionResult', tabId, data: { definitions: [], symbol: '' } });
+      return;
+    }
+
+    // Escape special regex characters in symbol name
+    const escapedSymbol = symbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    const DEFINITION_PATTERNS: Record<string, (s: string) => string[]> = {
+      typescript: (s) => [
+        `(function|const|let|var|class|interface|type|enum)\\s+${s}\\b`,
+        `export\\s+(default\\s+)?(function|const|let|var|class|interface|type|enum)\\s+${s}\\b`,
+      ],
+      javascript: (s) => [
+        `(function|const|let|var|class)\\s+${s}\\b`,
+        `export\\s+(default\\s+)?(function|const|let|var|class)\\s+${s}\\b`,
+      ],
+      python: (s) => [
+        `(def|class)\\s+${s}\\b`,
+        `${s}\\s*=`,
+      ],
+      go: (s) => [
+        `func\\s+(\\(\\w+\\s+\\*?\\w+\\)\\s+)?${s}\\b`,
+        `type\\s+${s}\\b`,
+        `var\\s+${s}\\b`,
+      ],
+      rust: (s) => [
+        `(fn|struct|enum|trait|type|const|static|mod)\\s+${s}\\b`,
+        `impl\\s+${s}\\b`,
+      ],
+    };
+
+    const LANGUAGE_GLOBS: Record<string, string> = {
+      typescript: '*.{ts,tsx}',
+      javascript: '*.{js,jsx,mjs,cjs}',
+      python: '*.py',
+      go: '*.go',
+      rust: '*.rs',
+    };
+
+    const patterns = DEFINITION_PATTERNS[language] || DEFINITION_PATTERNS.typescript;
+    const combinedPattern = patterns(escapedSymbol).join('|');
+    const fileGlob = LANGUAGE_GLOBS[language] || LANGUAGE_GLOBS.typescript;
+
+    const args = ['--json', '-n', '--glob', fileGlob, '-e', combinedPattern, '.'];
+
+    const rgProcess = spawn('rg', args, { cwd: workingDir, stdio: ['ignore', 'pipe', 'pipe'] });
+    let buffer = '';
+    const definitions: Array<{ filePath: string; line: number; column: number; lineContent: string; kind: string }> = [];
+
+    rgProcess.stdout?.on('data', (chunk: Buffer) => {
+      buffer += chunk.toString();
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const parsed = JSON.parse(line);
+          if (parsed.type === 'match') {
+            const filePath = relative(workingDir, parsed.data.path.text);
+            const lineNumber = parsed.data.line_number;
+            const lineContent = parsed.data.lines.text.replace(/\n$/, '');
+            const column = parsed.data.submatches?.[0]?.start ?? 0;
+
+            // Classify the kind based on content
+            let kind = 'variable';
+            if (/\b(function|def|func|fn)\b/.test(lineContent)) kind = 'function';
+            else if (/\bclass\b/.test(lineContent)) kind = 'class';
+            else if (/\binterface\b/.test(lineContent)) kind = 'interface';
+            else if (/\btype\b/.test(lineContent)) kind = 'type';
+            else if (/\b(enum|struct|trait)\b/.test(lineContent)) kind = 'enum';
+            else if (/\b(const|let|var)\b/.test(lineContent)) kind = 'variable';
+
+            definitions.push({ filePath, line: lineNumber, column: column + 1, lineContent, kind });
+
+            if (definitions.length >= 20) {
+              rgProcess.kill();
+              return;
+            }
+          }
+        } catch {
+          // Skip malformed JSON
+        }
+      }
+    });
+
+    rgProcess.on('close', () => {
+      // Sort: prioritize files in same directory as currentFile, then by depth proximity
+      const currentDir = currentFile ? currentFile.substring(0, currentFile.lastIndexOf('/')) : '';
+      definitions.sort((a, b) => {
+        const aDirMatch = a.filePath.startsWith(currentDir + '/') ? 0 : 1;
+        const bDirMatch = b.filePath.startsWith(currentDir + '/') ? 0 : 1;
+        if (aDirMatch !== bDirMatch) return aDirMatch - bDirMatch;
+        // Then by depth (fewer slashes = closer to root)
+        const aDepth = a.filePath.split('/').length;
+        const bDepth = b.filePath.split('/').length;
+        return aDepth - bDepth;
+      });
+
+      this.send(ws, {
+        type: 'definitionResult',
+        tabId,
+        data: { definitions: definitions.slice(0, 10), symbol },
+      });
+    });
+
+    rgProcess.on('error', (err) => {
+      // If rg not available, return empty result
+      this.send(ws, { type: 'definitionResult', tabId, data: { definitions: [], symbol } });
+    });
+  }
+
   private handleFileExplorerMessage(ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string, permission?: 'control' | 'view'): void {
     const isSandboxed = permission === 'control' || permission === 'view';
     const handlers: Record<string, () => void> = {
@@ -544,6 +928,9 @@ export class WebSocketImproviseHandler {
       deleteFile: () => this.handleDeleteFile(ws, msg, tabId, workingDir),
       renameFile: () => this.handleRenameFile(ws, msg, tabId, workingDir),
       notifyFileOpened: () => this.handleNotifyFileOpened(ws, msg, workingDir),
+      searchFileContents: () => this.handleSearchFileContents(ws, msg, tabId, workingDir),
+      cancelSearch: () => this.handleCancelSearch(tabId),
+      findDefinition: () => this.handleFindDefinition(ws, msg, tabId, workingDir),
     };
     handlers[msg.type]?.();
   }
@@ -614,6 +1001,10 @@ export class WebSocketImproviseHandler {
 
     session.on('onToolUse', (event: any) => {
       this.send(ws, { type: 'toolUse', tabId, data: { ...event, timestamp: Date.now() } });
+    });
+
+    session.on('onTokenUsage', (usage: { inputTokens: number; outputTokens: number }) => {
+      this.send(ws, { type: 'streamingTokens', tabId, data: usage });
     });
   }
 
@@ -1510,6 +1901,29 @@ Respond with ONLY the summary text, nothing else.`;
       gitGetRemoteInfo: () => this.handleGitGetRemoteInfo(ws, tabId, gitDir),
       gitCreatePR: () => this.handleGitCreatePR(ws, msg, tabId, gitDir),
       gitGeneratePRDescription: () => this.handleGitGeneratePRDescription(ws, msg, tabId, gitDir),
+      // Branch operations
+      gitListBranches: () => this.handleGitListBranches(ws, tabId, gitDir),
+      gitCheckout: () => this.handleGitCheckout(ws, msg, tabId, gitDir),
+      gitCreateBranch: () => this.handleGitCreateBranch(ws, msg, tabId, gitDir),
+      gitDeleteBranch: () => this.handleGitDeleteBranch(ws, msg, tabId, gitDir),
+      // Diff operations
+      gitDiff: () => this.handleGitDiff(ws, msg, tabId, gitDir),
+      // Tag operations
+      gitListTags: () => this.handleGitListTags(ws, tabId, gitDir),
+      gitCreateTag: () => this.handleGitCreateTag(ws, msg, tabId, gitDir),
+      gitPushTag: () => this.handleGitPushTag(ws, msg, tabId, gitDir),
+      // Worktree operations
+      gitWorktreeList: () => this.handleGitWorktreeList(ws, tabId, gitDir),
+      gitWorktreeCreate: () => this.handleGitWorktreeCreate(ws, msg, tabId, gitDir),
+      gitWorktreeRemove: () => this.handleGitWorktreeRemove(ws, msg, tabId, gitDir),
+      tabWorktreeSwitch: () => this.handleTabWorktreeSwitch(ws, msg, tabId, workingDir),
+      gitWorktreePush: () => this.handleGitWorktreePush(ws, msg, tabId, gitDir),
+      gitWorktreeCreatePR: () => this.handleGitWorktreeCreatePR(ws, msg, tabId, gitDir),
+      // Merge operations
+      gitMergePreview: () => this.handleGitMergePreview(ws, msg, tabId, gitDir),
+      gitWorktreeMerge: () => this.handleGitWorktreeMerge(ws, msg, tabId, gitDir),
+      gitMergeAbort: () => this.handleGitMergeAbort(ws, tabId, gitDir),
+      gitMergeComplete: () => this.handleGitMergeComplete(ws, msg, tabId, gitDir),
     };
     handlers[msg.type]?.();
   }
@@ -2552,6 +2966,687 @@ Respond with ONLY the title and description, nothing else.`;
 
       setTimeout(() => { claude.kill(); }, 30000);
 
+    } catch (error: any) {
+      this.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+    }
+  }
+
+  // ============================================
+  // Branch handling methods
+  // ============================================
+
+  private async handleGitListBranches(ws: WSContext, tabId: string, workingDir: string): Promise<void> {
+    try {
+      const result = await this.executeGitCommand(
+        ['branch', '-a', '--format=%(refname:short)|%(objectname:short)|%(upstream:short)|%(HEAD)'],
+        workingDir
+      );
+      if (result.exitCode !== 0) {
+        this.send(ws, { type: 'gitError', tabId, data: { error: result.stderr || 'Failed to list branches' } });
+        return;
+      }
+
+      const currentBranchResult = await this.executeGitCommand(['rev-parse', '--abbrev-ref', 'HEAD'], workingDir);
+      const currentBranch = currentBranchResult.stdout.trim() || 'HEAD';
+
+      const branches: GitBranchEntry[] = result.stdout.trim().split('\n')
+        .filter(line => line.trim())
+        .map(line => {
+          const [name, shortHash, upstream, head] = line.split('|');
+          const isRemote = name.includes('/') && (name.startsWith('origin/') || name.includes('remotes/'));
+          return {
+            name: name.trim(),
+            shortHash: shortHash?.trim() || '',
+            isRemote,
+            isCurrent: head?.trim() === '*',
+            upstream: upstream?.trim() || undefined,
+          };
+        })
+        // Filter out HEAD references from remote branches
+        .filter(b => b.name !== 'origin/HEAD');
+
+      this.send(ws, { type: 'gitBranchList', tabId, data: { branches, current: currentBranch } });
+    } catch (error: any) {
+      this.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+    }
+  }
+
+  private async handleGitCheckout(ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): Promise<void> {
+    try {
+      const { branch, create, startPoint } = msg.data || {};
+      if (!branch) {
+        this.send(ws, { type: 'gitError', tabId, data: { error: 'Branch name is required' } });
+        return;
+      }
+
+      // Check for dirty working tree
+      const statusResult = await this.executeGitCommand(['status', '--porcelain'], workingDir);
+      if (statusResult.stdout.trim()) {
+        this.send(ws, { type: 'gitError', tabId, data: { error: 'Commit or stash changes before switching branches' } });
+        return;
+      }
+
+      // Get current branch before checkout
+      const prevResult = await this.executeGitCommand(['rev-parse', '--abbrev-ref', 'HEAD'], workingDir);
+      const previous = prevResult.stdout.trim();
+
+      const args = create
+        ? ['checkout', '-b', branch, ...(startPoint ? [startPoint] : [])]
+        : ['checkout', branch];
+
+      const result = await this.executeGitCommand(args, workingDir);
+      if (result.exitCode !== 0) {
+        this.send(ws, { type: 'gitError', tabId, data: { error: result.stderr || 'Failed to checkout branch' } });
+        return;
+      }
+
+      this.send(ws, { type: 'gitCheckedOut', tabId, data: { branch, previous } });
+      // Auto-refresh status
+      this.handleGitStatus(ws, tabId, workingDir);
+    } catch (error: any) {
+      this.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+    }
+  }
+
+  private async handleGitCreateBranch(ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): Promise<void> {
+    try {
+      const { name, startPoint, checkout } = msg.data || {};
+      if (!name) {
+        this.send(ws, { type: 'gitError', tabId, data: { error: 'Branch name is required' } });
+        return;
+      }
+
+      const args = ['branch', name, ...(startPoint ? [startPoint] : [])];
+      const result = await this.executeGitCommand(args, workingDir);
+      if (result.exitCode !== 0) {
+        this.send(ws, { type: 'gitError', tabId, data: { error: result.stderr || 'Failed to create branch' } });
+        return;
+      }
+
+      const hashResult = await this.executeGitCommand(['rev-parse', '--short', name], workingDir);
+
+      if (checkout) {
+        await this.executeGitCommand(['checkout', name], workingDir);
+      }
+
+      this.send(ws, { type: 'gitBranchCreated', tabId, data: { name, hash: hashResult.stdout.trim() } });
+    } catch (error: any) {
+      this.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+    }
+  }
+
+  private async handleGitDeleteBranch(ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): Promise<void> {
+    try {
+      const { name, force } = msg.data || {};
+      if (!name) {
+        this.send(ws, { type: 'gitError', tabId, data: { error: 'Branch name is required' } });
+        return;
+      }
+
+      // Refuse to delete current branch
+      const currentResult = await this.executeGitCommand(['rev-parse', '--abbrev-ref', 'HEAD'], workingDir);
+      if (currentResult.stdout.trim() === name) {
+        this.send(ws, { type: 'gitError', tabId, data: { error: 'Cannot delete the currently checked out branch' } });
+        return;
+      }
+
+      const result = await this.executeGitCommand(['branch', force ? '-D' : '-d', name], workingDir);
+      if (result.exitCode !== 0) {
+        this.send(ws, { type: 'gitError', tabId, data: { error: result.stderr || 'Failed to delete branch' } });
+        return;
+      }
+
+      this.send(ws, { type: 'gitBranchDeleted', tabId, data: { name } });
+    } catch (error: any) {
+      this.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+    }
+  }
+
+  // ============================================
+  // Diff handling methods
+  // ============================================
+
+  private async handleGitDiff(ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): Promise<void> {
+    try {
+      const { path, staged } = msg.data || {};
+      if (!path) {
+        this.send(ws, { type: 'gitError', tabId, data: { error: 'File path is required' } });
+        return;
+      }
+
+      // Get original content from HEAD
+      const originalResult = await this.executeGitCommand(['show', `HEAD:${path}`], workingDir);
+      const original = originalResult.exitCode === 0 ? originalResult.stdout : '';
+
+      // Get modified content
+      let modified: string;
+      if (staged) {
+        // For staged files, get content from index
+        const indexResult = await this.executeGitCommand(['show', `:${path}`], workingDir);
+        modified = indexResult.exitCode === 0 ? indexResult.stdout : '';
+      } else {
+        // For unstaged files, read the working tree version
+        const fullPath = join(workingDir, path);
+        try {
+          modified = readFileSync(fullPath, 'utf-8');
+        } catch {
+          modified = '';
+        }
+      }
+
+      this.send(ws, {
+        type: 'gitDiffResult',
+        tabId,
+        data: { path, original, modified, staged: !!staged },
+      });
+    } catch (error: any) {
+      this.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+    }
+  }
+
+  // ============================================
+  // Tag handling methods
+  // ============================================
+
+  private async handleGitListTags(ws: WSContext, tabId: string, workingDir: string): Promise<void> {
+    try {
+      const result = await this.executeGitCommand(
+        ['tag', '-l', '--sort=-creatordate', '--format=%(refname:short)|%(objectname:short)|%(creatordate:iso-strict)|%(subject)'],
+        workingDir
+      );
+      if (result.exitCode !== 0) {
+        this.send(ws, { type: 'gitError', tabId, data: { error: result.stderr || 'Failed to list tags' } });
+        return;
+      }
+
+      const tags: GitTagEntry[] = result.stdout.trim().split('\n')
+        .filter(line => line.trim())
+        .slice(0, 50)
+        .map(line => {
+          const parts = line.split('|');
+          return {
+            name: parts[0]?.trim() || '',
+            shortHash: parts[1]?.trim() || '',
+            date: parts[2]?.trim() || '',
+            message: parts[3]?.trim() || '',
+          };
+        });
+
+      this.send(ws, { type: 'gitTagList', tabId, data: { tags } });
+    } catch (error: any) {
+      this.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+    }
+  }
+
+  private async handleGitCreateTag(ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): Promise<void> {
+    try {
+      const { name, message, commit } = msg.data || {};
+      if (!name) {
+        this.send(ws, { type: 'gitError', tabId, data: { error: 'Tag name is required' } });
+        return;
+      }
+
+      // Validate tag name
+      if (/\s/.test(name) || name.includes('..')) {
+        this.send(ws, { type: 'gitError', tabId, data: { error: 'Invalid tag name: no spaces or ".." allowed' } });
+        return;
+      }
+
+      const args = message
+        ? ['tag', '-a', name, '-m', message, ...(commit ? [commit] : [])]
+        : ['tag', name, ...(commit ? [commit] : [])];
+
+      const result = await this.executeGitCommand(args, workingDir);
+      if (result.exitCode !== 0) {
+        this.send(ws, { type: 'gitError', tabId, data: { error: result.stderr || 'Failed to create tag' } });
+        return;
+      }
+
+      const hashResult = await this.executeGitCommand(['rev-parse', '--short', name], workingDir);
+      this.send(ws, { type: 'gitTagCreated', tabId, data: { name, hash: hashResult.stdout.trim() } });
+    } catch (error: any) {
+      this.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+    }
+  }
+
+  private async handleGitPushTag(ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): Promise<void> {
+    try {
+      const { name, all } = msg.data || {};
+
+      const args = all
+        ? ['push', 'origin', '--tags']
+        : ['push', 'origin', name];
+
+      if (!all && !name) {
+        this.send(ws, { type: 'gitError', tabId, data: { error: 'Tag name is required' } });
+        return;
+      }
+
+      const result = await this.executeGitCommand(args, workingDir);
+      if (result.exitCode !== 0) {
+        this.send(ws, { type: 'gitError', tabId, data: { error: result.stderr || 'Failed to push tag' } });
+        return;
+      }
+
+      this.send(ws, { type: 'gitTagPushed', tabId, data: { name: name || 'all', output: result.stderr || result.stdout } });
+    } catch (error: any) {
+      this.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+    }
+  }
+
+  // ============================================
+  // Worktree handling methods
+  // ============================================
+
+  private async handleGitWorktreeList(ws: WSContext, tabId: string, workingDir: string): Promise<void> {
+    try {
+      const result = await this.executeGitCommand(['worktree', 'list', '--porcelain'], workingDir);
+      if (result.exitCode !== 0) {
+        this.send(ws, { type: 'gitError', tabId, data: { error: result.stderr || 'Failed to list worktrees' } });
+        return;
+      }
+
+      const worktrees: WorktreeInfo[] = [];
+      let current: Partial<WorktreeInfo> = {};
+
+      for (const line of result.stdout.split('\n')) {
+        if (line.startsWith('worktree ')) {
+          if (current.path) worktrees.push(current as WorktreeInfo);
+          current = { path: line.slice(9).trim(), isMain: false, isBare: false };
+        } else if (line.startsWith('HEAD ')) {
+          current.head = line.slice(5).trim();
+        } else if (line.startsWith('branch ')) {
+          current.branch = line.slice(7).trim().replace('refs/heads/', '');
+        } else if (line === 'bare') {
+          current.isBare = true;
+        } else if (line === 'prunable') {
+          current.prunable = true;
+        } else if (line === '') {
+          // Empty line marks end of an entry
+        }
+      }
+      if (current.path) worktrees.push(current as WorktreeInfo);
+
+      // Mark the first worktree as main
+      if (worktrees.length > 0) worktrees[0].isMain = true;
+
+      this.send(ws, { type: 'gitWorktreeListResult', tabId, data: { worktrees } });
+    } catch (error: any) {
+      this.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+    }
+  }
+
+  private async handleGitWorktreeCreate(ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): Promise<void> {
+    try {
+      const { branchName, baseBranch, path: worktreePath } = msg.data || {};
+      if (!branchName) {
+        this.send(ws, { type: 'gitError', tabId, data: { error: 'Branch name is required' } });
+        return;
+      }
+
+      // Determine the worktree path
+      const repoName = workingDir.split('/').pop() || 'repo';
+      const wtPath = worktreePath || join(dirname(workingDir), `${repoName}-worktrees`, branchName);
+
+      const args = ['worktree', 'add', wtPath, '-b', branchName, ...(baseBranch ? [baseBranch] : [])];
+      const result = await this.executeGitCommand(args, workingDir);
+      if (result.exitCode !== 0) {
+        this.send(ws, { type: 'gitError', tabId, data: { error: result.stderr || 'Failed to create worktree' } });
+        return;
+      }
+
+      const headResult = await this.executeGitCommand(['rev-parse', '--short', 'HEAD'], wtPath);
+
+      this.send(ws, {
+        type: 'gitWorktreeCreated',
+        tabId,
+        data: { path: wtPath, branch: branchName, head: headResult.stdout.trim() },
+      });
+    } catch (error: any) {
+      this.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+    }
+  }
+
+  private async handleGitWorktreeRemove(ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): Promise<void> {
+    try {
+      const { path: wtPath, force, deleteBranch } = msg.data || {};
+      if (!wtPath) {
+        this.send(ws, { type: 'gitError', tabId, data: { error: 'Worktree path is required' } });
+        return;
+      }
+
+      // Get branch name before removing
+      let branchToDelete: string | undefined;
+      if (deleteBranch) {
+        const branchResult = await this.executeGitCommand(['rev-parse', '--abbrev-ref', 'HEAD'], wtPath);
+        branchToDelete = branchResult.stdout.trim();
+      }
+
+      const args = force ? ['worktree', 'remove', '--force', wtPath] : ['worktree', 'remove', wtPath];
+      const result = await this.executeGitCommand(args, workingDir);
+      if (result.exitCode !== 0) {
+        this.send(ws, { type: 'gitError', tabId, data: { error: result.stderr || 'Failed to remove worktree' } });
+        return;
+      }
+
+      // Optionally delete the branch
+      if (branchToDelete && deleteBranch) {
+        await this.executeGitCommand(['branch', '-d', branchToDelete], workingDir);
+      }
+
+      // Prune stale worktree metadata
+      await this.executeGitCommand(['worktree', 'prune'], workingDir);
+
+      this.send(ws, { type: 'gitWorktreeRemoved', tabId, data: { path: wtPath } });
+    } catch (error: any) {
+      this.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+    }
+  }
+
+  private async handleTabWorktreeSwitch(ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): Promise<void> {
+    try {
+      const { tabId: targetTabId, worktreePath } = msg.data || {};
+      const resolvedTabId = targetTabId || tabId;
+      if (!worktreePath) {
+        // Detach: clear worktree context, revert to base working directory
+        this.gitDirectories.delete(resolvedTabId);
+        this.send(ws, { type: 'tabWorktreeSwitched', tabId: resolvedTabId, data: { tabId: resolvedTabId, worktreePath: workingDir, branch: '' } });
+        this.handleGitStatus(ws, resolvedTabId, workingDir);
+        return;
+      }
+
+      // Set the tab's git directory to the worktree path
+      this.gitDirectories.set(resolvedTabId, worktreePath);
+
+      // Get the branch for this worktree
+      const branchResult = await this.executeGitCommand(['rev-parse', '--abbrev-ref', 'HEAD'], worktreePath);
+      const branch = branchResult.stdout.trim();
+
+      this.send(ws, { type: 'tabWorktreeSwitched', tabId: resolvedTabId, data: { tabId: resolvedTabId, worktreePath, branch } });
+      // Refresh status for the worktree
+      this.handleGitStatus(ws, resolvedTabId, worktreePath);
+    } catch (error: any) {
+      this.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+    }
+  }
+
+  private async handleGitWorktreePush(ws: WSContext, msg: WebSocketMessage, tabId: string, _workingDir: string): Promise<void> {
+    try {
+      const { worktreePath, remote, branch, setUpstream } = msg.data || {};
+      if (!worktreePath) {
+        this.send(ws, { type: 'gitError', tabId, data: { error: 'Worktree path is required' } });
+        return;
+      }
+
+      const pushRemote = remote || 'origin';
+      const branchResult = await this.executeGitCommand(['rev-parse', '--abbrev-ref', 'HEAD'], worktreePath);
+      const pushBranch = branch || branchResult.stdout.trim();
+
+      const args = setUpstream
+        ? ['push', '--set-upstream', pushRemote, pushBranch]
+        : ['push', pushRemote, pushBranch];
+
+      const result = await this.executeGitCommand(args, worktreePath);
+      if (result.exitCode !== 0) {
+        // If push fails because no upstream, retry with --set-upstream
+        if (result.stderr.includes('no upstream') || result.stderr.includes('has no upstream')) {
+          const retryResult = await this.executeGitCommand(['push', '--set-upstream', pushRemote, pushBranch], worktreePath);
+          if (retryResult.exitCode !== 0) {
+            this.send(ws, { type: 'gitError', tabId, data: { error: retryResult.stderr || 'Failed to push' } });
+            return;
+          }
+          this.send(ws, { type: 'gitWorktreePushed', tabId, data: { output: retryResult.stderr || retryResult.stdout, upstream: `${pushRemote}/${pushBranch}` } });
+          return;
+        }
+        this.send(ws, { type: 'gitError', tabId, data: { error: result.stderr || 'Failed to push' } });
+        return;
+      }
+
+      this.send(ws, { type: 'gitWorktreePushed', tabId, data: { output: result.stderr || result.stdout, upstream: `${pushRemote}/${pushBranch}` } });
+    } catch (error: any) {
+      this.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+    }
+  }
+
+  private async handleGitWorktreeCreatePR(ws: WSContext, msg: WebSocketMessage, tabId: string, _workingDir: string): Promise<void> {
+    try {
+      const { worktreePath, title, body, baseBranch, draft } = msg.data || {};
+      if (!worktreePath) {
+        this.send(ws, { type: 'gitError', tabId, data: { error: 'Worktree path is required' } });
+        return;
+      }
+
+      // Get the branch name for auto-title
+      const branchResult = await this.executeGitCommand(['rev-parse', '--abbrev-ref', 'HEAD'], worktreePath);
+      const branchName = branchResult.stdout.trim();
+      const prTitle = title || branchName.replace(/[-_/]/g, ' ').replace(/^\w/, c => c.toUpperCase());
+
+      const args = ['pr', 'create', '--title', prTitle];
+      if (body) args.push('--body', body);
+      if (baseBranch) args.push('--base', baseBranch);
+      if (draft) args.push('--draft');
+
+      const result = await this.spawnWithOutput('gh', args, worktreePath);
+      if (result.exitCode !== 0) {
+        this.send(ws, { type: 'gitError', tabId, data: { error: result.stderr || 'Failed to create PR' } });
+        return;
+      }
+
+      const prUrl = result.stdout.trim();
+      const prNumberMatch = prUrl.match(/\/(\d+)$/);
+      const prNumber = prNumberMatch ? parseInt(prNumberMatch[1], 10) : 0;
+
+      this.send(ws, { type: 'gitWorktreePRCreated', tabId, data: { prUrl, prNumber } });
+    } catch (error: any) {
+      this.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+    }
+  }
+
+  // ============================================
+  // Merge handling methods
+  // ============================================
+
+  private async handleGitMergePreview(ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): Promise<void> {
+    try {
+      const { sourceBranch, targetBranch } = msg.data || {};
+      if (!sourceBranch || !targetBranch) {
+        this.send(ws, { type: 'gitError', tabId, data: { error: 'Source and target branches are required' } });
+        return;
+      }
+
+      // Check for conflicts using merge-tree
+      let clean = true;
+      let conflicts: string[] = [];
+      const mergeTreeResult = await this.executeGitCommand(['merge-tree', '--write-tree', targetBranch, sourceBranch], workingDir);
+      if (mergeTreeResult.exitCode !== 0) {
+        clean = false;
+        // Parse conflict file list from output
+        conflicts = mergeTreeResult.stdout.split('\n')
+          .filter(line => line.includes('CONFLICT'))
+          .map(line => {
+            const match = line.match(/CONFLICT.*:\s+(.+)/);
+            return match?.[1]?.trim() || line;
+          });
+      }
+
+      // Get diff stat
+      const statResult = await this.executeGitCommand(['diff', `${targetBranch}...${sourceBranch}`, '--stat'], workingDir);
+      const stat = statResult.stdout.trim();
+
+      // Get commit list
+      const logResult = await this.executeGitCommand(
+        ['log', `${targetBranch}..${sourceBranch}`, '--oneline', '--format=%h|%s'],
+        workingDir
+      );
+      const commits = logResult.stdout.trim().split('\n')
+        .filter(line => line.trim())
+        .map(line => {
+          const [hash, ...rest] = line.split('|');
+          return { hash: hash.trim(), message: rest.join('|').trim() };
+        });
+
+      this.send(ws, {
+        type: 'gitMergePreviewResult',
+        tabId,
+        data: { clean, conflicts, stat, commits, ahead: commits.length },
+      });
+    } catch (error: any) {
+      this.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+    }
+  }
+
+  private async handleGitWorktreeMerge(ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): Promise<void> {
+    try {
+      const { sourceBranch, targetBranch, strategy, commitMessage, deleteWorktree, deleteBranch } = msg.data || {};
+      if (!sourceBranch || !targetBranch || !strategy) {
+        this.send(ws, { type: 'gitError', tabId, data: { error: 'Source branch, target branch, and strategy are required' } });
+        return;
+      }
+
+      // Resolve main worktree path
+      const wtListResult = await this.executeGitCommand(['worktree', 'list', '--porcelain'], workingDir);
+      let mainPath = workingDir;
+      const firstWorktreeLine = wtListResult.stdout.split('\n').find(l => l.startsWith('worktree '));
+      if (firstWorktreeLine) mainPath = firstWorktreeLine.slice(9).trim();
+
+      // Verify target branch is checked out in main worktree
+      const mainBranchResult = await this.executeGitCommand(['rev-parse', '--abbrev-ref', 'HEAD'], mainPath);
+      if (mainBranchResult.stdout.trim() !== targetBranch) {
+        this.send(ws, {
+          type: 'gitWorktreeMergeResult',
+          tabId,
+          data: { success: false, error: `Switch the main worktree to "${targetBranch}" before merging` },
+        });
+        return;
+      }
+
+      // Execute merge based on strategy
+      let mergeResult: { stdout: string; stderr: string; exitCode: number };
+
+      if (strategy === 'squash') {
+        mergeResult = await this.executeGitCommand(['merge', '--squash', sourceBranch], mainPath);
+        if (mergeResult.exitCode === 0) {
+          const msg2 = commitMessage || `Squash merge branch '${sourceBranch}'`;
+          const commitResult = await this.executeGitCommand(['commit', '-m', msg2], mainPath);
+          if (commitResult.exitCode !== 0) {
+            this.send(ws, {
+              type: 'gitWorktreeMergeResult',
+              tabId,
+              data: { success: false, error: commitResult.stderr || 'Failed to commit squash merge' },
+            });
+            return;
+          }
+        }
+      } else if (strategy === 'rebase') {
+        mergeResult = await this.executeGitCommand(['merge', '--ff-only', sourceBranch], mainPath);
+      } else {
+        // Default: merge commit
+        const mergeArgs = commitMessage
+          ? ['merge', sourceBranch, '-m', commitMessage]
+          : ['merge', sourceBranch];
+        mergeResult = await this.executeGitCommand(mergeArgs, mainPath);
+      }
+
+      if (mergeResult.exitCode !== 0) {
+        // Check for conflicts
+        const conflictStatusResult = await this.executeGitCommand(['diff', '--name-only', '--diff-filter=U'], mainPath);
+        const conflictFiles = conflictStatusResult.stdout.trim().split('\n').filter(f => f.trim());
+        if (conflictFiles.length > 0) {
+          this.send(ws, {
+            type: 'gitWorktreeMergeResult',
+            tabId,
+            data: { success: false, conflictFiles },
+          });
+          return;
+        }
+        this.send(ws, {
+          type: 'gitWorktreeMergeResult',
+          tabId,
+          data: { success: false, error: mergeResult.stderr || 'Merge failed' },
+        });
+        return;
+      }
+
+      // Get merge commit hash
+      const commitHashResult = await this.executeGitCommand(['rev-parse', '--short', 'HEAD'], mainPath);
+      const mergeCommit = commitHashResult.stdout.trim();
+
+      // Cleanup if requested
+      if (deleteWorktree) {
+        // Find the worktree path for this source branch
+        const wtList = await this.executeGitCommand(['worktree', 'list', '--porcelain'], mainPath);
+        let worktreePath: string | null = null;
+        let currentWtPath = '';
+        for (const line of wtList.stdout.split('\n')) {
+          if (line.startsWith('worktree ')) currentWtPath = line.slice(9).trim();
+          if (line.startsWith('branch ') && line.includes(sourceBranch)) {
+            worktreePath = currentWtPath;
+            break;
+          }
+        }
+        if (worktreePath && worktreePath !== mainPath) {
+          await this.executeGitCommand(['worktree', 'remove', worktreePath], mainPath);
+        }
+      }
+
+      if (deleteBranch) {
+        // Use -D for squash merges since git doesn't track squash merge parentage
+        const deleteFlag = strategy === 'squash' ? '-D' : '-d';
+        await this.executeGitCommand(['branch', deleteFlag, sourceBranch], mainPath);
+      }
+
+      await this.executeGitCommand(['worktree', 'prune'], mainPath);
+
+      this.send(ws, {
+        type: 'gitWorktreeMergeResult',
+        tabId,
+        data: { success: true, mergeCommit },
+      });
+    } catch (error: any) {
+      this.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+    }
+  }
+
+  private async handleGitMergeAbort(ws: WSContext, tabId: string, workingDir: string): Promise<void> {
+    try {
+      // Resolve main worktree path
+      const wtListResult = await this.executeGitCommand(['worktree', 'list', '--porcelain'], workingDir);
+      let mainPath = workingDir;
+      const firstLine = wtListResult.stdout.split('\n').find(l => l.startsWith('worktree '));
+      if (firstLine) mainPath = firstLine.slice(9).trim();
+
+      const result = await this.executeGitCommand(['merge', '--abort'], mainPath);
+      if (result.exitCode !== 0) {
+        this.send(ws, { type: 'gitError', tabId, data: { error: result.stderr || 'Failed to abort merge' } });
+        return;
+      }
+
+      this.send(ws, { type: 'gitMergeAborted', tabId, data: { aborted: true } });
+    } catch (error: any) {
+      this.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+    }
+  }
+
+  private async handleGitMergeComplete(ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): Promise<void> {
+    try {
+      const { deleteWorktree, deleteBranch } = msg.data || {};
+
+      // Resolve main worktree path
+      const wtListResult = await this.executeGitCommand(['worktree', 'list', '--porcelain'], workingDir);
+      let mainPath = workingDir;
+      const firstLine = wtListResult.stdout.split('\n').find(l => l.startsWith('worktree '));
+      if (firstLine) mainPath = firstLine.slice(9).trim();
+
+      const result = await this.executeGitCommand(['commit', '--no-edit'], mainPath);
+      if (result.exitCode !== 0) {
+        this.send(ws, { type: 'gitError', tabId, data: { error: result.stderr || 'Failed to complete merge' } });
+        return;
+      }
+
+      const hashResult = await this.executeGitCommand(['rev-parse', '--short', 'HEAD'], mainPath);
+      const mergeCommit = hashResult.stdout.trim();
+
+      this.send(ws, { type: 'gitMergeCompleted', tabId, data: { success: true, mergeCommit } });
     } catch (error: any) {
       this.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
     }

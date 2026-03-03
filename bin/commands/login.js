@@ -315,6 +315,14 @@ export async function login(args = []) {
     log('');
     log('  Run "mstro" to start a machine.', colors.cyan);
     log('');
+
+    // Check if node-pty is available, show tip if not
+    try {
+      await import('node-pty');
+    } catch {
+      log('  Tip: Terminal support requires native compilation.', colors.dim);
+      log('  Run "mstro setup-terminal" to enable web terminal.\n', colors.dim);
+    }
   } catch (err) {
     log('');
     log(`  Login failed: ${err.message}`, colors.red);

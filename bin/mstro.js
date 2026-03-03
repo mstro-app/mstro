@@ -49,6 +49,7 @@ const MSTRO_FIRST_RUN_FLAG = join(MSTRO_CONFIG_DIR, '.configured');
 const CLAUDE_SETTINGS_FILE = join(homedir(), '.claude', 'settings.json');
 const CLAUDE_HOOKS_DIR = join(homedir(), '.claude', 'hooks');
 const BOUNCER_HOOK_FILE = join(CLAUDE_HOOKS_DIR, 'bouncer.sh');
+const PTY_SETUP_DISMISSED_FLAG = join(MSTRO_CONFIG_DIR, '.pty-setup-dismissed');
 
 /**
  * Mark Mstro as configured by writing the first-run flag file
@@ -193,6 +194,150 @@ async function promptBouncerSetup() {
   }
 }
 
+/**
+ * Check if node-pty native module is loadable
+ */
+async function isNodePtyAvailable() {
+  try {
+    await import('node-pty');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Check if user has dismissed the pty setup prompt
+ */
+function hasUserDismissedPtySetup() {
+  return existsSync(PTY_SETUP_DISMISSED_FLAG);
+}
+
+/**
+ * Mark pty setup prompt as dismissed
+ */
+function markPtySetupDismissed() {
+  if (!existsSync(MSTRO_CONFIG_DIR)) {
+    mkdirSync(MSTRO_CONFIG_DIR, { recursive: true, mode: 0o700 });
+  }
+  writeFileSync(PTY_SETUP_DISMISSED_FLAG, new Date().toISOString());
+}
+
+/**
+ * Show a one-line warning that node-pty is not available
+ */
+function showPtyWarning() {
+  log('  Terminal support not available. Run: mstro setup-terminal', colors.dim);
+}
+
+/**
+ * Get platform-specific build tool instructions
+ */
+function getPtyBuildInstructions() {
+  const os = process.platform;
+  if (os === 'darwin') {
+    return '    Install Xcode Command Line Tools: xcode-select --install';
+  }
+  if (os === 'win32') {
+    return '    Install Windows Build Tools: npm install -g windows-build-tools';
+  }
+  return '    Debian/Ubuntu: sudo apt install build-essential python3\n' +
+         '    Fedora/RHEL:   sudo dnf install gcc-c++ make python3\n' +
+         '    Arch:          sudo pacman -S base-devel python';
+}
+
+/**
+ * Attempt to rebuild/install node-pty from CLIENT_ROOT
+ * Returns true if npm command succeeded, false otherwise
+ */
+function attemptPtyRebuild() {
+  return new Promise((resolve) => {
+    const nodePtyDir = join(CLIENT_ROOT, 'node_modules', 'node-pty');
+    const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+    const command = existsSync(nodePtyDir) ? 'rebuild' : 'install';
+    const args = command === 'rebuild'
+      ? ['rebuild', 'node-pty']
+      : ['install', 'node-pty', '--no-save'];
+
+    log(`\n  ${command === 'rebuild' ? 'Rebuilding' : 'Installing'} node-pty...`, colors.dim);
+
+    const child = spawn(npmCmd, args, {
+      cwd: CLIENT_ROOT,
+      stdio: 'inherit',
+    });
+
+    child.on('error', (err) => {
+      log(`  Error: ${err.message}`, colors.red);
+      resolve(false);
+    });
+
+    child.on('exit', (code) => {
+      resolve(code === 0);
+    });
+  });
+}
+
+/**
+ * Prompt user to set up node-pty for terminal support
+ * Returns: 'configure' | 'skip' | 'never'
+ */
+async function promptPtySetup() {
+  log('\n  Terminal Support\n', colors.bold + colors.cyan);
+  log('  Mstro includes a web terminal that lets you open a shell', colors.dim);
+  log('  directly in your browser. This requires compiling a native module (node-pty).\n', colors.dim);
+
+  const isInteractive = process.stdin.isTTY;
+
+  if (!isInteractive) {
+    log('  Non-interactive mode: skipping terminal setup.', colors.yellow);
+    log('  Run "mstro setup-terminal" to enable terminal support.\n', colors.dim);
+    return 'skip';
+  }
+
+  log('  Set up terminal support now?', colors.bold);
+  log('    [Y] Yes, compile now (requires build tools)', colors.dim);
+  log('    [n] Not now (ask again next time)', colors.dim);
+  log('    [d] Don\'t show this again\n', colors.dim);
+
+  const answer = await prompt('  Your choice [Y/n/d]: ');
+  const choice = answer.toLowerCase();
+
+  if (choice === '' || choice === 'y' || choice === 'yes') {
+    return 'configure';
+  }
+  if (choice === 'd' || choice === 'dont' || choice === "don't") {
+    log('\n  Got it! You can set up later with: mstro setup-terminal\n', colors.dim);
+    markPtySetupDismissed();
+    return 'never';
+  }
+  log('\n  Skipping for now. Will ask again next time.', colors.yellow);
+  log('  You can also set up with: mstro setup-terminal\n', colors.dim);
+  return 'skip';
+}
+
+/**
+ * Run the pty rebuild and show results
+ */
+async function runPtySetup() {
+  const success = await attemptPtyRebuild();
+
+  if (success) {
+    const available = await isNodePtyAvailable();
+    if (available) {
+      log('\n  Terminal support enabled successfully!\n', colors.bold + colors.green);
+      return true;
+    }
+    log('\n  node-pty installed but failed to load.', colors.red);
+  }
+
+  log('\n  Could not compile node-pty automatically.\n', colors.yellow);
+  log('  You may need to install build tools first:\n', colors.bold);
+  log(getPtyBuildInstructions(), colors.dim);
+  log('');
+  log('  After installing build tools, run: mstro setup-terminal\n', colors.dim);
+  return false;
+}
+
 function showHelp() {
   log('\n  Mstro - No-code AI Workspace\n', colors.bold + colors.cyan);
   log('  Run Claude Code workflows from your laptop, cloud VM, or any machine.\n', colors.dim);
@@ -205,6 +350,7 @@ function showHelp() {
   log('    mstro telemetry [on|off]    Enable/disable anonymous telemetry', colors.dim);
   log('    mstro -p 4105               Start on specific port (overrides auto port)', colors.dim);
   log('    mstro configure-hooks       Configure Claude Code security hooks', colors.dim);
+  log('    mstro setup-terminal        Enable web terminal (compiles native module)', colors.dim);
   log('    mstro --version             Show version number', colors.dim);
   log('    mstro --help                Show this help message', colors.dim);
   log('');
@@ -380,6 +526,19 @@ async function startServer(envOverrides) {
     }
   }
 
+  // Check node-pty availability for terminal support
+  const ptyAvailable = await isNodePtyAvailable();
+  if (!ptyAvailable) {
+    if (hasUserDismissedPtySetup()) {
+      showPtyWarning();
+    } else {
+      const choice = await promptPtySetup();
+      if (choice === 'configure') {
+        await runPtySetup();
+      }
+    }
+  }
+
   showUpdateNotification();
   runNpmScript('start', [], envOverrides);
 }
@@ -417,6 +576,16 @@ async function main() {
       await telemetry(args.slice(args.indexOf('telemetry') + 1));
     }],
     ['configure-hooks', () => runConfigureHooks(false)],
+    ['setup-terminal', async () => {
+      log('\n  Mstro Terminal Setup\n', colors.bold + colors.cyan);
+      const alreadyAvailable = await isNodePtyAvailable();
+      if (alreadyAvailable) {
+        log('  node-pty is already available. Terminal support is enabled!\n', colors.green);
+        return;
+      }
+      const success = await runPtySetup();
+      process.exit(success ? 0 : 1);
+    }],
   ]);
 
   // Flag-based commands

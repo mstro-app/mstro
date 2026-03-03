@@ -290,10 +290,6 @@ async function startServer() {
 
   const PORT = await findAvailablePort(REQUESTED_PORT, 20)
 
-  if (PORT !== REQUESTED_PORT) {
-    console.log(`⚠️  Port ${REQUESTED_PORT} in use, using port ${PORT}`)
-  }
-
   _currentInstance = instanceRegistry.register(PORT, WORKING_DIR)
 
   // Create HTTP server with Hono

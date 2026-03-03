@@ -89,6 +89,29 @@ export class HeadlessRunner {
     const result = await this.executePromptCommand(enrichedPrompt, 'main', 1);
 
     if (result.exitCode !== 0) {
+      // Signal exits (128+) with meaningful output are successful completions —
+      // Claude finished its work but the process was killed by signal (e.g., stall watchdog SIGTERM)
+      const isSignalExit = result.exitCode >= 128;
+      const hasOutput = !!(result.assistantResponse || (result.toolUseHistory && result.toolUseHistory.length > 0));
+
+      if (isSignalExit && hasOutput) {
+        const tokens = estimateTokensFromOutput(result.output);
+        return {
+          completed: true,
+          needsHandoff: false,
+          totalTokens: tokens,
+          sessionId,
+          signalName: result.signalName,
+          assistantResponse: result.assistantResponse,
+          thinkingOutput: result.thinkingOutput,
+          toolUseHistory: result.toolUseHistory,
+          claudeSessionId: result.claudeSessionId,
+          nativeTimeoutCount: result.nativeTimeoutCount,
+          postTimeoutOutput: result.postTimeoutOutput,
+          resumeBufferedOutput: result.resumeBufferedOutput,
+        };
+      }
+
       // Build meaningful error: prefer stderr, fall back to non-JSON stdout lines
       let errorMessage = result.error;
       if (!errorMessage && result.output) {

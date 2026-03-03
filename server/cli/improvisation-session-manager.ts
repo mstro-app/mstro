@@ -59,6 +59,7 @@ export interface MovementRecord {
   toolUseHistory?: ToolUseRecord[];// Tool invocations + results
   errorOutput?: string;            // Any errors
   durationMs?: number;             // Execution duration in milliseconds
+  retryLog?: RetryLogEntry[];      // Auto-retry events during execution
 }
 
 export interface SessionHistory {
@@ -70,6 +71,15 @@ export interface SessionHistory {
   claudeSessionId?: string;
 }
 
+
+/** Entry in the retry log for debugging recovery paths */
+interface RetryLogEntry {
+  retryNumber: number;
+  path: string;
+  reason: string;
+  timestamp: number;
+  durationMs?: number;
+}
 
 /** Mutable state for the retry loop in executePrompt */
 interface RetryLoopState {
@@ -83,6 +93,7 @@ interface RetryLoopState {
   lastWatchdogCheckpoint: ExecutionCheckpoint | null;
   timedOutTools: Array<{ toolName: string; input: Record<string, unknown>; timeoutMs: number }>;
   bestResult: HeadlessRunResult | null;
+  retryLog: RetryLogEntry[];
 }
 
 /** Type alias for HeadlessRunner execution result */
@@ -119,6 +130,8 @@ export class ImprovisationSessionManager extends EventEmitter {
   private _executionStartTimestamp: number | undefined;
   /** Buffered events during current execution, for replay on reconnect */
   private executionEventLog: Array<{ type: string; data: any; timestamp: number }> = [];
+  /** Set by cancel() to signal the retry loop to exit */
+  private _cancelled: boolean = false;
 
   /**
    * Resume from a historical session.
@@ -307,6 +320,7 @@ export class ImprovisationSessionManager extends EventEmitter {
   async executePrompt(userPrompt: string, attachments?: FileAttachment[], options?: { sandboxed?: boolean }): Promise<MovementRecord> {
     const _execStart = Date.now();
     this._isExecuting = true;
+    this._cancelled = false;
     this._executionStartTimestamp = _execStart;
     this.executionEventLog = [];
 
@@ -341,13 +355,15 @@ export class ImprovisationSessionManager extends EventEmitter {
         lastWatchdogCheckpoint: null,
         timedOutTools: [],
         bestResult: null,
+        retryLog: [],
       };
 
       const maxRetries = 3;
-      let result: HeadlessRunResult;
+      let result: HeadlessRunResult | undefined;
 
       // eslint-disable-next-line no-constant-condition
       while (true) {
+        if (this._cancelled) break;
         this.resetIterationState(state);
 
         const { useResume, resumeSessionId } = this.determineResumeStrategy(state);
@@ -356,24 +372,64 @@ export class ImprovisationSessionManager extends EventEmitter {
         result = await runner.run();
         this.currentRunner = null;
 
+        if (this._cancelled) break;
+
         this.updateBestResult(state, result);
         const nativeTimeouts = result.nativeTimeoutCount ?? 0;
         this.detectResumeContextLoss(result, state, useResume, maxRetries, nativeTimeouts);
         await this.detectNativeTimeoutContextLoss(result, state, maxRetries, nativeTimeouts);
         this.flushPostTimeoutOutput(result, state);
 
+        // Signal crashes checked first: they use --resume (lighter), and context loss
+        // recovery would clear the session ID, preventing future --resume attempts.
+        if (this.shouldRetrySignalCrash(result, state, maxRetries, promptWithAttachments)) continue;
         if (this.shouldRetryContextLoss(result, state, useResume, nativeTimeouts, maxRetries, promptWithAttachments)) continue;
         if (this.applyToolTimeoutRetry(state, maxRetries, promptWithAttachments)) continue;
-        if (this.shouldRetrySignalCrash(result, state, maxRetries, promptWithAttachments)) continue;
         break;
       }
 
+      // If cancelled, emit a minimal movement and return early
+      if (this._cancelled) {
+        this._isExecuting = false;
+        this._executionStartTimestamp = undefined;
+        this.executionEventLog = [];
+        this.currentRunner = null;
+
+        const cancelledMovement: MovementRecord = {
+          id: `prompt-${sequenceNumber}`,
+          sequenceNumber,
+          userPrompt,
+          timestamp: new Date().toISOString(),
+          tokensUsed: result ? result.totalTokens : 0,
+          summary: '',
+          filesModified: [],
+          assistantResponse: result?.assistantResponse,
+          thinkingOutput: result?.thinkingOutput,
+          toolUseHistory: result?.toolUseHistory?.map(t => ({
+            toolName: t.toolName,
+            toolId: t.toolId,
+            toolInput: t.toolInput,
+            result: t.result,
+          })),
+          errorOutput: 'Execution cancelled by user',
+          durationMs: Date.now() - _execStart,
+        };
+        this.persistMovement(cancelledMovement);
+        this.emitMovementComplete(cancelledMovement, result ?? {
+          completed: false, needsHandoff: false, totalTokens: 0, sessionId: '',
+          output: '', exitCode: 1, signalName: 'SIGTERM',
+        } as HeadlessRunResult, _execStart, sequenceNumber);
+        return cancelledMovement;
+      }
+
       if (state.contextLost) this.claudeSessionId = undefined;
-      result = await this.selectBestResult(state, result, userPrompt);
+      // result is guaranteed assigned here: the loop always runs at least once (if _cancelled was
+      // true before the loop, we returned in the block above; otherwise runner.run() assigned it).
+      result = await this.selectBestResult(state, result!, userPrompt);
       this.captureSessionAndSurfaceErrors(result);
       this.isFirstPrompt = false;
 
-      const movement = this.buildMovementRecord(result, userPrompt, sequenceNumber, _execStart);
+      const movement = this.buildMovementRecord(result, userPrompt, sequenceNumber, _execStart, state.retryLog);
       this.handleConflicts(result);
       this.persistMovement(movement);
 
@@ -483,6 +539,9 @@ export class ImprovisationSessionManager extends EventEmitter {
         this.emit('onToolUse', event);
         this.flushOutputQueue();
       },
+      tokenUsageCallback: (usage) => {
+        this.emit('onTokenUsage', usage);
+      },
       directPrompt: state.currentPrompt,
       imageAttachments,
       promptContext: (state.retryNumber === 0 && this.isResumedSession && this.isFirstPrompt)
@@ -545,7 +604,15 @@ export class ImprovisationSessionManager extends EventEmitter {
   ): Promise<void> {
     if (state.contextLost) return;
 
-    const toolsWithoutResult = result.toolUseHistory?.filter(t => t.result === undefined).length ?? 0;
+    // Deduplicate by toolId: if a toolId has at least one entry with a result,
+    // its orphaned duplicates are Claude Code internal retries, not actual timeouts.
+    const succeededIds = new Set<string>();
+    const allIds = new Set<string>();
+    for (const t of result.toolUseHistory ?? []) {
+      allIds.add(t.toolId);
+      if (t.result !== undefined) succeededIds.add(t.toolId);
+    }
+    const toolsWithoutResult = [...allIds].filter(id => !succeededIds.has(id)).length;
     const effectiveTimeouts = Math.max(nativeTimeouts, toolsWithoutResult);
 
     if (effectiveTimeouts === 0 || !result.assistantResponse || state.checkpointRef.value || state.retryNumber >= maxRetries) {
@@ -594,6 +661,13 @@ export class ImprovisationSessionManager extends EventEmitter {
     }
     this.accumulateToolResults(result, state);
     state.retryNumber++;
+    const path = (useResume && nativeTimeouts === 0) ? 'InterMovementRecovery' : 'NativeTimeoutRecovery';
+    state.retryLog.push({
+      retryNumber: state.retryNumber,
+      path,
+      reason: `Context lost (${nativeTimeouts} timeouts, ${state.accumulatedToolResults.length} tools preserved)`,
+      timestamp: Date.now(),
+    });
     if (useResume && nativeTimeouts === 0) {
       this.applyInterMovementRecovery(state, promptWithAttachments);
     } else {
@@ -602,7 +676,11 @@ export class ImprovisationSessionManager extends EventEmitter {
     return true;
   }
 
-  /** Accumulate completed tool results from a run into the retry state */
+  /** Accumulate completed tool results from a run into the retry state.
+   *  Caps at MAX_ACCUMULATED_RESULTS to prevent recovery prompts from exceeding context limits.
+   *  When the cap is reached, older results are evicted (FIFO) to make room for newer ones. */
+  private static readonly MAX_ACCUMULATED_RESULTS = 50;
+
   private accumulateToolResults(result: HeadlessRunResult, state: RetryLoopState): void {
     if (!result.toolUseHistory) return;
     for (const t of result.toolUseHistory) {
@@ -617,11 +695,18 @@ export class ImprovisationSessionManager extends EventEmitter {
         });
       }
     }
+    // Evict oldest results if over the cap
+    const cap = ImprovisationSessionManager.MAX_ACCUMULATED_RESULTS;
+    if (state.accumulatedToolResults.length > cap) {
+      state.accumulatedToolResults = state.accumulatedToolResults.slice(-cap);
+    }
   }
 
   /** Handle inter-movement context loss recovery (resume session expired) */
   private applyInterMovementRecovery(state: RetryLoopState, promptWithAttachments: string): void {
-    this.claudeSessionId = undefined;
+    // Preserve session ID so --resume remains available on subsequent retries.
+    // The fresh recovery prompt will be used, but if this attempt also fails,
+    // the next retry can still try --resume via shouldRetrySignalCrash.
     const historicalResults = this.extractHistoricalToolResults();
     const allResults = [...historicalResults, ...state.accumulatedToolResults];
 
@@ -669,7 +754,7 @@ export class ImprovisationSessionManager extends EventEmitter {
       );
       this.flushOutputQueue();
       state.freshRecoveryMode = true;
-      state.currentPrompt = this.buildFreshRecoveryPrompt(promptWithAttachments, state.accumulatedToolResults);
+      state.currentPrompt = this.buildFreshRecoveryPrompt(promptWithAttachments, state.accumulatedToolResults, state.timedOutTools);
     }
   }
 
@@ -693,6 +778,12 @@ export class ImprovisationSessionManager extends EventEmitter {
     });
 
     const canResumeSession = cp.inProgressTools.length === 0 && !!cp.claudeSessionId;
+    state.retryLog.push({
+      retryNumber: state.retryNumber,
+      path: 'ToolTimeout',
+      reason: `${cp.hungTool.toolName} timed out after ${cp.hungTool.timeoutMs}ms, ${cp.completedTools.length} tools completed, ${canResumeSession ? 'resuming' : 'fresh start'}`,
+      timestamp: Date.now(),
+    });
     this.emit('onAutoRetry', {
       retryNumber: state.retryNumber,
       maxRetries,
@@ -741,8 +832,10 @@ export class ImprovisationSessionManager extends EventEmitter {
     if ((!isSignalCrash && !exitCodeSignal) || state.retryNumber >= maxRetries) {
       return false;
     }
-    // Don't re-trigger if context loss or tool timeout already handled this iteration
-    if (state.contextLost || state.checkpointRef.value) {
+    // Don't re-trigger if tool timeout watchdog already handled this iteration
+    // (contextLost is NOT checked here — signal crash takes priority over context loss
+    // because it uses --resume which is lighter and avoids re-sending accumulated results)
+    if (state.checkpointRef.value) {
       return false;
     }
 
@@ -751,6 +844,14 @@ export class ImprovisationSessionManager extends EventEmitter {
 
     const completedCount = state.accumulatedToolResults.length;
     const signalInfo = result.signalName || 'unknown signal';
+    const useResume = !!result.claudeSessionId && state.retryNumber === 1;
+
+    state.retryLog.push({
+      retryNumber: state.retryNumber,
+      path: 'SignalCrash',
+      reason: `Process killed (${signalInfo}), ${completedCount} tools preserved, ${useResume ? 'resuming' : 'fresh start'}`,
+      timestamp: Date.now(),
+    });
 
     this.emit('onAutoRetry', {
       retryNumber: state.retryNumber,
@@ -763,11 +864,11 @@ export class ImprovisationSessionManager extends EventEmitter {
       retry_number: state.retryNumber,
       hung_tool: `signal_crash:${signalInfo}`,
       completed_tools: completedCount,
-      resume_attempted: !!result.claudeSessionId,
+      resume_attempted: useResume,
     });
 
     // If we have a session ID, try resuming first (preserves full context)
-    if (result.claudeSessionId && state.retryNumber === 1) {
+    if (useResume) {
       this.queueOutput(
         `\n[[MSTRO_SIGNAL_RECOVERY]] Process killed (${signalInfo}) — resuming session with ${completedCount} preserved results (retry ${state.retryNumber}/${maxRetries}).\n`
       );
@@ -908,6 +1009,7 @@ export class ImprovisationSessionManager extends EventEmitter {
     userPrompt: string,
     sequenceNumber: number,
     execStart: number,
+    retryLog?: RetryLogEntry[],
   ): MovementRecord {
     return {
       id: `prompt-${sequenceNumber}`,
@@ -929,6 +1031,7 @@ export class ImprovisationSessionManager extends EventEmitter {
       })),
       errorOutput: result.error,
       durationMs: Date.now() - execStart,
+      retryLog: retryLog && retryLog.length > 0 ? retryLog : undefined,
     };
   }
 
@@ -1133,7 +1236,11 @@ export class ImprovisationSessionManager extends EventEmitter {
    * Injects all accumulated tool results from previous attempts so Claude can continue
    * the task without re-fetching data it already gathered.
    */
-  private buildFreshRecoveryPrompt(originalPrompt: string, toolResults: ToolUseRecord[]): string {
+  private buildFreshRecoveryPrompt(
+    originalPrompt: string,
+    toolResults: ToolUseRecord[],
+    timedOutTools?: Array<{ toolName: string; input: Record<string, unknown>; timeoutMs: number }>,
+  ): string {
     const parts: string[] = [
       '## CONTINUING LONG-RUNNING TASK',
       '',
@@ -1141,6 +1248,10 @@ export class ImprovisationSessionManager extends EventEmitter {
       'Below are all results gathered before the interruption. Continue the task using these results.',
       '',
     ];
+
+    if (timedOutTools && timedOutTools.length > 0) {
+      parts.push(...this.formatTimedOutTools(timedOutTools), '');
+    }
 
     parts.push(...this.formatToolResults(toolResults));
 
@@ -1335,6 +1446,7 @@ export class ImprovisationSessionManager extends EventEmitter {
    * Cancel current execution
    */
   cancel(): void {
+    this._cancelled = true;
     if (this.currentRunner) {
       this.currentRunner.cleanup();
       this.currentRunner = null;

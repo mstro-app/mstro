@@ -55,6 +55,9 @@ export interface WebSocketMessage {
     | 'deleteFile'
     | 'renameFile'
     | 'notifyFileOpened'
+    | 'searchFileContents'
+    | 'cancelSearch'
+    | 'findDefinition'
     // Git message types
     | 'gitStatus'
     | 'gitStage'
@@ -68,6 +71,29 @@ export interface WebSocketMessage {
     | 'gitGetRemoteInfo'
     | 'gitCreatePR'
     | 'gitGeneratePRDescription'
+    // Branch operations
+    | 'gitListBranches'
+    | 'gitCheckout'
+    | 'gitCreateBranch'
+    | 'gitDeleteBranch'
+    // Diff operations
+    | 'gitDiff'
+    // Tag operations
+    | 'gitListTags'
+    | 'gitCreateTag'
+    | 'gitPushTag'
+    // Worktree operations
+    | 'gitWorktreeList'
+    | 'gitWorktreeCreate'
+    | 'gitWorktreeRemove'
+    | 'tabWorktreeSwitch'
+    | 'gitWorktreePush'
+    | 'gitWorktreeCreatePR'
+    // Merge operations
+    | 'gitMergePreview'
+    | 'gitWorktreeMerge'
+    | 'gitMergeAbort'
+    | 'gitMergeComplete'
     // Session sync message types
     | 'getActiveTabs'
     | 'createTab'
@@ -109,6 +135,7 @@ export interface WebSocketResponse {
     | 'tabInitialized'
     | 'approvalRequired'
     | 'toolUse'
+    | 'streamingTokens'
     | 'notificationSummary'
     | 'terminalOutput'
     | 'terminalReady'
@@ -124,6 +151,10 @@ export interface WebSocketResponse {
     | 'fileRenamed'
     | 'fileOpened'
     | 'fileContentChanged'
+    | 'contentSearchResults'
+    | 'contentSearchComplete'
+    | 'contentSearchError'
+    | 'definitionResult'
     // Terminal sync response types
     | 'terminalCreated'
     | 'terminalClosed'
@@ -141,6 +172,29 @@ export interface WebSocketResponse {
     | 'gitRemoteInfo'
     | 'gitPRCreated'
     | 'gitPRDescription'
+    // Branch response types
+    | 'gitBranchList'
+    | 'gitCheckedOut'
+    | 'gitBranchCreated'
+    | 'gitBranchDeleted'
+    // Diff response types
+    | 'gitDiffResult'
+    // Tag response types
+    | 'gitTagList'
+    | 'gitTagCreated'
+    | 'gitTagPushed'
+    // Worktree response types
+    | 'gitWorktreeListResult'
+    | 'gitWorktreeCreated'
+    | 'gitWorktreeRemoved'
+    | 'tabWorktreeSwitched'
+    | 'gitWorktreePushed'
+    | 'gitWorktreePRCreated'
+    // Merge response types
+    | 'gitMergePreviewResult'
+    | 'gitWorktreeMergeResult'
+    | 'gitMergeAborted'
+    | 'gitMergeCompleted'
     // Session sync response types
     | 'activeTabs'
     | 'tabCreated'
@@ -371,4 +425,83 @@ export interface GitDirectorySetResponse {
   directory: string;
   /** Whether the directory is valid (contains .git) */
   isValid: boolean;
+}
+
+// ============================================================================
+// Branch Types
+// ============================================================================
+
+export interface GitBranchEntry {
+  /** Branch name, e.g. "feat/auth" or "origin/main" */
+  name: string;
+  /** Short commit hash */
+  shortHash: string;
+  /** Whether this is a remote branch */
+  isRemote: boolean;
+  /** Whether this is the currently checked out branch */
+  isCurrent: boolean;
+  /** Tracking branch, e.g. "origin/feat/auth" */
+  upstream?: string;
+}
+
+// ============================================================================
+// Tag Types
+// ============================================================================
+
+export interface GitTagEntry {
+  /** Tag name */
+  name: string;
+  /** Short commit hash */
+  shortHash: string;
+  /** Creation date (ISO string) */
+  date: string;
+  /** Tag message (empty for lightweight tags) */
+  message: string;
+}
+
+// ============================================================================
+// Worktree Types
+// ============================================================================
+
+export interface WorktreeInfo {
+  /** Absolute path to the worktree directory */
+  path: string;
+  /** Branch checked out in this worktree */
+  branch: string;
+  /** HEAD commit hash */
+  head: string;
+  /** Whether this is the main working tree */
+  isMain: boolean;
+  /** Whether this is a bare repository */
+  isBare: boolean;
+  /** Whether this worktree can be pruned */
+  prunable?: boolean;
+}
+
+// ============================================================================
+// Merge Types
+// ============================================================================
+
+export interface MergePreviewResult {
+  /** Whether the merge can be done cleanly */
+  clean: boolean;
+  /** List of conflicting file paths */
+  conflicts: string[];
+  /** Diff stat summary */
+  stat: string;
+  /** List of commits to be merged */
+  commits: { hash: string; message: string }[];
+  /** Number of commits ahead */
+  ahead: number;
+}
+
+export interface WorktreeMergeResult {
+  /** Whether the merge succeeded */
+  success: boolean;
+  /** Merge commit hash (if successful) */
+  mergeCommit?: string;
+  /** Error message (if failed) */
+  error?: string;
+  /** List of conflicting files (if conflicts) */
+  conflictFiles?: string[];
 }

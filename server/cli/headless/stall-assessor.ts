@@ -35,6 +35,8 @@ export interface StallContext {
   totalToolCalls: number;
   /** Total wall-clock time since process started (ms) */
   elapsedTotalMs: number;
+  /** Time since the last token usage event (ms). Undefined if no token events yet. */
+  tokenSilenceMs?: number;
 }
 
 export interface StallVerdict {
@@ -56,6 +58,17 @@ export interface StallVerdict {
 function quickHeuristic(ctx: StallContext, toolWatchdogActive = false): StallVerdict | null {
   const pendingNames = ctx.pendingToolNames ?? new Set<string>();
   const hasPendingTools = ctx.pendingToolCount > 0;
+
+  // Tokens still flowing = process is alive and actively processing.
+  // Extend generously when token activity is recent (< 60s), regardless
+  // of stdout silence. This covers silent thinking and tool result processing.
+  if (ctx.tokenSilenceMs !== undefined && ctx.tokenSilenceMs < 60_000) {
+    return {
+      action: 'extend',
+      extensionMs: 10 * 60_000,
+      reason: `Tokens still flowing (last activity ${Math.round(ctx.tokenSilenceMs / 1000)}s ago) — process is alive`,
+    };
+  }
 
   // When the watchdog is active and tools are pending, always defer.
   // The watchdog manages per-tool timeouts; the stall detector should only
@@ -156,6 +169,7 @@ export async function assessToolTimeout(
   elapsedMs: number,
   claudeCommand: string,
   verbose: boolean,
+  tokenSilenceMs?: number,
 ): Promise<StallVerdict> {
   const elapsedSec = Math.round(elapsedMs / 1000);
 
@@ -181,13 +195,19 @@ export async function assessToolTimeout(
   };
   const toolDesc = toolDescriptions[toolName] || `executes the ${toolName} tool`;
 
+  const tokenLine = tokenSilenceMs !== undefined
+    ? `Token activity: last token event ${Math.round(tokenSilenceMs / 1000)}s ago (recent tokens = process is alive and processing)`
+    : 'Token activity: no token events observed';
+
   const prompt = [
     `You are a process health monitor. A ${toolName} tool call has been running for ${elapsedSec}s.`,
     `${toolName} ${toolDesc}.`,
     `Tool input: ${inputSummary}`,
+    tokenLine,
     '',
     `Is this tool call likely still working, or is it hung/frozen?`,
     'Consider: network latency, server response times, anti-bot protections, large page sizes, complex operations.',
+    'IMPORTANT: If tokens were active recently (< 60s ago), the process is likely still alive and processing — strongly favor WORKING.',
     '',
     'Respond in EXACTLY this format (3 lines, no extra text):',
     'VERDICT: WORKING or STALLED',
@@ -305,6 +325,10 @@ function buildAssessmentPrompt(ctx: StallContext): string {
     ? `${ctx.originalPrompt.slice(0, 500)}...`
     : ctx.originalPrompt;
 
+  const tokenLine = ctx.tokenSilenceMs !== undefined
+    ? `Token activity: last token event ${Math.round(ctx.tokenSilenceMs / 1000)}s ago (tokens flowing = process alive)`
+    : 'Token activity: no token events observed';
+
   return [
     'You are a process health monitor. A Claude Code subprocess has been silent (no stdout) and you must determine if it is working or stalled.',
     '',
@@ -314,6 +338,7 @@ function buildAssessmentPrompt(ctx: StallContext): string {
     ctx.lastToolInputSummary ? `Last tool input: ${ctx.lastToolInputSummary}` : '',
     `Pending tool calls: ${ctx.pendingToolCount}`,
     `Total tool calls this session: ${ctx.totalToolCalls}`,
+    tokenLine,
     `Task being executed: ${promptPreview}`,
     '',
     'Respond in EXACTLY this format (3 lines, no extra text):',

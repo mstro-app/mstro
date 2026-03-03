@@ -109,7 +109,9 @@ export interface ToolWatchdogOptions {
   profiles?: Record<string, Partial<ToolTimeoutProfile>>;
   verbose?: boolean;
   /** Called before killing — if returns 'extend', reschedule with extensionMs */
-  onTiebreaker?: (toolName: string, toolInput: Record<string, unknown>, elapsedMs: number) => Promise<{ action: 'extend' | 'kill'; extensionMs: number; reason: string }>;
+  onTiebreaker?: (toolName: string, toolInput: Record<string, unknown>, elapsedMs: number, tokenSilenceMs?: number) => Promise<{ action: 'extend' | 'kill'; extensionMs: number; reason: string }>;
+  /** Returns ms since last token activity. Called at tiebreaker time for fresh data. */
+  getTokenSilenceMs?: () => number | undefined;
 }
 
 interface ActiveWatch {
@@ -127,10 +129,12 @@ export class ToolWatchdog {
   private activeWatches: Map<string, ActiveWatch> = new Map();
   private verbose: boolean;
   private onTiebreaker?: ToolWatchdogOptions['onTiebreaker'];
+  private getTokenSilenceMs?: () => number | undefined;
 
   constructor(options: ToolWatchdogOptions = {}) {
     this.verbose = options.verbose ?? false;
     this.onTiebreaker = options.onTiebreaker;
+    this.getTokenSilenceMs = options.getTokenSilenceMs;
 
     // Merge user profiles with defaults
     this.profiles = { ...DEFAULT_TOOL_TIMEOUT_PROFILES };
@@ -257,7 +261,8 @@ export class ToolWatchdog {
     }
 
     try {
-      const verdict = await this.onTiebreaker!(toolName, toolInput, elapsedMs);
+      const tokenSilenceMs = this.getTokenSilenceMs?.();
+      const verdict = await this.onTiebreaker!(toolName, toolInput, elapsedMs, tokenSilenceMs);
 
       if (verdict.action === 'extend') {
         if (this.verbose) {

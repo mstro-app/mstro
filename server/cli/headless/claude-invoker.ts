@@ -272,6 +272,10 @@ interface StreamHandlerContext {
   resumeAssessmentActive: boolean;
   /** Buffered assistant text during resume assessment */
   resumeAssessmentBuffer: string;
+  /** Cumulative API token usage from message_start/message_delta events */
+  apiTokenUsage: { inputTokens: number; outputTokens: number };
+  /** Timestamp of the last token usage change (tokens still flowing = process alive) */
+  lastTokenActivityTime: number;
 }
 
 function handleSessionCapture(
@@ -439,6 +443,9 @@ function handleToolComplete(event: any, ctx: StreamHandlerContext): void {
     startTime: toolBuffer.startTime
   });
 
+  // Clean up the input buffer — it's no longer needed after accumulation
+  ctx.toolInputBuffers.delete(index);
+
   if (ctx.config.toolUseCallback) {
     ctx.config.toolUseCallback({
       type: 'tool_complete',
@@ -447,6 +454,36 @@ function handleToolComplete(event: any, ctx: StreamHandlerContext): void {
       index,
       completeInput
     });
+  }
+}
+
+function handleTokenUsage(event: any, ctx: StreamHandlerContext): void {
+  let changed = false;
+
+  // message_start carries initial input token count
+  if (event.type === 'message_start' && event.message?.usage) {
+    const usage = event.message.usage;
+    if (typeof usage.input_tokens === 'number') {
+      ctx.apiTokenUsage.inputTokens += usage.input_tokens;
+      changed = true;
+    }
+    if (typeof usage.output_tokens === 'number') {
+      ctx.apiTokenUsage.outputTokens += usage.output_tokens;
+      changed = true;
+    }
+  }
+
+  // message_delta carries incremental output token count
+  if (event.type === 'message_delta' && event.usage) {
+    if (typeof event.usage.output_tokens === 'number') {
+      ctx.apiTokenUsage.outputTokens += event.usage.output_tokens;
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    ctx.lastTokenActivityTime = Date.now();
+    ctx.config.tokenUsageCallback?.({ ...ctx.apiTokenUsage });
   }
 }
 
@@ -522,6 +559,7 @@ function processStreamEvent(parsed: any, ctx: StreamHandlerContext): void {
     handleToolStart(event, ctx);
     handleToolInputDelta(event, ctx);
     handleToolComplete(event, ctx);
+    handleTokenUsage(event, ctx);
   }
   handleToolResult(parsed, ctx);
 }
@@ -683,17 +721,26 @@ async function runStallCheckTick(
     claudeProcess: ChildProcess;
     stallCheckInterval: ReturnType<typeof setInterval>;
     config: ResolvedHeadlessConfig;
+    lastTokenActivityTime: number;
   },
 ): Promise<void> {
   const now = Date.now();
   const silenceMs = now - state.lastActivityTime;
   const totalElapsed = now - opts.perfStart;
+  const tokenSilenceMs = now - opts.lastTokenActivityTime;
 
   if (totalElapsed >= opts.stallHardCapMs) {
     terminateStallProcess(opts.claudeProcess, opts.stallCheckInterval, opts.config,
       `\n[[MSTRO_ERROR:EXECUTION_STALLED]] Hard time limit reached (${Math.round(opts.stallHardCapMs / 60000)} min total). Terminating process.\n`
     );
     return;
+  }
+
+  // Token activity pushes the kill deadline forward — tokens flowing means
+  // the process is alive even if stdout is silent (e.g. silent thinking).
+  if (tokenSilenceMs < 60_000 && now < state.currentKillDeadline) {
+    const killMs = opts.config.stallKillMs ?? 1_800_000;
+    state.currentKillDeadline = Math.max(state.currentKillDeadline, now + killMs);
   }
 
   if (now >= state.currentKillDeadline) {
@@ -714,6 +761,7 @@ async function runStallCheckTick(
     pendingToolNames: new Set(opts.pendingTools.values()),
     totalToolCalls: opts.totalToolCalls,
     elapsedTotalMs: totalElapsed,
+    tokenSilenceMs,
   };
 
   if (opts.stallAssessEnabled && state.extensionsGranted < opts.maxExtensions) {
@@ -858,8 +906,12 @@ function setupToolTracking(
     ? new ToolWatchdog({
         profiles: config.toolTimeoutProfiles,
         verbose: config.verbose,
-        onTiebreaker: async (toolName, toolInput, elapsedMs) => {
-          return assessToolTimeout(toolName, toolInput, elapsedMs, config.claudeCommand, config.verbose);
+        onTiebreaker: async (toolName, toolInput, elapsedMs, tokenSilenceMs) => {
+          return assessToolTimeout(toolName, toolInput, elapsedMs, config.claudeCommand, config.verbose, tokenSilenceMs);
+        },
+        getTokenSilenceMs: () => {
+          const last = ctx.lastTokenActivityTime;
+          return last > 0 ? Date.now() - last : undefined;
         },
       })
     : null;
@@ -989,6 +1041,8 @@ export async function executeClaudeCommand(
     nativeTimeoutDetector: new NativeTimeoutDetector(),
     resumeAssessmentActive: isResumeMode,
     resumeAssessmentBuffer: '',
+    apiTokenUsage: { inputTokens: 0, outputTokens: 0 },
+    lastTokenActivityTime: Date.now(),
   };
 
   // Stall detection state (mutable object shared with runStallCheckTick)
@@ -1055,7 +1109,7 @@ export async function executeClaudeCommand(
     runStallCheckTick(stallState, {
       perfStart, stallWarningMs, stallHardCapMs, maxExtensions, stallAssessEnabled,
       toolWatchdogActive, prompt, pendingTools, lastToolInputSummary: toolCounters.lastToolInputSummary, totalToolCalls: toolCounters.totalToolCalls,
-      claudeProcess, stallCheckInterval, config,
+      claudeProcess, stallCheckInterval, config, lastTokenActivityTime: ctx.lastTokenActivityTime,
     });
   }, 10_000);
 
@@ -1076,6 +1130,7 @@ export async function executeClaudeCommand(
       }
       // When killed by signal, code is null — use signal-derived exit code (128 + signal number)
       const exitCode = code ?? (signal ? 128 + (signalToNumber(signal) ?? 0) : 0);
+      const hasTokenUsage = ctx.apiTokenUsage.inputTokens > 0 || ctx.apiTokenUsage.outputTokens > 0;
       resolve({
         output: stdout,
         error: stderr || undefined,
@@ -1088,6 +1143,7 @@ export async function executeClaudeCommand(
         nativeTimeoutCount: ctx.nativeTimeoutDetector.timeoutCount || undefined,
         postTimeoutOutput: postTimeout,
         resumeBufferedOutput: resumeBuffered,
+        apiTokenUsage: hasTokenUsage ? { ...ctx.apiTokenUsage } : undefined,
       });
     });
 

@@ -137,6 +137,8 @@ export interface SessionResult {
   totalTokens: number;
   sessionId: string;
   error?: string;
+  /** Signal name if Claude process was killed (e.g., 'SIGTERM', 'SIGKILL') */
+  signalName?: string;
   conflicts?: Array<{
     filePath: string;
     modifiedBy: string[];
@@ -180,6 +182,8 @@ export interface ExecutionResult {
   output: string;
   error?: string;
   exitCode: number;
+  /** Signal name if process was killed (e.g., 'SIGTERM', 'SIGKILL') */
+  signalName?: string;
   assistantResponse?: string;
   thinkingOutput?: string;
   toolUseHistory?: ToolUseAccumulator[];

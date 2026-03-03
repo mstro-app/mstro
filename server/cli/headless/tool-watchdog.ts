@@ -56,41 +56,44 @@ export const DEFAULT_TOOL_TIMEOUT_PROFILES: Record<string, ToolTimeoutProfile> =
     useAdaptive: false,
     useHaikuTiebreaker: true,
   },
-  // Local filesystem tools — adaptive EMA learns actual durations, short cold starts
+  // Local filesystem tools — these go through Claude Code's streaming stdio protocol,
+  // NOT direct filesystem I/O. Large files/results can take 30-60s+ to stream.
+  // Read/Grep have bimodal distributions (tiny vs huge responses) that defeat EMA,
+  // so adaptive is disabled for them. Floors are generous to prevent premature kills.
   Read: {
-    coldStartMs: 60_000,       // 1 min — local reads should be fast
-    floorMs: 15_000,           // 15s minimum
-    ceilingMs: 300_000,        // 5 min ceiling (large files, slow mounts)
-    useAdaptive: true,
-    useHaikuTiebreaker: false, // local ops don't need AI assessment
+    coldStartMs: 120_000,      // 2 min — large files stream slowly through stdio protocol
+    floorMs: 60_000,           // 1 min minimum — prevents EMA-driven premature kills
+    ceilingMs: 300_000,        // 5 min ceiling (very large files, slow mounts)
+    useAdaptive: false,        // bimodal: 1-line file vs 2000-line file defeats EMA
+    useHaikuTiebreaker: true,  // safety net: assess before killing the whole process
   },
   Grep: {
-    coldStartMs: 60_000,
-    floorMs: 15_000,
-    ceilingMs: 300_000,
-    useAdaptive: true,
-    useHaikuTiebreaker: false,
+    coldStartMs: 120_000,      // 2 min — broad searches return large result sets
+    floorMs: 60_000,           // 1 min minimum
+    ceilingMs: 300_000,        // 5 min ceiling
+    useAdaptive: false,        // bimodal: single-file vs codebase-wide search
+    useHaikuTiebreaker: true,  // safety net before killing
   },
   Glob: {
-    coldStartMs: 30_000,       // 30s — pattern matching is fast
-    floorMs: 10_000,
-    ceilingMs: 120_000,
+    coldStartMs: 60_000,       // 1 min — pattern matching can be slow on large trees
+    floorMs: 30_000,           // 30s minimum
+    ceilingMs: 180_000,        // 3 min ceiling
     useAdaptive: true,
-    useHaikuTiebreaker: false,
+    useHaikuTiebreaker: true,
   },
   Edit: {
-    coldStartMs: 30_000,
-    floorMs: 10_000,
-    ceilingMs: 120_000,
+    coldStartMs: 60_000,       // 1 min — edits go through streaming protocol too
+    floorMs: 30_000,           // 30s minimum
+    ceilingMs: 180_000,        // 3 min ceiling
     useAdaptive: true,
-    useHaikuTiebreaker: false,
+    useHaikuTiebreaker: true,
   },
   Write: {
-    coldStartMs: 30_000,
-    floorMs: 10_000,
-    ceilingMs: 120_000,
+    coldStartMs: 60_000,       // 1 min
+    floorMs: 30_000,           // 30s minimum
+    ceilingMs: 180_000,        // 3 min ceiling
     useAdaptive: true,
-    useHaikuTiebreaker: false,
+    useHaikuTiebreaker: true,
   },
 };
 

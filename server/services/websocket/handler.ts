@@ -839,7 +839,17 @@ export class WebSocketImproviseHandler {
     const combinedPattern = patterns(escapedSymbol).join('|');
     const fileGlob = LANGUAGE_GLOBS[language] || LANGUAGE_GLOBS.typescript;
 
-    const args = ['--json', '-n', '--glob', fileGlob, '-e', combinedPattern, '.'];
+    const args = [
+      '--json', '-n',
+      '--glob', fileGlob,
+      '--glob', '!node_modules/**',
+      '--glob', '!dist/**',
+      '--glob', '!build/**',
+      '--glob', '!.git/**',
+      '--glob', '!*.min.*',
+      '--glob', '!*.bundle.*',
+      '-e', combinedPattern, '.',
+    ];
 
     const rgProcess = spawn('rg', args, { cwd: workingDir, stdio: ['ignore', 'pipe', 'pipe'] });
     let buffer = '';
@@ -855,7 +865,10 @@ export class WebSocketImproviseHandler {
         try {
           const parsed = JSON.parse(line);
           if (parsed.type === 'match') {
-            const filePath = relative(workingDir, parsed.data.path.text);
+            // rg outputs paths like ./src/foo.ts relative to cwd.
+            // join(workingDir, ...) resolves it to an absolute path first,
+            // then relative() produces a clean relative path matching file tree paths.
+            const filePath = relative(workingDir, join(workingDir, parsed.data.path.text));
             const lineNumber = parsed.data.line_number;
             const lineContent = parsed.data.lines.text.replace(/\n$/, '');
             const column = parsed.data.submatches?.[0]?.start ?? 0;
@@ -883,9 +896,14 @@ export class WebSocketImproviseHandler {
     });
 
     rgProcess.on('close', () => {
-      // Sort: prioritize files in same directory as currentFile, then by depth proximity
+      // Sort: prioritize same file first, then same directory, then by depth proximity
       const currentDir = currentFile ? currentFile.substring(0, currentFile.lastIndexOf('/')) : '';
       definitions.sort((a, b) => {
+        // Exact same file gets highest priority
+        const aExact = a.filePath === currentFile ? 0 : 1;
+        const bExact = b.filePath === currentFile ? 0 : 1;
+        if (aExact !== bExact) return aExact - bExact;
+        // Then prioritize same directory
         const aDirMatch = a.filePath.startsWith(currentDir + '/') ? 0 : 1;
         const bDirMatch = b.filePath.startsWith(currentDir + '/') ? 0 : 1;
         if (aDirMatch !== bDirMatch) return aDirMatch - bDirMatch;

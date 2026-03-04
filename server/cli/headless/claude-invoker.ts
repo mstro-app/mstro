@@ -460,20 +460,18 @@ function handleToolComplete(event: any, ctx: StreamHandlerContext): void {
 function handleTokenUsage(event: any, ctx: StreamHandlerContext): void {
   let changed = false;
 
-  // message_start carries initial input token count
+  // message_start carries input token count for this step
   if (event.type === 'message_start' && event.message?.usage) {
     const usage = event.message.usage;
     if (typeof usage.input_tokens === 'number') {
       ctx.apiTokenUsage.inputTokens += usage.input_tokens;
       changed = true;
     }
-    if (typeof usage.output_tokens === 'number') {
-      ctx.apiTokenUsage.outputTokens += usage.output_tokens;
-      changed = true;
-    }
+    // Note: output_tokens from message_start is NOT accumulated here because
+    // message_delta.usage.output_tokens is cumulative for the step and includes it
   }
 
-  // message_delta carries incremental output token count
+  // message_delta carries cumulative output token count for this step
   if (event.type === 'message_delta' && event.usage) {
     if (typeof event.usage.output_tokens === 'number') {
       ctx.apiTokenUsage.outputTokens += event.usage.output_tokens;
@@ -1120,40 +1118,44 @@ export async function executeClaudeCommand(
     claudeProcess.on('close', async (code, signal) => {
       clearInterval(stallCheckInterval);
       watchdog?.clearAll();
-
-      const postTimeout = flushNativeTimeoutBuffers(ctx);
       await classifyUnmatchedStderr(stderr, errorAlreadySurfaced, code, config);
-      const resumeBuffered = ctx.resumeAssessmentActive ? (ctx.resumeAssessmentBuffer || undefined) : undefined;
-
-      if (claudeProcess.pid) {
-        runningProcesses.delete(claudeProcess.pid);
-      }
-      // When killed by signal, code is null — use signal-derived exit code (128 + signal number)
-      const exitCode = code ?? (signal ? 128 + (signalToNumber(signal) ?? 0) : 0);
-      const hasTokenUsage = ctx.apiTokenUsage.inputTokens > 0 || ctx.apiTokenUsage.outputTokens > 0;
-      resolve({
-        output: stdout,
-        error: stderr || undefined,
-        exitCode,
-        signalName: signal || undefined,
-        assistantResponse: ctx.accumulatedAssistantResponse || undefined,
-        thinkingOutput: ctx.accumulatedThinking || undefined,
-        toolUseHistory: ctx.accumulatedToolUse.length > 0 ? ctx.accumulatedToolUse : undefined,
-        claudeSessionId: sessionCapture.claudeSessionId,
-        nativeTimeoutCount: ctx.nativeTimeoutDetector.timeoutCount || undefined,
-        postTimeoutOutput: postTimeout,
-        resumeBufferedOutput: resumeBuffered,
-        apiTokenUsage: hasTokenUsage ? { ...ctx.apiTokenUsage } : undefined,
-      });
+      if (claudeProcess.pid) runningProcesses.delete(claudeProcess.pid);
+      resolve(buildCloseResult(ctx, stdout, stderr, code, signal, sessionCapture));
     });
 
     claudeProcess.on('error', (error: NodeJS.ErrnoException) => {
       clearInterval(stallCheckInterval);
       watchdog?.clearAll();
-      if (claudeProcess.pid) {
-        runningProcesses.delete(claudeProcess.pid);
-      }
+      if (claudeProcess.pid) runningProcesses.delete(claudeProcess.pid);
       handleSpawnError(error, config, reject);
     });
   });
+}
+
+function buildCloseResult(
+  ctx: StreamHandlerContext,
+  stdout: string,
+  stderr: string,
+  code: number | null,
+  signal: NodeJS.Signals | null,
+  sessionCapture: { claudeSessionId?: string },
+): ExecutionResult {
+  const postTimeout = flushNativeTimeoutBuffers(ctx);
+  const resumeBuffered = ctx.resumeAssessmentActive ? (ctx.resumeAssessmentBuffer || undefined) : undefined;
+  const exitCode = code ?? (signal ? 128 + (signalToNumber(signal) ?? 0) : 0);
+  const hasTokenUsage = ctx.apiTokenUsage.inputTokens > 0 || ctx.apiTokenUsage.outputTokens > 0;
+  return {
+    output: stdout,
+    error: stderr || undefined,
+    exitCode,
+    signalName: signal || undefined,
+    assistantResponse: ctx.accumulatedAssistantResponse || undefined,
+    thinkingOutput: ctx.accumulatedThinking || undefined,
+    toolUseHistory: ctx.accumulatedToolUse.length > 0 ? ctx.accumulatedToolUse : undefined,
+    claudeSessionId: sessionCapture.claudeSessionId,
+    nativeTimeoutCount: ctx.nativeTimeoutDetector.timeoutCount || undefined,
+    postTimeoutOutput: postTimeout,
+    resumeBufferedOutput: resumeBuffered,
+    apiTokenUsage: hasTokenUsage ? { ...ctx.apiTokenUsage } : undefined,
+  };
 }

@@ -15,6 +15,6 @@ describe('WebSocket handler code quality', () => {
   })
 
   it('imports mkdirSync from fs at the top level', () => {
-    expect(handlerSource).toContain("import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'")
+    expect(handlerSource).toContain("import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'")
   })
 })

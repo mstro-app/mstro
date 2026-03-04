@@ -358,68 +358,11 @@ export class ImprovisationSessionManager extends EventEmitter {
         retryLog: [],
       };
 
-      const maxRetries = 3;
-      let result: HeadlessRunResult | undefined;
-
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        if (this._cancelled) break;
-        this.resetIterationState(state);
-
-        const { useResume, resumeSessionId } = this.determineResumeStrategy(state);
-        const runner = this.createExecutionRunner(state, sequenceNumber, useResume, resumeSessionId, imageAttachments, options?.sandboxed);
-        this.currentRunner = runner;
-        result = await runner.run();
-        this.currentRunner = null;
-
-        if (this._cancelled) break;
-
-        this.updateBestResult(state, result);
-        const nativeTimeouts = result.nativeTimeoutCount ?? 0;
-        this.detectResumeContextLoss(result, state, useResume, maxRetries, nativeTimeouts);
-        await this.detectNativeTimeoutContextLoss(result, state, maxRetries, nativeTimeouts);
-        this.flushPostTimeoutOutput(result, state);
-
-        // Signal crashes checked first: they use --resume (lighter), and context loss
-        // recovery would clear the session ID, preventing future --resume attempts.
-        if (this.shouldRetrySignalCrash(result, state, maxRetries, promptWithAttachments)) continue;
-        if (this.shouldRetryContextLoss(result, state, useResume, nativeTimeouts, maxRetries, promptWithAttachments)) continue;
-        if (this.applyToolTimeoutRetry(state, maxRetries, promptWithAttachments)) continue;
-        break;
-      }
+      let result = await this.runRetryLoop(state, sequenceNumber, promptWithAttachments, imageAttachments, options?.sandboxed);
 
       // If cancelled, emit a minimal movement and return early
       if (this._cancelled) {
-        this._isExecuting = false;
-        this._executionStartTimestamp = undefined;
-        this.executionEventLog = [];
-        this.currentRunner = null;
-
-        const cancelledMovement: MovementRecord = {
-          id: `prompt-${sequenceNumber}`,
-          sequenceNumber,
-          userPrompt,
-          timestamp: new Date().toISOString(),
-          tokensUsed: result ? result.totalTokens : 0,
-          summary: '',
-          filesModified: [],
-          assistantResponse: result?.assistantResponse,
-          thinkingOutput: result?.thinkingOutput,
-          toolUseHistory: result?.toolUseHistory?.map(t => ({
-            toolName: t.toolName,
-            toolId: t.toolId,
-            toolInput: t.toolInput,
-            result: t.result,
-          })),
-          errorOutput: 'Execution cancelled by user',
-          durationMs: Date.now() - _execStart,
-        };
-        this.persistMovement(cancelledMovement);
-        this.emitMovementComplete(cancelledMovement, result ?? {
-          completed: false, needsHandoff: false, totalTokens: 0, sessionId: '',
-          output: '', exitCode: 1, signalName: 'SIGTERM',
-        } as HeadlessRunResult, _execStart, sequenceNumber);
-        return cancelledMovement;
+        return this.handleCancelledExecution(result, userPrompt, sequenceNumber, _execStart);
       }
 
       if (state.contextLost) this.claudeSessionId = undefined;
@@ -461,6 +404,84 @@ export class ImprovisationSessionManager extends EventEmitter {
   }
 
   // ========== Extracted helpers for executePrompt ==========
+
+  private handleCancelledExecution(
+    result: HeadlessRunResult | undefined,
+    userPrompt: string,
+    sequenceNumber: number,
+    execStart: number,
+  ): MovementRecord {
+    this._isExecuting = false;
+    this._executionStartTimestamp = undefined;
+    this.executionEventLog = [];
+    this.currentRunner = null;
+
+    const cancelledMovement: MovementRecord = {
+      id: `prompt-${sequenceNumber}`,
+      sequenceNumber,
+      userPrompt,
+      timestamp: new Date().toISOString(),
+      tokensUsed: result ? result.totalTokens : 0,
+      summary: '',
+      filesModified: [],
+      assistantResponse: result?.assistantResponse,
+      thinkingOutput: result?.thinkingOutput,
+      toolUseHistory: result?.toolUseHistory?.map(t => ({
+        toolName: t.toolName,
+        toolId: t.toolId,
+        toolInput: t.toolInput,
+        result: t.result,
+      })),
+      errorOutput: 'Execution cancelled by user',
+      durationMs: Date.now() - execStart,
+    };
+    this.persistMovement(cancelledMovement);
+    const fallbackResult = {
+      completed: false, needsHandoff: false, totalTokens: 0, sessionId: '',
+      output: '', exitCode: 1, signalName: 'SIGTERM',
+    } as HeadlessRunResult;
+    this.emitMovementComplete(cancelledMovement, result ?? fallbackResult, execStart, sequenceNumber);
+    return cancelledMovement;
+  }
+
+  private async runRetryLoop(
+    state: RetryLoopState,
+    sequenceNumber: number,
+    promptWithAttachments: string,
+    imageAttachments: FileAttachment[] | undefined,
+    sandboxed: boolean | undefined,
+  ): Promise<HeadlessRunResult | undefined> {
+    const maxRetries = 3;
+    let result: HeadlessRunResult | undefined;
+
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      if (this._cancelled) break;
+      this.resetIterationState(state);
+
+      const { useResume, resumeSessionId } = this.determineResumeStrategy(state);
+      const runner = this.createExecutionRunner(state, sequenceNumber, useResume, resumeSessionId, imageAttachments, sandboxed);
+      this.currentRunner = runner;
+      result = await runner.run();
+      this.currentRunner = null;
+
+      if (this._cancelled) break;
+
+      this.updateBestResult(state, result);
+      const nativeTimeouts = result.nativeTimeoutCount ?? 0;
+      this.detectResumeContextLoss(result, state, useResume, maxRetries, nativeTimeouts);
+      await this.detectNativeTimeoutContextLoss(result, state, maxRetries, nativeTimeouts);
+      this.flushPostTimeoutOutput(result, state);
+
+      // Signal crashes checked first: they use --resume (lighter), and context loss
+      // recovery would clear the session ID, preventing future --resume attempts.
+      if (this.shouldRetrySignalCrash(result, state, maxRetries, promptWithAttachments)) continue;
+      if (this.shouldRetryContextLoss(result, state, useResume, nativeTimeouts, maxRetries, promptWithAttachments)) continue;
+      if (this.applyToolTimeoutRetry(state, maxRetries, promptWithAttachments)) continue;
+      break;
+    }
+    return result;
+  }
 
   /** Prepare prompt with attachments and limit image count */
   private preparePromptAndAttachments(

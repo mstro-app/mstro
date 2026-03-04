@@ -23,9 +23,9 @@ export {
   readFileContent,
   scanDirectoryRecursiveWithDepth
 } from './file-utils.js';
-export type { UsageReport, UsageReporter } from './handler.js';
 // Main handler class
 export { WebSocketImproviseHandler } from './handler.js';
+export type { HandlerContext, UsageReport, UsageReporter } from './handler-context.js';
 // Types
 export type {
   AutocompleteResult,

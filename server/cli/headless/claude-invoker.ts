@@ -467,6 +467,14 @@ function handleTokenUsage(event: any, ctx: StreamHandlerContext): void {
       ctx.apiTokenUsage.inputTokens += usage.input_tokens;
       changed = true;
     }
+    if (typeof usage.cache_creation_input_tokens === 'number') {
+      ctx.apiTokenUsage.inputTokens += usage.cache_creation_input_tokens;
+      changed = true;
+    }
+    if (typeof usage.cache_read_input_tokens === 'number') {
+      ctx.apiTokenUsage.inputTokens += usage.cache_read_input_tokens;
+      changed = true;
+    }
     // Note: output_tokens from message_start is NOT accumulated here because
     // message_delta.usage.output_tokens is cumulative for the step and includes it
   }

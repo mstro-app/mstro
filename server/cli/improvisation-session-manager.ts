@@ -847,8 +847,10 @@ export class ImprovisationSessionManager extends EventEmitter {
     promptWithAttachments: string,
   ): boolean {
     // Only trigger for signal-killed processes (exit code 128+) that weren't already
-    // handled by context-loss or tool-timeout recovery paths
-    const isSignalCrash = result.signalName || (!result.completed && !result.error?.includes('No prompt provided'));
+    // handled by context-loss or tool-timeout recovery paths.
+    // Must have an actual signal name — regular errors (e.g., auth failures, exit code 1)
+    // should NOT be retried as signal crashes.
+    const isSignalCrash = !!result.signalName;
     const exitCodeSignal = !result.completed && !result.signalName && result.error?.match(/exited with code (1[2-9]\d|[2-9]\d{2})/);
     if ((!isSignalCrash && !exitCodeSignal) || state.retryNumber >= maxRetries) {
       return false;

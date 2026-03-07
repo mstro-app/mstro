@@ -87,6 +87,9 @@ export interface PTYSession {
   // Current dimensions
   cols: number;
   rows: number;
+  // Output coalescing: buffer small chunks into fewer WS messages
+  _outputBuffer: string;
+  _outputTimer: ReturnType<typeof setTimeout> | null;
 }
 
 /**
@@ -227,17 +230,38 @@ export class PTYManager extends EventEmitter {
         lastActivityAt: Date.now(),
         cols,
         rows,
+        _outputBuffer: '',
+        _outputTimer: null,
       };
       this.terminals.set(terminalId, session);
 
-      // Handle data output
+      // Handle data output — coalesce small chunks within an 8ms window
+      // to reduce WebSocket message count. On macOS, node-pty can emit
+      // many tiny chunks (sometimes single bytes); batching smooths this out.
+      const OUTPUT_COALESCE_MS = 8;
       ptyProcess.onData((data: string) => {
         session.lastActivityAt = Date.now();
-        this.emit('output', terminalId, data);
+        session._outputBuffer += data;
+        if (!session._outputTimer) {
+          session._outputTimer = setTimeout(() => {
+            const buffered = session._outputBuffer;
+            session._outputBuffer = '';
+            session._outputTimer = null;
+            this.emit('output', terminalId, buffered);
+          }, OUTPUT_COALESCE_MS);
+        }
       });
 
-      // Handle exit
+      // Handle exit — flush any buffered output first
       ptyProcess.onExit(({ exitCode }) => {
+        if (session._outputTimer) {
+          clearTimeout(session._outputTimer);
+          if (session._outputBuffer) {
+            this.emit('output', terminalId, session._outputBuffer);
+            session._outputBuffer = '';
+          }
+          session._outputTimer = null;
+        }
         this.emit('exit', terminalId, exitCode);
         this.terminals.delete(terminalId);
       });
@@ -300,6 +324,15 @@ export class PTYManager extends EventEmitter {
 
 
     try {
+      // Flush any coalesced output before closing
+      if (session._outputTimer) {
+        clearTimeout(session._outputTimer);
+        if (session._outputBuffer) {
+          this.emit('output', terminalId, session._outputBuffer);
+          session._outputBuffer = '';
+        }
+        session._outputTimer = null;
+      }
       session.pty.kill();
       this.terminals.delete(terminalId);
       return true;

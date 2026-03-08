@@ -213,6 +213,7 @@ export function handleGitMessage(ctx: HandlerContext, ws: WSContext, msg: WebSoc
     gitCommit: () => handleGitCommit(ctx, ws, msg, tabId, gitDir),
     gitCommitWithAI: () => handleGitCommitWithAI(ctx, ws, msg, tabId, gitDir),
     gitPush: () => handleGitPush(ctx, ws, tabId, gitDir),
+    gitPull: () => handleGitPull(ctx, ws, tabId, gitDir),
     gitLog: () => handleGitLog(ctx, ws, msg, tabId, gitDir),
     gitDiscoverRepos: () => handleGitDiscoverRepos(ctx, ws, tabId, workingDir),
     gitSetDirectory: () => handleGitSetDirectory(ctx, ws, msg, tabId, workingDir),
@@ -538,6 +539,20 @@ async function handleGitPush(ctx: HandlerContext, ws: WSContext, tabId: string, 
     }
 
     ctx.send(ws, { type: 'gitPushed', tabId, data: { output: result.stdout || result.stderr } });
+  } catch (error: any) {
+    ctx.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+  }
+}
+
+async function handleGitPull(ctx: HandlerContext, ws: WSContext, tabId: string, workingDir: string): Promise<void> {
+  try {
+    const result = await executeGitCommand(['pull'], workingDir);
+    if (result.exitCode !== 0) {
+      ctx.send(ws, { type: 'gitError', tabId, data: { error: result.stderr || result.stdout || 'Failed to pull' } });
+      return;
+    }
+
+    ctx.send(ws, { type: 'gitPulled', tabId, data: { output: result.stdout || result.stderr } });
   } catch (error: any) {
     ctx.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
   }

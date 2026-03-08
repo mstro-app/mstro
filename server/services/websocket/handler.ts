@@ -175,6 +175,7 @@ export class WebSocketImproviseHandler implements HandlerContext {
       case 'gitCommit':
       case 'gitCommitWithAI':
       case 'gitPush':
+      case 'gitPull':
       case 'gitLog':
       case 'gitDiscoverRepos':
       case 'gitSetDirectory':

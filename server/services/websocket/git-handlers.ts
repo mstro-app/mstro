@@ -177,7 +177,7 @@ export function stripCoauthorLines(message: string): string {
     }
     result.push(lines[i]);
   }
-  if (result.length === 0) return lines[0]?.trim() || message;
+  if (result.length === 0) return '';
   return result.join('\n').trimEnd();
 }
 
@@ -575,7 +575,8 @@ async function handleGitLog(ctx: HandlerContext, ws: WSContext, msg: WebSocketMe
 
     const entries: GitLogEntry[] = result.stdout.trim().split('\n').filter(Boolean).map(line => {
       const [hash, shortHash, subject, author, date] = line.split('|');
-      return { hash, shortHash, subject, author, date };
+      const cleanSubject = stripCoauthorLines(subject || '') || subject || '';
+      return { hash, shortHash, subject: cleanSubject, author, date };
     });
 
     ctx.send(ws, { type: 'gitLog', tabId, data: { entries } });

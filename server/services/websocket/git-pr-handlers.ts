@@ -127,6 +127,25 @@ async function handleGitCreatePR(ctx: HandlerContext, ws: WSContext, msg: WebSoc
     const remoteUrl = remoteResult.stdout.trim();
     const { cliBin, isGitHub, isGitLab } = detectPRCliBin(remoteUrl);
 
+    // Auto-push if branch has unpushed commits or no upstream
+    const upstreamCheck = await executeGitCommand(['rev-parse', '--abbrev-ref', `${headBranch}@{u}`], workingDir);
+    const hasUpstream = upstreamCheck.exitCode === 0;
+    let needsPush = !hasUpstream;
+
+    if (hasUpstream) {
+      const aheadCheck = await executeGitCommand(['rev-list', '--count', `@{u}..HEAD`], workingDir);
+      needsPush = aheadCheck.exitCode === 0 && parseInt(aheadCheck.stdout.trim(), 10) > 0;
+    }
+
+    if (needsPush) {
+      const pushArgs = hasUpstream ? ['push'] : ['push', '-u', 'origin', headBranch];
+      const pushResult = await executeGitCommand(pushArgs, workingDir);
+      if (pushResult.exitCode !== 0) {
+        ctx.send(ws, { type: 'gitError', tabId, data: { error: `Failed to push branch before creating PR: ${pushResult.stderr || pushResult.stdout}` } });
+        return;
+      }
+    }
+
     const cliResult = await tryCliPRCreate(cliBin, { title, body, baseBranch, draft, headBranch }, workingDir);
 
     if (cliResult.created) {
@@ -231,7 +250,13 @@ async function handleGitGeneratePRDescription(ctx: HandlerContext, ws: WSContext
   const baseBranch = msg.data?.baseBranch || 'main';
 
   try {
-    const logResult = await executeGitCommand(['log', `${baseBranch}..HEAD`, '--oneline'], workingDir);
+    // Use origin/ prefix to compare against remote base branch (what a PR actually compares against).
+    // Fall back to local branch name if the remote ref doesn't exist.
+    const remoteBase = `origin/${baseBranch}`;
+    const remoteRefCheck = await executeGitCommand(['rev-parse', '--verify', remoteBase], workingDir);
+    const compareRef = remoteRefCheck.exitCode === 0 ? remoteBase : baseBranch;
+
+    const logResult = await executeGitCommand(['log', `${compareRef}..HEAD`, '--oneline'], workingDir);
     const commits = logResult.exitCode === 0 ? logResult.stdout.trim() : '';
 
     if (!commits) {
@@ -239,10 +264,10 @@ async function handleGitGeneratePRDescription(ctx: HandlerContext, ws: WSContext
       return;
     }
 
-    const diffResult = await executeGitCommand(['diff', `${baseBranch}...HEAD`], workingDir);
+    const diffResult = await executeGitCommand(['diff', `${compareRef}...HEAD`], workingDir);
     const diff = diffResult.exitCode === 0 ? diffResult.stdout : '';
 
-    const statResult = await executeGitCommand(['diff', `${baseBranch}...HEAD`, '--stat'], workingDir);
+    const statResult = await executeGitCommand(['diff', `${compareRef}...HEAD`, '--stat'], workingDir);
     const stat = statResult.exitCode === 0 ? statResult.stdout.trim() : '';
 
     let truncatedDiff = diff;

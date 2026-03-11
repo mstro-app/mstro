@@ -317,7 +317,7 @@ export class ImprovisationSessionManager extends EventEmitter {
    * Each tab maintains its own claudeSessionId for proper isolation
    * Supports file attachments: text files prepended to prompt, images via stream-json multimodal
    */
-  async executePrompt(userPrompt: string, attachments?: FileAttachment[], options?: { sandboxed?: boolean }): Promise<MovementRecord> {
+  async executePrompt(userPrompt: string, attachments?: FileAttachment[], options?: { sandboxed?: boolean; workingDir?: string }): Promise<MovementRecord> {
     const _execStart = Date.now();
     this._isExecuting = true;
     this._cancelled = false;
@@ -358,7 +358,7 @@ export class ImprovisationSessionManager extends EventEmitter {
         retryLog: [],
       };
 
-      let result = await this.runRetryLoop(state, sequenceNumber, promptWithAttachments, imageAttachments, options?.sandboxed);
+      let result = await this.runRetryLoop(state, sequenceNumber, promptWithAttachments, imageAttachments, options?.sandboxed, options?.workingDir);
 
       // If cancelled, emit a minimal movement and return early
       if (this._cancelled) {
@@ -450,6 +450,7 @@ export class ImprovisationSessionManager extends EventEmitter {
     promptWithAttachments: string,
     imageAttachments: FileAttachment[] | undefined,
     sandboxed: boolean | undefined,
+    workingDirOverride: string | undefined,
   ): Promise<HeadlessRunResult | undefined> {
     const maxRetries = 3;
     let result: HeadlessRunResult | undefined;
@@ -460,7 +461,7 @@ export class ImprovisationSessionManager extends EventEmitter {
       this.resetIterationState(state);
 
       const { useResume, resumeSessionId } = this.determineResumeStrategy(state);
-      const runner = this.createExecutionRunner(state, sequenceNumber, useResume, resumeSessionId, imageAttachments, sandboxed);
+      const runner = this.createExecutionRunner(state, sequenceNumber, useResume, resumeSessionId, imageAttachments, sandboxed, workingDirOverride);
       this.currentRunner = runner;
       result = await runner.run();
       this.currentRunner = null;
@@ -533,9 +534,10 @@ export class ImprovisationSessionManager extends EventEmitter {
     resumeSessionId: string | undefined,
     imageAttachments: FileAttachment[] | undefined,
     sandboxed: boolean | undefined,
+    workingDirOverride?: string,
   ): HeadlessRunner {
     return new HeadlessRunner({
-      workingDir: this.options.workingDir,
+      workingDir: workingDirOverride || this.options.workingDir,
       tokenBudgetThreshold: this.options.tokenBudgetThreshold,
       maxSessions: this.options.maxSessions,
       verbose: this.options.verbose,

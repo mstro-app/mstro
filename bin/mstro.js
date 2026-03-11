@@ -35,10 +35,27 @@ const CLIENT_ROOT = resolve(__dirname, '..');
 const pkg = JSON.parse(readFileSync(join(CLIENT_ROOT, 'package.json'), 'utf-8'));
 
 // Check for updates (runs async in background, notifies on next run)
+// update-notifier initializes lastUpdateCheck to Date.now(), which means the
+// first check won't happen until 24h after install. We detect first-run by
+// checking if the configstore has never stored an update result, and if so
+// reset the timestamp to force an immediate background check.
 const notifier = updateNotifier({
   pkg,
   updateCheckInterval: 1000 * 60 * 60 * 24  // Check daily
 });
+try {
+  if (notifier.config && !notifier.config.has('update') && !notifier.update) {
+    const lastCheck = notifier.config.get('lastUpdateCheck');
+    // If lastUpdateCheck was just set (within the last 30s), this is a fresh
+    // configstore — reset it to 0 so the library spawns a check immediately.
+    if (lastCheck && (Date.now() - lastCheck) < 30_000) {
+      notifier.config.set('lastUpdateCheck', 0);
+      notifier.check();
+    }
+  }
+} catch {
+  // Non-critical — don't let update check logic crash the CLI
+}
 
 // Capture the user's original working directory before any cwd changes
 const USER_CWD = process.cwd();
@@ -467,14 +484,18 @@ function parsePort(args) {
  * Show update notification if available
  */
 function showUpdateNotification() {
-  if (notifier.update && semverGt(notifier.update.latest, notifier.update.current)) {
-    const { current, latest, type } = notifier.update;
-    const updateCmd = 'npm i -g mstro@latest';
+  try {
+    if (notifier.update && semverGt(notifier.update.latest, notifier.update.current)) {
+      const { current, latest, type } = notifier.update;
+      const updateCmd = `npm i -g ${pkg.name}`;
 
-    log('');
-    log(`  ${colors.yellow}Update available:${colors.reset} ${colors.dim}${current}${colors.reset} → ${colors.green}${latest}${colors.reset} ${colors.dim}(${type})${colors.reset}`);
-    log(`  Run: ${colors.cyan}${updateCmd}${colors.reset}`);
-    log('');
+      log('');
+      log(`  ${colors.yellow}Update available:${colors.reset} ${colors.dim}${current}${colors.reset} → ${colors.green}${latest}${colors.reset} ${colors.dim}(${type})${colors.reset}`);
+      log(`  Run: ${colors.cyan}${updateCmd}${colors.reset}`);
+      log('');
+    }
+  } catch {
+    // Don't let a corrupted cache or invalid semver crash the CLI
   }
 }
 
@@ -610,6 +631,7 @@ async function main() {
   const handler = subcommand ? commands.get(subcommand) : undefined;
   if (handler) {
     await handler();
+    showUpdateNotification();
     return;
   }
 

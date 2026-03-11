@@ -134,7 +134,8 @@ export function handleSessionMessage(ctx: HandlerContext, ws: WSContext, msg: We
       if (!msg.data?.prompt) throw new Error('Prompt is required');
       const session = requireSession(ctx, ws, tabId);
       const sandboxed = permission === 'control' || permission === 'view';
-      session.executePrompt(msg.data.prompt, msg.data.attachments, { sandboxed });
+      const worktreeDir = ctx.gitDirectories.get(tabId);
+      session.executePrompt(msg.data.prompt, msg.data.attachments, { sandboxed, workingDir: worktreeDir });
       break;
     }
     case 'cancel': {

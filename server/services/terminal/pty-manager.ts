@@ -235,31 +235,48 @@ export class PTYManager extends EventEmitter {
       };
       this.terminals.set(terminalId, session);
 
-      // Handle data output — coalesce small chunks within an 8ms window
-      // to reduce WebSocket message count. On macOS, node-pty can emit
-      // many tiny chunks (sometimes single bytes); batching smooths this out.
-      const OUTPUT_COALESCE_MS = 8;
+      // Handle data output — coalesce small chunks to reduce WebSocket message count.
+      // On macOS, node-pty emits many tiny chunks (sometimes single bytes) and zsh
+      // wraps echoed chars in multi-part ANSI sequences (RPROMPT, syntax highlighting).
+      // A longer window on macOS ensures these multi-part sequences arrive as one chunk,
+      // which the browser's predictive echo can match correctly.
+      const OUTPUT_COALESCE_MS = platform() === 'darwin' ? 16 : 8;
+      // High-water mark: flush immediately when buffer exceeds this size
+      // to prevent unbounded memory growth during high-output commands (e.g. `yes`)
+      const OUTPUT_HIGH_WATER = 64 * 1024; // 64KB
+      // Maximum chunk size per WebSocket message to prevent browser overload
+      const OUTPUT_CHUNK_SIZE = 64 * 1024;
+
+      const flushOutputBuffer = () => {
+        if (session._outputTimer) {
+          clearTimeout(session._outputTimer);
+          session._outputTimer = null;
+        }
+        const buffered = session._outputBuffer;
+        session._outputBuffer = '';
+        // Chunk large output to prevent single massive WebSocket frames
+        for (let i = 0; i < buffered.length; i += OUTPUT_CHUNK_SIZE) {
+          this.emit('output', terminalId, buffered.slice(i, i + OUTPUT_CHUNK_SIZE));
+        }
+      };
+
       ptyProcess.onData((data: string) => {
         session.lastActivityAt = Date.now();
         session._outputBuffer += data;
-        if (!session._outputTimer) {
-          session._outputTimer = setTimeout(() => {
-            const buffered = session._outputBuffer;
-            session._outputBuffer = '';
-            session._outputTimer = null;
-            this.emit('output', terminalId, buffered);
-          }, OUTPUT_COALESCE_MS);
+        // Flush immediately if buffer exceeds high-water mark
+        if (session._outputBuffer.length >= OUTPUT_HIGH_WATER) {
+          flushOutputBuffer();
+        } else if (!session._outputTimer) {
+          session._outputTimer = setTimeout(flushOutputBuffer, OUTPUT_COALESCE_MS);
         }
       });
 
       // Handle exit — flush any buffered output first
       ptyProcess.onExit(({ exitCode }) => {
-        if (session._outputTimer) {
+        if (session._outputBuffer) {
+          flushOutputBuffer();
+        } else if (session._outputTimer) {
           clearTimeout(session._outputTimer);
-          if (session._outputBuffer) {
-            this.emit('output', terminalId, session._outputBuffer);
-            session._outputBuffer = '';
-          }
           session._outputTimer = null;
         }
         this.emit('exit', terminalId, exitCode);

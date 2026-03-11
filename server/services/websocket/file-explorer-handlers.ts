@@ -138,7 +138,8 @@ function handleRenameFile(ctx: HandlerContext, ws: WSContext, msg: WebSocketMess
   if (!msg.data?.oldPath) throw new Error('Old path is required');
   if (!msg.data?.newPath) throw new Error('New path is required');
   const result = renameFile(msg.data.oldPath, msg.data.newPath, workingDir);
-  sendFileResult(ctx, ws, 'fileRenamed', tabId, result);
+  const renamedName = result.path?.split('/').pop() || 'unknown';
+  sendFileResult(ctx, ws, 'fileRenamed', tabId, result, { oldPath: msg.data.oldPath, newPath: result.path, name: renamedName });
   if (result.success && result.path) {
     const name = result.path.split('/').pop() || 'unknown';
     ctx.broadcastToOthers(ws, {

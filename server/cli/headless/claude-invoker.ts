@@ -274,6 +274,8 @@ interface StreamHandlerContext {
   resumeAssessmentBuffer: string;
   /** Cumulative API token usage from message_start/message_delta events */
   apiTokenUsage: { inputTokens: number; outputTokens: number };
+  /** Tracks cumulative output_tokens within the current step (message_delta is cumulative per-step) */
+  currentStepOutputTokens: number;
   /** Timestamp of the last token usage change (tokens still flowing = process alive) */
   lastTokenActivityTime: number;
 }
@@ -460,9 +462,11 @@ function handleToolComplete(event: any, ctx: StreamHandlerContext): void {
 function handleTokenUsage(event: any, ctx: StreamHandlerContext): void {
   let changed = false;
 
-  // message_start carries input token count for this step
+  // message_start carries input token count for this step and resets per-step output tracking
   if (event.type === 'message_start' && event.message?.usage) {
     const usage = event.message.usage;
+    // Reset per-step output counter for the new API call
+    ctx.currentStepOutputTokens = 0;
     if (typeof usage.input_tokens === 'number') {
       ctx.apiTokenUsage.inputTokens += usage.input_tokens;
       changed = true;
@@ -477,17 +481,54 @@ function handleTokenUsage(event: any, ctx: StreamHandlerContext): void {
     }
     // Note: output_tokens from message_start is NOT accumulated here because
     // message_delta.usage.output_tokens is cumulative for the step and includes it
+    verboseLog(ctx.config.verbose,
+      `[TOKENS] message_start: input=${usage.input_tokens ?? 0} cache_create=${usage.cache_creation_input_tokens ?? 0} cache_read=${usage.cache_read_input_tokens ?? 0} → total_input=${ctx.apiTokenUsage.inputTokens}`);
   }
 
-  // message_delta carries cumulative output token count for this step
+  // message_delta carries CUMULATIVE output token count for the current step.
+  // Per Anthropic docs: "The token counts shown in the usage field of the
+  // message_delta event are cumulative" and there can be "one or more message_delta
+  // events" per message. We track the delta from the previous value to avoid
+  // double-counting when multiple message_delta events fire per step.
   if (event.type === 'message_delta' && event.usage) {
     if (typeof event.usage.output_tokens === 'number') {
-      ctx.apiTokenUsage.outputTokens += event.usage.output_tokens;
-      changed = true;
+      const increment = event.usage.output_tokens - ctx.currentStepOutputTokens;
+      verboseLog(ctx.config.verbose,
+        `[TOKENS] message_delta: output=${event.usage.output_tokens} (step_prev=${ctx.currentStepOutputTokens} increment=${increment}) → total_output=${ctx.apiTokenUsage.outputTokens + Math.max(increment, 0)}`);
+      if (increment > 0) {
+        ctx.apiTokenUsage.outputTokens += increment;
+        ctx.currentStepOutputTokens = event.usage.output_tokens;
+        changed = true;
+      }
     }
   }
 
   if (changed) {
+    ctx.lastTokenActivityTime = Date.now();
+    ctx.config.tokenUsageCallback?.({ ...ctx.apiTokenUsage });
+  }
+}
+
+/**
+ * Extract definitive token usage from the result event emitted at the end of a Claude session.
+ * The result event's `usage` field contains the authoritative total — it overrides any
+ * accumulated stream-based counts which may be incomplete (e.g., when extended thinking
+ * suppresses stream_event emissions).
+ */
+function handleResultTokenUsage(parsed: any, ctx: StreamHandlerContext): void {
+  if (!parsed.usage) return;
+  const u = parsed.usage;
+  const input = (typeof u.input_tokens === 'number' ? u.input_tokens : 0)
+    + (typeof u.cache_creation_input_tokens === 'number' ? u.cache_creation_input_tokens : 0)
+    + (typeof u.cache_read_input_tokens === 'number' ? u.cache_read_input_tokens : 0);
+  const output = typeof u.output_tokens === 'number' ? u.output_tokens : 0;
+
+  if (input > 0 || output > 0) {
+    verboseLog(ctx.config.verbose,
+      `[TOKENS] Result event usage: input=${input} output=${output} ` +
+      `(stream accumulated: input=${ctx.apiTokenUsage.inputTokens} output=${ctx.apiTokenUsage.outputTokens})`);
+    // Replace with authoritative counts from the result event
+    ctx.apiTokenUsage = { inputTokens: input, outputTokens: output };
     ctx.lastTokenActivityTime = Date.now();
     ctx.config.tokenUsageCallback?.({ ...ctx.apiTokenUsage });
   }
@@ -551,11 +592,14 @@ function processStreamEvent(parsed: any, ctx: StreamHandlerContext): void {
     return;
   }
 
-  // Handle result events that contain error info
-  if (parsed.type === 'result' && parsed.is_error) {
-    const errorMessage = parsed.error || parsed.result || 'Unknown error in result';
-    ctx.config.outputCallback?.(`\n[[MSTRO_ERROR:CLAUDE_RESULT_ERROR]] ${errorMessage}\n`);
-    return;
+  // Handle result events — extract definitive token usage and surface errors
+  if (parsed.type === 'result') {
+    handleResultTokenUsage(parsed, ctx);
+    if (parsed.is_error) {
+      const errorMessage = parsed.error || parsed.result || 'Unknown error in result';
+      ctx.config.outputCallback?.(`\n[[MSTRO_ERROR:CLAUDE_RESULT_ERROR]] ${errorMessage}\n`);
+      return;
+    }
   }
 
   if (parsed.type === 'stream_event' && parsed.event) {
@@ -1048,6 +1092,7 @@ export async function executeClaudeCommand(
     resumeAssessmentActive: isResumeMode,
     resumeAssessmentBuffer: '',
     apiTokenUsage: { inputTokens: 0, outputTokens: 0 },
+    currentStepOutputTokens: 0,
     lastTokenActivityTime: Date.now(),
   };
 

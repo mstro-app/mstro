@@ -80,6 +80,7 @@ mstro whoami                # Show current user and device info
 mstro status                # Show connection and auth status
 mstro setup-terminal        # Enable web terminal (compiles native module)
 mstro configure-hooks       # Install/reconfigure Security Bouncer
+mstro telemetry [on|off]    # Show/toggle anonymous telemetry
 ```
 
 ### Options
@@ -99,7 +100,7 @@ Run multiple mstro instances for different projects. Each auto-selects an availa
 
 ```
 $ mstro                           # Project A → port 4101
-$ mstro                           # Project B → port 4102
+$ mstro                           # Project B → port 4103
 ```
 
 Each instance appears as a separate orchestra in the web interface.

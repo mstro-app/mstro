@@ -8,8 +8,8 @@
  * Main entry point for the Mstro AI assistant.
  *
  * Usage:
- *   mstro                     # Start Mstro (auto-finds available port)
- *   mstro login               # Authenticate this device
+ *   mstro                     # Start Mstro (logs in automatically if needed)
+ *   mstro login               # Re-authenticate this device
  *   mstro logout              # Sign out
  *   mstro whoami              # Show current user
  *   mstro status              # Show connection status
@@ -356,11 +356,11 @@ async function runPtySetup() {
 }
 
 function showHelp() {
-  log('\n  Mstro - No-code AI Workspace\n', colors.bold + colors.cyan);
-  log('  Run Claude Code workflows from your laptop, cloud VM, or any machine.\n', colors.dim);
+  log('\n  Mstro - Run Claude Code from any browser\n', colors.bold + colors.cyan);
+  log('  Streams live Claude Code sessions from your machine to mstro.app.\n', colors.dim);
   log('  Usage:', colors.bold);
-  log('    mstro                       Start Mstro (auto-finds available port)', colors.dim);
-  log('    mstro login                 Authenticate this device with mstro.app', colors.dim);
+  log('    mstro                       Start Mstro (logs in automatically if needed)', colors.dim);
+  log('    mstro login                 Re-authenticate this device with mstro.app', colors.dim);
   log('    mstro logout                Sign out of mstro.app', colors.dim);
   log('    mstro whoami                Show current user and device info', colors.dim);
   log('    mstro status                Show connection and auth status', colors.dim);
@@ -377,7 +377,7 @@ function showHelp() {
   log('    --verbose, -v               Enable verbose output', colors.dim);
   log('');
   log('  Authentication:', colors.bold);
-  log('    Run "mstro login" to connect this device to your mstro.app account.', colors.dim);
+  log('    Running "mstro" will prompt you to log in automatically if needed.', colors.dim);
   log('    Once logged in, machines sync automatically with your web dashboard.', colors.dim);
   log('');
   log('  Security:', colors.bold);
@@ -516,49 +516,61 @@ function isLoggedIn() {
 }
 
 /**
- * Show login required message
+ * Auto-login if not authenticated. Exits on failure.
  */
-function showLoginRequired() {
-  log('\n  Authentication required', colors.bold + colors.yellow);
-  log('');
-  log('  You must be logged in to use mstro.', colors.dim);
-  log('  Run "mstro login" to authenticate this device.', colors.dim);
-  log('');
+async function ensureLoggedIn() {
+  if (isLoggedIn()) return;
+  log('\n  Not logged in — starting authentication...\n', colors.bold + colors.cyan);
+  try {
+    const { login } = await import('./commands/login.js');
+    await login(args, { inline: true });
+  } catch (err) {
+    log(`\n  Login failed: ${err.message}`, colors.red);
+    log('  Run "mstro login" to try again.\n', colors.dim);
+    process.exit(1);
+  }
 }
 
 /**
- * Check if node-pty is loadable (native module compiled correctly)
+ * Prompt for bouncer setup if not configured
+ * Returns true if runConfigureHooks was called (async exit path)
  */
-async function startServer(envOverrides) {
-  if (!isLoggedIn()) {
-    showLoginRequired();
-    process.exit(1);
+async function ensureBouncerSetup() {
+  if (isBouncerConfigured()) return false;
+  if (hasUserDismissedSetup()) {
+    showBouncerWarning();
+    return false;
   }
-
-  if (!isBouncerConfigured()) {
-    if (hasUserDismissedSetup()) {
-      showBouncerWarning();
-    } else {
-      const choice = await promptBouncerSetup();
-      if (choice === 'configure') {
-        runConfigureHooks(true);
-        return;
-      }
-    }
+  const choice = await promptBouncerSetup();
+  if (choice === 'configure') {
+    runConfigureHooks(true);
+    return true;
   }
+  return false;
+}
 
-  // Check node-pty availability for terminal support
+/**
+ * Prompt for node-pty setup if not available
+ */
+async function ensurePtySetup() {
   const ptyAvailable = await isNodePtyAvailable();
-  if (!ptyAvailable) {
-    if (hasUserDismissedPtySetup()) {
-      showPtyWarning();
-    } else {
-      const choice = await promptPtySetup();
-      if (choice === 'configure') {
-        await runPtySetup();
-      }
-    }
+  if (ptyAvailable) return;
+  if (hasUserDismissedPtySetup()) {
+    showPtyWarning();
+    return;
   }
+  const choice = await promptPtySetup();
+  if (choice === 'configure') {
+    await runPtySetup();
+  }
+}
+
+async function startServer(envOverrides) {
+  await ensureLoggedIn();
+
+  if (await ensureBouncerSetup()) return;
+
+  await ensurePtySetup();
 
   showUpdateNotification();
   runNpmScript('start', [], envOverrides);

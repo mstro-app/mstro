@@ -4,8 +4,6 @@ Run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) from any brows
 
 **mstro** runs on your laptop, cloud VM, or CI server and connects to the mstro.app web interface. You write prompts in the browser, Claude Code runs in your terminal.
 
-> Mstro is currently invite-only. [Request access at mstro.app](https://mstro.app), then install this CLI to connect your machine.
-
 ## How It Works
 
 ```
@@ -33,11 +31,19 @@ Requires [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed
 ## Quick Start
 
 ```bash
-mstro login              # Authenticate this device with your mstro.app account
-mstro                    # Start mstro in your project directory
+mstro                    # Logs in automatically on first run, then starts the server
 ```
 
-On first run, mstro will offer to set up the **Security Bouncer** — a tool permission manager that protects against dangerous operations. Say yes.
+Or without installing globally:
+
+```bash
+npx mstro-app            # Same thing — login + launch in one command
+```
+
+On first run, mstro will:
+1. Open your browser to authenticate with your mstro.app account
+2. Offer to set up the **Security Bouncer** — say yes
+3. Connect to the platform
 
 Then open [mstro.app](https://mstro.app) in your browser. Your machine appears as a connected workspace. Start prompting.
 
@@ -67,8 +73,8 @@ mstro configure-hooks
 ### Commands
 
 ```bash
-mstro                       # Start mstro in the current directory
-mstro login                 # Authenticate this device with mstro.app
+mstro                       # Start mstro (logs in automatically if needed)
+mstro login                 # Re-authenticate or switch accounts
 mstro logout                # Sign out
 mstro whoami                # Show current user and device info
 mstro status                # Show connection and auth status

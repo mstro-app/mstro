@@ -23,7 +23,19 @@ import { getClientId } from './client-id.js'
 
 const MSTRO_DIR = join(homedir(), '.mstro')
 const CONFIG_FILE = join(MSTRO_DIR, 'config.json')
-const PLATFORM_URL = process.env.PLATFORM_URL || 'https://api.mstro.app'
+
+// Read SERVER_URL from ~/.mstro/.env if it exists (for local dev)
+function getServerUrl(): string {
+  try {
+    const envPath = join(MSTRO_DIR, '.env')
+    const content = readFileSync(envPath, 'utf-8')
+    const match = content.match(/^SERVER_URL=(.+)$/m)
+    if (match) return match[1].trim()
+  } catch {}
+  return 'https://api.mstro.app'
+}
+
+const PLATFORM_URL = process.env.PLATFORM_URL || getServerUrl()
 
 let client: PostHog | null = null
 let telemetryEnabled: boolean | null = null

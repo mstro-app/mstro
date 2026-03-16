@@ -102,6 +102,27 @@ function sendPRCreated(
   ctx.send(ws, { type: 'gitPRCreated', tabId, data: { url, method } });
 }
 
+/** Auto-push branch if it has unpushed commits or no upstream. Returns error string on failure. */
+async function ensureBranchPushed(headBranch: string, workingDir: string): Promise<string | null> {
+  const upstreamCheck = await executeGitCommand(['rev-parse', '--abbrev-ref', `${headBranch}@{u}`], workingDir);
+  const hasUpstream = upstreamCheck.exitCode === 0;
+  let needsPush = !hasUpstream;
+
+  if (hasUpstream) {
+    const aheadCheck = await executeGitCommand(['rev-list', '--count', `@{u}..HEAD`], workingDir);
+    needsPush = aheadCheck.exitCode === 0 && parseInt(aheadCheck.stdout.trim(), 10) > 0;
+  }
+
+  if (!needsPush) return null;
+
+  const pushArgs = hasUpstream ? ['push'] : ['push', '-u', 'origin', headBranch];
+  const pushResult = await executeGitCommand(pushArgs, workingDir);
+  if (pushResult.exitCode !== 0) {
+    return `Failed to push branch before creating PR: ${pushResult.stderr || pushResult.stdout}`;
+  }
+  return null;
+}
+
 async function handleGitCreatePR(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): Promise<void> {
   const { title, body, baseBranch, draft } = msg.data ?? {};
 
@@ -127,23 +148,10 @@ async function handleGitCreatePR(ctx: HandlerContext, ws: WSContext, msg: WebSoc
     const remoteUrl = remoteResult.stdout.trim();
     const { cliBin, isGitHub, isGitLab } = detectPRCliBin(remoteUrl);
 
-    // Auto-push if branch has unpushed commits or no upstream
-    const upstreamCheck = await executeGitCommand(['rev-parse', '--abbrev-ref', `${headBranch}@{u}`], workingDir);
-    const hasUpstream = upstreamCheck.exitCode === 0;
-    let needsPush = !hasUpstream;
-
-    if (hasUpstream) {
-      const aheadCheck = await executeGitCommand(['rev-list', '--count', `@{u}..HEAD`], workingDir);
-      needsPush = aheadCheck.exitCode === 0 && parseInt(aheadCheck.stdout.trim(), 10) > 0;
-    }
-
-    if (needsPush) {
-      const pushArgs = hasUpstream ? ['push'] : ['push', '-u', 'origin', headBranch];
-      const pushResult = await executeGitCommand(pushArgs, workingDir);
-      if (pushResult.exitCode !== 0) {
-        ctx.send(ws, { type: 'gitError', tabId, data: { error: `Failed to push branch before creating PR: ${pushResult.stderr || pushResult.stdout}` } });
-        return;
-      }
+    const pushError = await ensureBranchPushed(headBranch, workingDir);
+    if (pushError) {
+      ctx.send(ws, { type: 'gitError', tabId, data: { error: pushError } });
+      return;
     }
 
     const cliResult = await tryCliPRCreate(cliBin, { title, body, baseBranch, draft, headBranch }, workingDir);

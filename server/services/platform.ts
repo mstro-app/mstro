@@ -102,7 +102,18 @@ if (typeof WebSocket !== 'undefined') {
   WebSocketImpl = WS as unknown as typeof WebSocket
 }
 
-const DEFAULT_PLATFORM_URL = process.env.PLATFORM_URL || 'https://api.mstro.app'
+// Read SERVER_URL from ~/.mstro/.env if it exists (for local dev)
+function getServerUrl(): string {
+  try {
+    const envPath = join(MSTRO_DIR, '.env')
+    const content = readFileSync(envPath, 'utf-8')
+    const match = content.match(/^SERVER_URL=(.+)$/m)
+    if (match) return match[1].trim()
+  } catch {}
+  return 'https://api.mstro.app'
+}
+
+const DEFAULT_PLATFORM_URL = process.env.PLATFORM_URL || getServerUrl()
 
 interface ConnectionCallbacks {
   onConnected?: (connectionId: string) => void

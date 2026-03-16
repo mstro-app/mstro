@@ -459,50 +459,49 @@ function handleToolComplete(event: any, ctx: StreamHandlerContext): void {
   }
 }
 
-function handleTokenUsage(event: any, ctx: StreamHandlerContext): void {
+/** Accumulate input tokens from a message_start event. Returns true if any tokens were added. */
+function handleMessageStartTokens(event: any, ctx: StreamHandlerContext): boolean {
+  if (event.type !== 'message_start' || !event.message?.usage) return false;
+  const usage = event.message.usage;
+  ctx.currentStepOutputTokens = 0;
   let changed = false;
-
-  // message_start carries input token count for this step and resets per-step output tracking
-  if (event.type === 'message_start' && event.message?.usage) {
-    const usage = event.message.usage;
-    // Reset per-step output counter for the new API call
-    ctx.currentStepOutputTokens = 0;
-    if (typeof usage.input_tokens === 'number') {
-      ctx.apiTokenUsage.inputTokens += usage.input_tokens;
-      changed = true;
-    }
-    if (typeof usage.cache_creation_input_tokens === 'number') {
-      ctx.apiTokenUsage.inputTokens += usage.cache_creation_input_tokens;
-      changed = true;
-    }
-    if (typeof usage.cache_read_input_tokens === 'number') {
-      ctx.apiTokenUsage.inputTokens += usage.cache_read_input_tokens;
-      changed = true;
-    }
-    // Note: output_tokens from message_start is NOT accumulated here because
-    // message_delta.usage.output_tokens is cumulative for the step and includes it
-    verboseLog(ctx.config.verbose,
-      `[TOKENS] message_start: input=${usage.input_tokens ?? 0} cache_create=${usage.cache_creation_input_tokens ?? 0} cache_read=${usage.cache_read_input_tokens ?? 0} → total_input=${ctx.apiTokenUsage.inputTokens}`);
+  if (typeof usage.input_tokens === 'number') {
+    ctx.apiTokenUsage.inputTokens += usage.input_tokens;
+    changed = true;
   }
-
-  // message_delta carries CUMULATIVE output token count for the current step.
-  // Per Anthropic docs: "The token counts shown in the usage field of the
-  // message_delta event are cumulative" and there can be "one or more message_delta
-  // events" per message. We track the delta from the previous value to avoid
-  // double-counting when multiple message_delta events fire per step.
-  if (event.type === 'message_delta' && event.usage) {
-    if (typeof event.usage.output_tokens === 'number') {
-      const increment = event.usage.output_tokens - ctx.currentStepOutputTokens;
-      verboseLog(ctx.config.verbose,
-        `[TOKENS] message_delta: output=${event.usage.output_tokens} (step_prev=${ctx.currentStepOutputTokens} increment=${increment}) → total_output=${ctx.apiTokenUsage.outputTokens + Math.max(increment, 0)}`);
-      if (increment > 0) {
-        ctx.apiTokenUsage.outputTokens += increment;
-        ctx.currentStepOutputTokens = event.usage.output_tokens;
-        changed = true;
-      }
-    }
+  if (typeof usage.cache_creation_input_tokens === 'number') {
+    ctx.apiTokenUsage.inputTokens += usage.cache_creation_input_tokens;
+    changed = true;
   }
+  if (typeof usage.cache_read_input_tokens === 'number') {
+    ctx.apiTokenUsage.inputTokens += usage.cache_read_input_tokens;
+    changed = true;
+  }
+  verboseLog(ctx.config.verbose,
+    `[TOKENS] message_start: input=${usage.input_tokens ?? 0} cache_create=${usage.cache_creation_input_tokens ?? 0} cache_read=${usage.cache_read_input_tokens ?? 0} → total_input=${ctx.apiTokenUsage.inputTokens}`);
+  return changed;
+}
 
+/** Accumulate output tokens from a message_delta event. Returns true if any tokens were added.
+ * message_delta carries CUMULATIVE output token count for the current step.
+ * Per Anthropic docs: "The token counts shown in the usage field of the
+ * message_delta event are cumulative" and there can be "one or more message_delta
+ * events" per message. We track the delta from the previous value to avoid
+ * double-counting when multiple message_delta events fire per step. */
+function handleMessageDeltaTokens(event: any, ctx: StreamHandlerContext): boolean {
+  if (event.type !== 'message_delta' || !event.usage) return false;
+  if (typeof event.usage.output_tokens !== 'number') return false;
+  const increment = event.usage.output_tokens - ctx.currentStepOutputTokens;
+  verboseLog(ctx.config.verbose,
+    `[TOKENS] message_delta: output=${event.usage.output_tokens} (step_prev=${ctx.currentStepOutputTokens} increment=${increment}) → total_output=${ctx.apiTokenUsage.outputTokens + Math.max(increment, 0)}`);
+  if (increment <= 0) return false;
+  ctx.apiTokenUsage.outputTokens += increment;
+  ctx.currentStepOutputTokens = event.usage.output_tokens;
+  return true;
+}
+
+function handleTokenUsage(event: any, ctx: StreamHandlerContext): void {
+  const changed = handleMessageStartTokens(event, ctx) || handleMessageDeltaTokens(event, ctx);
   if (changed) {
     ctx.lastTokenActivityTime = Date.now();
     ctx.config.tokenUsageCallback?.({ ...ctx.apiTokenUsage });

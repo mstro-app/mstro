@@ -237,9 +237,67 @@ async function pollForAuth(deviceCode, interval, platformUrl, maxAttempts = 180)
 }
 
 /**
- * Main login command
+ * Deregister old device before force re-auth
  */
-export async function login(args = []) {
+async function deregisterOldDevice(platformUrl) {
+  const existingCreds = getCredentials();
+  if (!existingCreds?.token) return;
+  try {
+    await fetch(`${platformUrl}/api/auth/device/deregister`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${existingCreds.token}`,
+      },
+    });
+  } catch {
+    // Deregister failed (e.g. network issue), force flag on request will handle it
+  }
+}
+
+/**
+ * Run the device code authorization flow. Throws on failure.
+ */
+async function runDeviceCodeFlow(clientId, platformUrl, forceReauth) {
+  const { deviceCode, userCode, verificationUrlComplete, interval } = await requestDeviceCode(clientId, platformUrl, forceReauth);
+
+  log(`Your authorization code: ${userCode}`, colors.bold);
+  log('');
+  log('Opening browser to complete login...', colors.dim);
+  log(` If browser doesn't open, visit: ${verificationUrlComplete}`, colors.dim);
+  log('');
+
+  openBrowser(verificationUrlComplete);
+
+  log('  Waiting for authorization', colors.dim);
+  process.stdout.write('  ');
+
+  const result = await pollForAuth(deviceCode, interval, platformUrl);
+
+  const credentials = {
+    token: result.accessToken,
+    userId: result.user.id,
+    email: result.user.email,
+    name: result.user.name,
+    clientId,
+    createdAt: new Date().toISOString(),
+  };
+
+  saveCredentials(credentials);
+  return result;
+}
+
+/**
+ * Main login command
+ *
+ * @param {string[]} args - CLI arguments
+ * @param {object} options
+ * @param {boolean} options.inline - When true, called from startServer() auto-login:
+ *   skips "already logged in" check, omits post-login tips, and throws on failure
+ *   instead of calling process.exit(1).
+ */
+export async function login(args = [], options = {}) {
+  const { inline = false } = options;
   const forceReauth = args.includes('--force') || args.includes('-f');
   const devMode = args.includes('--dev');
   const platformUrl = devMode ? DEV_PLATFORM_URL : PROD_PLATFORM_URL;
@@ -248,8 +306,8 @@ export async function login(args = []) {
     log(`[DEV MODE] Using ${platformUrl}\n`, colors.yellow);
   }
 
-  // Check if already logged in
-  if (isLoggedIn() && !forceReauth) {
+  // Check if already logged in (skip when called inline — caller already checked)
+  if (!inline && isLoggedIn() && !forceReauth) {
     const creds = getCredentials();
     log(`  Already logged in as ${creds.email}`, colors.green);
     log(`  Use "mstro logout" to sign out, or "mstro login --force" to re-authenticate.\n`, colors.dim);
@@ -258,72 +316,36 @@ export async function login(args = []) {
 
   const clientId = getClientId();
 
-  // If force re-auth and we have existing credentials, deregister the old device first
   if (forceReauth) {
-    const existingCreds = getCredentials();
-    if (existingCreds?.token) {
-      try {
-        await fetch(`${platformUrl}/api/auth/device/deregister`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${existingCreds.token}`,
-          },
-        });
-      } catch {
-        // Deregister failed (e.g. network issue), force flag on request will handle it
-      }
-    }
+    await deregisterOldDevice(platformUrl);
   }
 
   log('Requesting authorization...', colors.dim);
 
   try {
-    // Step 1: Request device code
-    const { deviceCode, userCode, verificationUrlComplete, interval } = await requestDeviceCode(clientId, platformUrl, forceReauth);
-
-    // Step 2: Show code and open browser
-    log(`Your authorization code: ${userCode}`, colors.bold);
-    log('');
-    log('Opening browser to complete login...', colors.dim);
-    log(` If browser doesn't open, visit: ${verificationUrlComplete}`, colors.dim);
-    log('');
-
-    openBrowser(verificationUrlComplete);
-
-    // Step 3: Poll for result
-    log('  Waiting for authorization', colors.dim);
-    process.stdout.write('  ');
-
-    const result = await pollForAuth(deviceCode, interval, platformUrl);
-
-    // Step 4: Save credentials
-    const credentials = {
-      token: result.accessToken,
-      userId: result.user.id,
-      email: result.user.email,
-      name: result.user.name,
-      clientId,
-      createdAt: new Date().toISOString(),
-    };
-
-    saveCredentials(credentials);
+    const result = await runDeviceCodeFlow(clientId, platformUrl, forceReauth);
 
     log('');
     log('');
     log(`  Logged in as ${result.user.email}`, colors.bold + colors.green);
     log('');
-    log('  Run "mstro" to start a machine.', colors.cyan);
-    log('');
 
-    // Check if node-pty is available, show tip if not
-    try {
-      await import('node-pty');
-    } catch {
-      log('  Tip: Terminal support requires native compilation.', colors.dim);
-      log('  Run "mstro setup-terminal" to enable web terminal.\n', colors.dim);
+    if (!inline) {
+      log('  Run "mstro" to start a machine.', colors.cyan);
+      log('');
+
+      // Check if node-pty is available, show tip if not
+      try {
+        await import('node-pty');
+      } catch {
+        log('  Tip: Terminal support requires native compilation.', colors.dim);
+        log('  Run "mstro setup-terminal" to enable web terminal.\n', colors.dim);
+      }
     }
   } catch (err) {
+    if (inline) {
+      throw err;
+    }
     log('');
     log(`  Login failed: ${err.message}`, colors.red);
     log('');

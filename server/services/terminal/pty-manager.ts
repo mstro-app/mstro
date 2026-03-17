@@ -17,6 +17,7 @@
  */
 
 import { EventEmitter } from 'node:events';
+import { createRequire } from 'node:module';
 import { homedir, platform } from 'node:os';
 import { sanitizeEnvForSandbox } from '../sandbox-utils.js';
 
@@ -37,6 +38,32 @@ try {
  */
 export function isPtyAvailable(): boolean {
   return pty !== null;
+}
+
+/**
+ * Re-attempt loading node-pty at runtime.
+ * Called after `mstro setup-terminal` compiles the native module
+ * so the running server can pick it up without a restart.
+ *
+ * Uses createRequire (CJS) to bypass ESM's module cache — a failed
+ * ESM import is permanently cached, but CJS require cache entries
+ * can be deleted and re-required.
+ */
+export async function reloadPty(): Promise<boolean> {
+  if (pty) return true;
+  try {
+    const require = createRequire(import.meta.url);
+    // Clear any cached failure so require() retries the native load
+    const resolved = require.resolve('node-pty');
+    delete require.cache[resolved];
+    pty = require('node-pty');
+    _ptyLoadError = null;
+    console.log('[PTYManager] node-pty loaded successfully after reload');
+    return true;
+  } catch (error: any) {
+    _ptyLoadError = error.message || 'Failed to load node-pty';
+    return false;
+  }
 }
 
 /**

@@ -29,7 +29,7 @@ import { FileService } from './services/files.js'
 import { InstanceRegistry } from './services/instances.js'
 import { PlatformConnection } from './services/platform.js'
 import { captureException, flushSentry, initSentry } from './services/sentry.js'
-import { getPTYManager } from './services/terminal/pty-manager.js'
+import { getPTYManager, reloadPty } from './services/terminal/pty-manager.js'
 import { WebSocketImproviseHandler } from './services/websocket/index.js'
 import type { WSContext } from './services/websocket/types.js'
 import { findAvailablePort } from './utils/port.js'
@@ -206,6 +206,12 @@ app.route('/api/shutdown', createShutdownRoute(instanceRegistry))
 app.route('/api/improvise', createImproviseRoutes(WORKING_DIR))
 app.route('/api/files', createFileRoutes(fileService))
 app.route('/api/notifications', createNotificationRoutes(WORKING_DIR))
+
+// Reload node-pty after setup-terminal compiles the native module
+app.post('/api/reload-pty', async (c) => {
+  const success = await reloadPty()
+  return c.json({ success, available: success })
+})
 
 // ========================================
 // Static File Serving (Production Only)

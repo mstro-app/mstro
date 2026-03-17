@@ -355,6 +355,64 @@ async function runPtySetup() {
   return false;
 }
 
+/**
+ * Read alive mstro instances and session token for server communication.
+ * Returns null if no running servers can be reached.
+ */
+function getAliveInstances() {
+  const mstroDir = join(homedir(), '.mstro');
+  const instancesPath = join(mstroDir, 'instances.json');
+  const tokenPath = join(mstroDir, 'session-token');
+
+  if (!existsSync(instancesPath) || !existsSync(tokenPath)) return null;
+
+  try {
+    const instances = JSON.parse(readFileSync(instancesPath, 'utf-8'));
+    const token = readFileSync(tokenPath, 'utf-8').trim();
+    if (!Array.isArray(instances) || !token) return null;
+
+    const now = Date.now();
+    const alive = instances.filter(i => now - i.lastHeartbeat < 2 * 60 * 1000);
+    return alive.length > 0 ? { alive, token } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Notify running mstro servers to reload node-pty.
+ * Reads instances from ~/.mstro/instances.json and POSTs to /api/reload-pty.
+ */
+async function notifyRunningServers() {
+  const result = getAliveInstances();
+  if (!result) {
+    log('  Restart mstro to enable terminal support.\n', colors.dim);
+    return;
+  }
+
+  let reloaded = 0;
+  for (const instance of result.alive) {
+    try {
+      const res = await fetch(`http://localhost:${instance.port}/api/reload-pty`, {
+        method: 'POST',
+        headers: { 'x-session-token': result.token },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) reloaded++;
+      }
+    } catch {
+      // Server not reachable — stale instance
+    }
+  }
+
+  if (reloaded > 0) {
+    log(`  Notified ${reloaded} running mstro server${reloaded > 1 ? 's' : ''} — terminal is ready!\n`, colors.green);
+  } else {
+    log('  Restart mstro to enable terminal support.\n', colors.dim);
+  }
+}
+
 function showHelp() {
   log('\n  Mstro - Run Claude Code from any browser\n', colors.bold + colors.cyan);
   log('  Streams live Claude Code sessions from your machine to mstro.app.\n', colors.dim);
@@ -446,11 +504,12 @@ function runConfigureHooks(andThenStart = false) {
     process.exit(1);
   });
 
-  child.on('exit', (code) => {
+  child.on('exit', async (code) => {
     if (code === 0) {
       markConfigured();
       if (andThenStart) {
-        // After configuring, start the server
+        // After configuring bouncer, prompt for terminal setup before starting
+        await ensurePtySetup();
         const requestedPort = parsePort(process.argv.slice(2));
         const envOverrides = requestedPort ? { PORT: String(requestedPort) } : {};
         runNpmScript('start', [], envOverrides);
@@ -614,9 +673,13 @@ async function main() {
       const alreadyAvailable = await isNodePtyAvailable();
       if (alreadyAvailable) {
         log('  node-pty is already available. Terminal support is enabled!\n', colors.green);
+        await notifyRunningServers();
         return;
       }
       const success = await runPtySetup();
+      if (success) {
+        await notifyRunningServers();
+      }
       process.exit(success ? 0 : 1);
     }],
   ]);

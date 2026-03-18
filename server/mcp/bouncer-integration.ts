@@ -42,6 +42,43 @@ import {
   SAFE_OPERATIONS
 } from './security-patterns.js';
 
+/** Timeout for Haiku bouncer subprocess calls (ms). Configurable via env var. */
+const HAIKU_TIMEOUT_MS = parseInt(process.env.BOUNCER_HAIKU_TIMEOUT_MS || '10000', 10);
+
+// ========== Decision Cache ==========
+
+/** Cache TTL in ms (default 5 minutes) */
+const CACHE_TTL_MS = parseInt(process.env.BOUNCER_CACHE_TTL_MS || '300000', 10);
+const CACHE_MAX_SIZE = 200;
+
+interface CachedDecision {
+  decision: BouncerDecision;
+  expiresAt: number;
+}
+
+const decisionCache = new Map<string, CachedDecision>();
+
+function getCachedDecision(operation: string): BouncerDecision | null {
+  const entry = decisionCache.get(operation);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    decisionCache.delete(operation);
+    return null;
+  }
+  return entry.decision;
+}
+
+function cacheDecision(operation: string, decision: BouncerDecision): void {
+  // Don't cache low-confidence or error-fallback decisions
+  if (decision.confidence < 50) return;
+  // Evict oldest entries if cache is full
+  if (decisionCache.size >= CACHE_MAX_SIZE) {
+    const firstKey = decisionCache.keys().next().value;
+    if (firstKey !== undefined) decisionCache.delete(firstKey);
+  }
+  decisionCache.set(operation, { decision, expiresAt: Date.now() + CACHE_TTL_MS });
+}
+
 export interface BouncerReviewRequest {
   operation: string;
   context?: {
@@ -195,7 +232,7 @@ or
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill('SIGTERM');
-    }, 10000);
+    }, HAIKU_TIMEOUT_MS);
 
     child.stdout.on('data', (data) => {
       output += data.toString();
@@ -209,7 +246,7 @@ or
       clearTimeout(timer);
 
       if (timedOut) {
-        reject(new Error('Haiku analysis timeout after 10s'));
+        reject(new Error(`Haiku analysis timed out after ${HAIKU_TIMEOUT_MS}ms`));
         return;
       }
 
@@ -245,6 +282,13 @@ export async function reviewOperation(request: BouncerReviewRequest): Promise<Bo
 
   const { operation } = request;
 
+  // Check cache first (pattern-layer decisions and prior Haiku results)
+  const cached = getCachedDecision(operation);
+  if (cached) {
+    console.error(`[Bouncer] ⚡ Cache hit: ${cached.decision} (${cached.confidence}%)`);
+    return cached;
+  }
+
   console.error('[Bouncer] Analyzing operation...');
   console.error(`[Bouncer] Operation: ${operation}`);
   if (request.context?.userRequest) {
@@ -276,6 +320,7 @@ export async function reviewOperation(request: BouncerReviewRequest): Promise<Bo
       { context: request.context, threatLevel: decision.threatLevel, layer: 'pattern-noop', latencyMs }
     );
 
+    cacheDecision(operation, decision);
     return decision;
   }
 
@@ -312,6 +357,7 @@ export async function reviewOperation(request: BouncerReviewRequest): Promise<Bo
       latency_ms: latencyMs,
     });
 
+    cacheDecision(operation, decision);
     return decision;
   }
 
@@ -346,6 +392,7 @@ export async function reviewOperation(request: BouncerReviewRequest): Promise<Bo
       latency_ms: latencyMs,
     });
 
+    cacheDecision(operation, decision);
     return decision;
   }
 
@@ -381,6 +428,7 @@ export async function reviewOperation(request: BouncerReviewRequest): Promise<Bo
       latency_ms: latencyMs,
     });
 
+    cacheDecision(operation, decision);
     return decision;
   }
 
@@ -439,14 +487,48 @@ export async function reviewOperation(request: BouncerReviewRequest): Promise<Bo
       latency_ms: latencyMs,
     });
 
+    cacheDecision(operation, decision);
     return decision;
 
   } catch (error: any) {
     const latencyMs = Math.round(performance.now() - startTime);
+    const isTimeout = error.message?.includes('timed out');
+
+    if (isTimeout) {
+      // Timeout: default to ALLOW — prefer availability over security stall,
+      // since the user drove the interaction
+      console.error(`[Bouncer] ⚠️  Haiku analysis timed out after ${HAIKU_TIMEOUT_MS}ms — defaulting to ALLOW`);
+      captureException(error, { context: 'bouncer.haiku_timeout', operation });
+
+      const decision: BouncerDecision = {
+        decision: 'allow',
+        confidence: 50,
+        reasoning: `Security analysis timed out after ${HAIKU_TIMEOUT_MS}ms. Defaulting to allow — user initiated the action.`,
+        threatLevel: 'medium'
+      };
+
+      logBouncerDecision(
+        operation,
+        decision.decision,
+        decision.confidence,
+        decision.reasoning,
+        { context: request.context, threatLevel: decision.threatLevel, layer: 'haiku-timeout', latencyMs, error: error.message }
+      );
+      trackEvent(AnalyticsEvents.BOUNCER_TOOL_ALLOWED, {
+        layer: 'haiku-timeout',
+        operation_length: operation.length,
+        threat_level: 'medium',
+        confidence: 50,
+        latency_ms: latencyMs,
+      });
+
+      return decision;
+    }
+
     console.error(`[Bouncer] ⚠️  Haiku analysis failed: ${error.message}`);
     captureException(error, { context: 'bouncer.haiku_analysis', operation });
 
-    // Fail-safe: deny on AI failure
+    // Fail-safe: deny on non-timeout AI failure
     const decision: BouncerDecision = {
       decision: 'deny',
       confidence: 0,

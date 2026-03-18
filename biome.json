@@ -9,7 +9,7 @@
 				"noForEach": "off"
 			},
 			"suspicious": {
-				"noExplicitAny": "off",
+				"noExplicitAny": "warn",
 				"noConsole": "off",
 				"noControlCharactersInRegex": "off",
 				"noAssignInExpressions": "off"

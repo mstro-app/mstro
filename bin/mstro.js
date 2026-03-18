@@ -14,7 +14,6 @@
  *   mstro whoami              # Show current user
  *   mstro status              # Show connection status
  *   mstro -p 4105             # Start on specific port (overrides auto port)
- *   mstro configure-hooks     # Configure Claude Code security hooks
  *   mstro --help              # Show help
  */
 
@@ -62,23 +61,7 @@ const USER_CWD = process.cwd();
 
 // First-run detection paths
 const MSTRO_CONFIG_DIR = join(homedir(), '.mstro');
-const MSTRO_FIRST_RUN_FLAG = join(MSTRO_CONFIG_DIR, '.configured');
-const CLAUDE_SETTINGS_FILE = join(homedir(), '.claude', 'settings.json');
-const CLAUDE_HOOKS_DIR = join(homedir(), '.claude', 'hooks');
-const BOUNCER_HOOK_FILE = join(CLAUDE_HOOKS_DIR, 'bouncer.sh');
 const PTY_SETUP_DISMISSED_FLAG = join(MSTRO_CONFIG_DIR, '.pty-setup-dismissed');
-
-/**
- * Mark Mstro as configured by writing the first-run flag file
- */
-function markConfigured() {
-  try {
-    mkdirSync(MSTRO_CONFIG_DIR, { recursive: true, mode: 0o700 });
-    writeFileSync(MSTRO_FIRST_RUN_FLAG, new Date().toISOString());
-  } catch (_) {
-    // Ignore errors — non-critical
-  }
-}
 
 /**
  * Set the terminal tab title
@@ -119,96 +102,6 @@ function prompt(question) {
       resolve(answer.trim().toLowerCase());
     });
   });
-}
-
-/**
- * Check if bouncer hooks are properly configured
- * Returns true if both settings.json has the hook AND the hook file exists
- */
-function isBouncerConfigured() {
-  if (!existsSync(BOUNCER_HOOK_FILE) || !existsSync(CLAUDE_SETTINGS_FILE)) {
-    return false;
-  }
-
-  try {
-    const settings = JSON.parse(readFileSync(CLAUDE_SETTINGS_FILE, 'utf-8'));
-    const preToolUseHooks = settings.hooks?.PreToolUse;
-    return Array.isArray(preToolUseHooks) &&
-      preToolUseHooks.some(matcher =>
-        Array.isArray(matcher.hooks) &&
-        matcher.hooks.some(hook => hook.command?.includes('bouncer.sh'))
-      );
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Check if user has dismissed the bouncer setup prompt
- */
-function hasUserDismissedSetup() {
-  return existsSync(MSTRO_FIRST_RUN_FLAG);
-}
-
-/**
- * Mark bouncer setup as dismissed by user
- */
-function markSetupDismissed() {
-  if (!existsSync(MSTRO_CONFIG_DIR)) {
-    mkdirSync(MSTRO_CONFIG_DIR, { recursive: true, mode: 0o700 });
-  }
-  writeFileSync(MSTRO_FIRST_RUN_FLAG, new Date().toISOString());
-}
-
-/**
- * Show a one-line warning that bouncer is not configured
- */
-function showBouncerWarning() {
-  log('  Security Bouncer not configured. Run: mstro configure-hooks', colors.dim);
-}
-
-/**
- * Prompt user to configure hooks
- * Returns: 'configure' | 'skip' | 'never'
- */
-async function promptBouncerSetup() {
-  log('\n  Welcome to Mstro!\n', colors.bold + colors.cyan);
-  log('  Mstro includes a Security Bouncer that automatically manages', colors.dim);
-  log('  tool permissions for Claude Code - keeping you safe while you work.\n', colors.dim);
-
-  log('  The Security Bouncer:', colors.bold);
-  log('    - Blocks dangerous commands automatically', colors.dim);
-  log('    - Allows normal development work without interruption', colors.dim);
-  log('    - Uses AI to analyze ambiguous operations\n', colors.dim);
-
-  const isInteractive = process.stdin.isTTY;
-
-  if (!isInteractive) {
-    log('  Non-interactive mode: skipping bouncer setup.', colors.yellow);
-    log('  Run "mstro configure-hooks" to set up the Security Bouncer.\n', colors.dim);
-    return 'skip';
-  }
-
-  log('  Configure Security Bouncer now?', colors.bold);
-  log('    [Y] Yes, configure now', colors.dim);
-  log('    [n] Not now (ask again next time)', colors.dim);
-  log('    [d] Don\'t show this again\n', colors.dim);
-
-  const answer = await prompt('  Your choice [Y/n/d]: ');
-  const choice = answer.toLowerCase();
-
-  if (choice === '' || choice === 'y' || choice === 'yes') {
-    log('');
-    return 'configure';
-  } else if (choice === 'd' || choice === 'dont' || choice === "don't") {
-    log('\n  Got it! You can configure later with: mstro configure-hooks\n', colors.dim);
-    markSetupDismissed(); // Don't show full prompt again
-    return 'never';
-  } else {
-    log('\n  Skipping for now. Will ask again next time.', colors.yellow);
-    log('  You can also configure with: mstro configure-hooks\n', colors.dim);
-    return 'skip';
-  }
 }
 
 /**
@@ -424,7 +317,6 @@ function showHelp() {
   log('    mstro status                Show connection and auth status', colors.dim);
   log('    mstro telemetry [on|off]    Enable/disable anonymous telemetry', colors.dim);
   log('    mstro -p 4105               Start on specific port (overrides auto port)', colors.dim);
-  log('    mstro configure-hooks       Configure Claude Code security hooks', colors.dim);
   log('    mstro setup-terminal        Enable web terminal (compiles native module)', colors.dim);
   log('    mstro --version             Show version number', colors.dim);
   log('    mstro --help                Show this help message', colors.dim);
@@ -437,11 +329,6 @@ function showHelp() {
   log('  Authentication:', colors.bold);
   log('    Running "mstro" will prompt you to log in automatically if needed.', colors.dim);
   log('    Once logged in, machines sync automatically with your web dashboard.', colors.dim);
-  log('');
-  log('  Security:', colors.bold);
-  log('    Mstro includes a Security Bouncer that automatically manages', colors.dim);
-  log('    tool permissions for Claude Code. It blocks dangerous operations', colors.dim);
-  log('    while allowing normal development work to proceed smoothly.', colors.dim);
   log('');
 }
 
@@ -483,42 +370,6 @@ function runNpmScript(script, args = [], envOverrides = {}) {
       process.stdout.write('\n');
     }
     process.exit(code || 0);
-  });
-}
-
-function runConfigureHooks(andThenStart = false) {
-  const configScript = join(__dirname, 'configure-claude.js');
-  const child = spawn('node', [configScript, ...process.argv.slice(3)], {
-    cwd: CLIENT_ROOT,
-    stdio: 'inherit',
-  });
-
-  // Handle Ctrl+C: kill child process and exit immediately
-  process.on('SIGINT', () => {
-    child.kill('SIGTERM');
-    process.exit(0);
-  });
-
-  child.on('error', (err) => {
-    log(`Error: ${err.message}`, colors.red);
-    process.exit(1);
-  });
-
-  child.on('exit', async (code) => {
-    if (code === 0) {
-      markConfigured();
-      if (andThenStart) {
-        // After configuring bouncer, prompt for terminal setup before starting
-        await ensurePtySetup();
-        const requestedPort = parsePort(process.argv.slice(2));
-        const envOverrides = requestedPort ? { PORT: String(requestedPort) } : {};
-        runNpmScript('start', [], envOverrides);
-      } else {
-        process.exit(0);
-      }
-    } else {
-      process.exit(code || 0);
-    }
   });
 }
 
@@ -591,24 +442,6 @@ async function ensureLoggedIn() {
 }
 
 /**
- * Prompt for bouncer setup if not configured
- * Returns true if runConfigureHooks was called (async exit path)
- */
-async function ensureBouncerSetup() {
-  if (isBouncerConfigured()) return false;
-  if (hasUserDismissedSetup()) {
-    showBouncerWarning();
-    return false;
-  }
-  const choice = await promptBouncerSetup();
-  if (choice === 'configure') {
-    runConfigureHooks(true);
-    return true;
-  }
-  return false;
-}
-
-/**
  * Prompt for node-pty setup if not available
  */
 async function ensurePtySetup() {
@@ -626,8 +459,6 @@ async function ensurePtySetup() {
 
 async function startServer(envOverrides) {
   await ensureLoggedIn();
-
-  if (await ensureBouncerSetup()) return;
 
   await ensurePtySetup();
 
@@ -667,7 +498,6 @@ async function main() {
       const { telemetry } = await import('./commands/config.js');
       await telemetry(args.slice(args.indexOf('telemetry') + 1));
     }],
-    ['configure-hooks', () => runConfigureHooks(false)],
     ['setup-terminal', async () => {
       log('\n  Mstro Terminal Setup\n', colors.bold + colors.cyan);
       const alreadyAvailable = await isNodePtyAvailable();
@@ -694,11 +524,6 @@ async function main() {
   if (args.includes('--help') || args.includes('-h')) {
     showHelp();
     showUpdateNotification();
-    return;
-  }
-
-  if (args.includes('--configure-hooks') || args.includes('-c')) {
-    runConfigureHooks(false);
     return;
   }
 

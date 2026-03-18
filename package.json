@@ -29,7 +29,6 @@
   "files": [
     "bin/",
     "server/",
-    "hooks/",
     "dist/",
     "PRIVACY.md",
     "!bin/release.sh",

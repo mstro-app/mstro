@@ -285,6 +285,31 @@ function readTextContent(fullPath: string, filePath: string, fileName: string, s
   };
 }
 
+function validateFileAccess(fullPath: string, filePath: string, fileName: string, workingDir: string): FileContentResult | null {
+  const normalizedPath = join(fullPath);
+  if (!normalizedPath.startsWith(join(workingDir)) && !isPathInSafeLocation(normalizedPath)) {
+    return { path: filePath, fileName, content: '', error: 'Access denied: path outside allowed locations' };
+  }
+  if (!existsSync(fullPath)) {
+    return { path: filePath, fileName, content: '', error: 'File not found' };
+  }
+  return null;
+}
+
+function readValidatedFile(fullPath: string, filePath: string, fileName: string, stats: ReturnType<typeof statSync>): FileContentResult {
+  if (stats.isDirectory()) return readDirectoryContent(fullPath, filePath, fileName);
+
+  const isBin = isBinaryFile(fullPath);
+  const MAX_FILE_SIZE = isBin ? 10 * 1024 * 1024 : 1024 * 1024;
+  if (stats.size > MAX_FILE_SIZE) {
+    return { path: filePath, fileName, content: '', size: stats.size, error: `File too large (${Math.round(stats.size / 1024)}KB). Maximum is ${isBin ? '10MB' : '1MB'}.` };
+  }
+
+  return isBin
+    ? readBinaryContent(fullPath, filePath, fileName, stats)
+    : readTextContent(fullPath, filePath, fileName, stats);
+}
+
 /**
  * Read file content for context injection
  */
@@ -293,30 +318,10 @@ export function readFileContent(filePath: string, workingDir: string): FileConte
     const fullPath = filePath.startsWith('/') ? filePath : join(workingDir, filePath);
     const fileName = fullPath.split(sep).pop() || filePath;
 
-    const normalizedPath = join(fullPath);
-    const isInWorkingDir = normalizedPath.startsWith(join(workingDir));
-    if (!isInWorkingDir && !isPathInSafeLocation(normalizedPath)) {
-      return { path: filePath, fileName, content: '', error: 'Access denied: path outside allowed locations' };
-    }
+    const accessError = validateFileAccess(fullPath, filePath, fileName, workingDir);
+    if (accessError) return accessError;
 
-    if (!existsSync(fullPath)) {
-      return { path: filePath, fileName, content: '', error: 'File not found' };
-    }
-
-    const stats = statSync(fullPath);
-    if (stats.isDirectory()) {
-      return readDirectoryContent(fullPath, filePath, fileName);
-    }
-
-    const isBin = isBinaryFile(fullPath);
-    const MAX_FILE_SIZE = isBin ? 10 * 1024 * 1024 : 1024 * 1024;
-    if (stats.size > MAX_FILE_SIZE) {
-      return { path: filePath, fileName, content: '', size: stats.size, error: `File too large (${Math.round(stats.size / 1024)}KB). Maximum is ${isBin ? '10MB' : '1MB'}.` };
-    }
-
-    return isBin
-      ? readBinaryContent(fullPath, filePath, fileName, stats)
-      : readTextContent(fullPath, filePath, fileName, stats);
+    return readValidatedFile(fullPath, filePath, fileName, statSync(fullPath));
   } catch (error: unknown) {
     console.error('[FileUtils] Error reading file:', error);
     return { path: filePath, fileName: filePath.split(sep).pop() || filePath, content: '', error: (error instanceof Error ? error.message : String(error)) || 'Failed to read file' };

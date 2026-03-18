@@ -42,31 +42,18 @@ npx mstro-app            # Same thing — login + launch in one command
 
 On first run, mstro will:
 1. Open your browser to authenticate with your mstro.app account
-2. Offer to set up the **Security Bouncer** — say yes
-3. Connect to the platform
+2. Connect to the platform
 
 Then open [mstro.app](https://mstro.app) in your browser. Your machine appears as a connected workspace. Start prompting.
 
 ## Security Bouncer
 
-The Bouncer automatically approves or blocks Claude Code tool calls so you don't have to. It installs as a hook at `~/.claude/hooks/bouncer.sh` and applies to all Claude Code sessions.
+The Bouncer automatically approves or blocks tool calls during mstro sessions. It is not active for standalone Claude Code.
 
-**Mstro sessions (headless)** get the full 2-layer system:
+**Mstro sessions (headless)** get the full 2-layer system via MCP:
 
 1. **Pattern matching** (<5ms): Known-safe operations are allowed instantly. Known-dangerous patterns (destructive commands, fork bombs) are blocked instantly.
 2. **AI analysis** (~200-500ms): Ambiguous operations are reviewed by a fast AI model to determine if they look like legitimate development work or prompt injection.
-
-**Claude Code terminal REPL** (`claude`) gets 1-layer protection:
-
-1. **Pattern matching only**: Blocks critical threats (fork bombs, `rm -rf /`, disk overwrites). Allows everything else. The AI analysis layer requires a running mstro server.
-
-### Configure
-
-The bouncer is set up automatically on first run. To reconfigure or install manually:
-
-```bash
-mstro configure-hooks
-```
 
 ## CLI Reference
 
@@ -79,7 +66,6 @@ mstro logout                # Sign out
 mstro whoami                # Show current user and device info
 mstro status                # Show connection and auth status
 mstro setup-terminal        # Enable web terminal (compiles native module)
-mstro configure-hooks       # Install/reconfigure Security Bouncer
 mstro telemetry [on|off]    # Show/toggle anonymous telemetry
 ```
 
@@ -120,8 +106,6 @@ mstro stores config in `~/.mstro/`:
 | File | Purpose |
 |------|---------|
 | `~/.mstro/credentials.json` | Device auth token (created by `mstro login`) |
-| `~/.claude/hooks/bouncer.sh` | Security Bouncer hook |
-| `~/.claude/logs/bouncer.log` | Bouncer audit log |
 
 ## Requirements
 

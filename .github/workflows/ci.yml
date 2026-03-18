@@ -22,6 +22,7 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
+      - run: npm config delete always-auth || true
       - run: npm ci
       - run: npm run build
       - run: npm test
@@ -35,6 +36,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - run: npm config delete always-auth || true
       - run: npm ci
       - run: npx @biomejs/biome lint .
 
@@ -47,5 +49,6 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - run: npm config delete always-auth || true
       - run: npm ci
       - run: npm audit --omit=dev

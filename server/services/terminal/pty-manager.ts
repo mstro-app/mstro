@@ -240,7 +240,7 @@ export class PTYManager extends EventEmitter {
       // wraps echoed chars in multi-part ANSI sequences (RPROMPT, syntax highlighting).
       // A longer window on macOS ensures these multi-part sequences arrive as one chunk,
       // which the browser's predictive echo can match correctly.
-      const OUTPUT_COALESCE_MS = platform() === 'darwin' ? 16 : 8;
+      const OUTPUT_COALESCE_MS = platform() === 'darwin' ? 24 : 8;
       // High-water mark: flush immediately when buffer exceeds this size
       // to prevent unbounded memory growth during high-output commands (e.g. `yes`)
       const OUTPUT_HIGH_WATER = 64 * 1024; // 64KB

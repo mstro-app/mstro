@@ -226,6 +226,18 @@ export function isImageFile(filePath: string): boolean {
   return ext ? imageExtensions.includes(`.${ext}`) : false;
 }
 
+/**
+ * Check if a file is a binary file that should be base64-encoded (images + PDFs)
+ */
+export function isBinaryFile(filePath: string): boolean {
+  return isImageFile(filePath) || isPdfFile(filePath);
+}
+
+function isPdfFile(filePath: string): boolean {
+  const ext = filePath.toLowerCase().split('.').pop();
+  return ext === 'pdf';
+}
+
 type FileContentResult = { path: string; fileName: string; content: string; size?: number; modifiedAt?: string; isImage?: boolean; mimeType?: string; error?: string };
 
 function readDirectoryContent(fullPath: string, filePath: string, fileName: string): FileContentResult {
@@ -246,10 +258,17 @@ function readDirectoryContent(fullPath: string, filePath: string, fileName: stri
   }
 }
 
-function readImageContent(fullPath: string, filePath: string, fileName: string, stats: { size: number; mtime: Date }): FileContentResult {
+function getBinaryMimeType(ext: string): string {
+  if (ext === 'svg') return 'image/svg+xml';
+  if (ext === 'jpg') return 'image/jpeg';
+  if (ext === 'pdf') return 'application/pdf';
+  return `image/${ext}`;
+}
+
+function readBinaryContent(fullPath: string, filePath: string, fileName: string, stats: { size: number; mtime: Date }): FileContentResult {
   const buffer = readFileSync(fullPath);
   const ext = fullPath.toLowerCase().split('.').pop() || 'png';
-  const mimeType = ext === 'svg' ? 'image/svg+xml' : ext === 'jpg' ? 'image/jpeg' : `image/${ext}`;
+  const mimeType = getBinaryMimeType(ext);
   return {
     path: filePath, fileName,
     content: buffer.toString('base64'),
@@ -289,14 +308,14 @@ export function readFileContent(filePath: string, workingDir: string): FileConte
       return readDirectoryContent(fullPath, filePath, fileName);
     }
 
-    const isImage = isImageFile(fullPath);
-    const MAX_FILE_SIZE = isImage ? 10 * 1024 * 1024 : 1024 * 1024;
+    const isBin = isBinaryFile(fullPath);
+    const MAX_FILE_SIZE = isBin ? 10 * 1024 * 1024 : 1024 * 1024;
     if (stats.size > MAX_FILE_SIZE) {
-      return { path: filePath, fileName, content: '', size: stats.size, error: `File too large (${Math.round(stats.size / 1024)}KB). Maximum is ${isImage ? '10MB' : '1MB'}.` };
+      return { path: filePath, fileName, content: '', size: stats.size, error: `File too large (${Math.round(stats.size / 1024)}KB). Maximum is ${isBin ? '10MB' : '1MB'}.` };
     }
 
-    return isImage
-      ? readImageContent(fullPath, filePath, fileName, stats)
+    return isBin
+      ? readBinaryContent(fullPath, filePath, fileName, stats)
       : readTextContent(fullPath, filePath, fileName, stats);
   } catch (error: any) {
     console.error('[FileUtils] Error reading file:', error);

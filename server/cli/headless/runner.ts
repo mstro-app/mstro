@@ -175,12 +175,40 @@ export class HeadlessRunner {
   }
 
   /**
-   * Cleanup on exit
+   * Cleanup on exit — SIGTERM all tracked processes, then SIGKILL stragglers after 5s
    */
   cleanup(): void {
-    for (const [_pid, process] of this.runningProcesses) {
-      process.kill();
+    if (this.runningProcesses.size === 0) return;
+
+    const pids = new Set<number>();
+    for (const [pid, proc] of this.runningProcesses) {
+      pids.add(pid);
+      try { proc.kill('SIGTERM'); } catch { /* already dead */ }
     }
-    this.runningProcesses.clear();
+
+    // SIGKILL fallback after 5 seconds for any process that didn't exit
+    setTimeout(() => {
+      for (const [pid, proc] of this.runningProcesses) {
+        if (pids.has(pid) && !proc.killed) {
+          try { proc.kill('SIGKILL'); } catch { /* already dead */ }
+        }
+      }
+      this.runningProcesses.clear();
+    }, 5000);
+  }
+
+  /**
+   * Sweep for zombie processes — entries in runningProcesses whose underlying
+   * process has already exited but whose 'close' event was missed.
+   */
+  sweepZombies(): number {
+    let swept = 0;
+    for (const [pid, proc] of this.runningProcesses) {
+      if (proc.exitCode !== null || proc.killed) {
+        this.runningProcesses.delete(pid);
+        swept++;
+      }
+    }
+    return swept;
   }
 }

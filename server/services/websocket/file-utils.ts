@@ -317,8 +317,8 @@ export function readFileContent(filePath: string, workingDir: string): FileConte
     return isBin
       ? readBinaryContent(fullPath, filePath, fileName, stats)
       : readTextContent(fullPath, filePath, fileName, stats);
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('[FileUtils] Error reading file:', error);
-    return { path: filePath, fileName: filePath.split(sep).pop() || filePath, content: '', error: error.message || 'Failed to read file' };
+    return { path: filePath, fileName: filePath.split(sep).pop() || filePath, content: '', error: (error instanceof Error ? error.message : String(error)) || 'Failed to read file' };
   }
 }

@@ -158,7 +158,7 @@ function getDistinctId(): string {
 /**
  * Get common properties included with all events
  */
-function getCommonProperties(): Record<string, any> {
+function getCommonProperties(): Record<string, unknown> {
   return {
     os: platform(),
     arch: arch(),
@@ -171,7 +171,7 @@ function getCommonProperties(): Record<string, any> {
 /**
  * Track a custom event
  */
-export function trackEvent(event: string, properties?: Record<string, any>): void {
+export function trackEvent(event: string, properties?: Record<string, unknown>): void {
   if (!client || !isTelemetryEnabled()) return
 
   client.capture({
@@ -187,7 +187,7 @@ export function trackEvent(event: string, properties?: Record<string, any>): voi
 /**
  * Identify a user (call after login)
  */
-export function identifyUser(userId: string, properties?: Record<string, any>): void {
+export function identifyUser(userId: string, properties?: Record<string, unknown>): void {
   if (!client || !isTelemetryEnabled()) return
 
   // Link the client ID to the user ID

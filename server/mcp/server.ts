@@ -73,7 +73,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   const { tool_name, input } = request.params.arguments as {
     tool_name: string;
-    input: Record<string, any>;
+    input: Record<string, unknown>;
   };
 
   console.error(`[MCP Bouncer] Analyzing ${tool_name} request...`);
@@ -84,7 +84,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   // Extract file path with multiple property name support
   // Claude Code may use file_path, filePath, or path depending on context
-  const getFilePath = (inp: Record<string, any>) =>
+  const getFilePath = (inp: Record<string, unknown>) =>
     inp.file_path || inp.filePath || inp.path;
 
   if (tool_name === 'Bash' && input.command) {
@@ -141,8 +141,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         },
       ],
     };
-  } catch (error: any) {
-    console.error(`[MCP Bouncer] Error: ${error.message}`);
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error(`[MCP Bouncer] Error: ${errorMessage}`);
 
     // Fail-safe: deny on error
     return {
@@ -151,7 +152,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           type: 'text',
           text: JSON.stringify({
             behavior: 'deny',
-            message: `Security analysis failed: ${error.message}. Denying for safety.`,
+            message: `Security analysis failed: ${errorMessage}. Denying for safety.`,
           }),
         },
       ],

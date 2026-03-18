@@ -19,7 +19,7 @@ export interface ToolUseEvent {
   toolId?: string;
   index?: number;
   partialJson?: string;
-  completeInput?: any;
+  completeInput?: Record<string, unknown>;
   result?: string;
   isError?: boolean;
 }

@@ -38,7 +38,9 @@ const timeout = parseInt(process.argv[3], 10) * 1000;
 const logFile = process.argv[4];
 
 const toolName = input.tool_name || input.toolName || 'unknown';
-const toolInput = input.input || input.toolInput || {};
+// Claude Code: tool_input, mstro: input/toolInput
+const toolInput = input.tool_input || input.input || input.toolInput || {};
+const isClaudeCode = input.hook_event_name === 'PreToolUse';
 
 function log(msg) {
   const timestamp = new Date().toISOString();
@@ -46,7 +48,17 @@ function log(msg) {
 }
 
 function output(decision, reason) {
-  console.log(JSON.stringify({ decision, reason }));
+  if (isClaudeCode) {
+    console.log(JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: decision,
+        permissionDecisionReason: reason,
+      },
+    }));
+  } else {
+    console.log(JSON.stringify({ decision, reason }));
+  }
 }
 
 // Quick path for read-only and side-effect-free operations
@@ -98,7 +110,9 @@ if (bouncerCli) {
       if (code === 0 && stdout.trim()) {
         try {
           const result = JSON.parse(stdout.trim());
-          log(result.decision + ': ' + operation + ' - ' + (result.reason || ''));
+          const d = result.decision || result.hookSpecificOutput?.permissionDecision || 'unknown';
+          const r = result.reason || result.hookSpecificOutput?.permissionDecisionReason || '';
+          log(d + ': ' + operation + ' - ' + r);
           console.log(stdout.trim());
         } catch {
           log('allow (parse error): ' + operation);

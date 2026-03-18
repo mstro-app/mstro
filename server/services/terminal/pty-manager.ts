@@ -27,8 +27,8 @@ let _ptyLoadError: string | null = null;
 
 try {
   pty = await import('node-pty');
-} catch (error: any) {
-  _ptyLoadError = error.message || 'Failed to load node-pty';
+} catch (error: unknown) {
+  _ptyLoadError = error instanceof Error ? error.message : 'Failed to load node-pty';
   console.warn('[PTYManager] node-pty not available - terminal features disabled');
   console.warn('[PTYManager] To enable terminals, run: mstro setup-terminal');
 }
@@ -60,8 +60,8 @@ export async function reloadPty(): Promise<boolean> {
     _ptyLoadError = null;
     console.log('[PTYManager] node-pty loaded successfully after reload');
     return true;
-  } catch (error: any) {
-    _ptyLoadError = error.message || 'Failed to load node-pty';
+  } catch (error: unknown) {
+    _ptyLoadError = error instanceof Error ? error.message : 'Failed to load node-pty';
     return false;
   }
 }
@@ -311,9 +311,9 @@ export class PTYManager extends EventEmitter {
       });
 
       return { shell: session.shell, cwd, isReconnect: false };
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error(`[PTYManager] Failed to create terminal ${terminalId}:`, error);
-      this.emit('error', terminalId, error.message || 'Failed to create terminal');
+      this.emit('error', terminalId, error instanceof Error ? error.message : 'Failed to create terminal');
       throw error;
     }
   }
@@ -331,9 +331,9 @@ export class PTYManager extends EventEmitter {
     try {
       session.pty.write(data);
       return true;
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error(`[PTYManager] Error writing to terminal ${terminalId}:`, error);
-      this.emit('error', terminalId, error.message || 'Write failed');
+      this.emit('error', terminalId, error instanceof Error ? error.message : 'Write failed');
       return false;
     }
   }
@@ -351,7 +351,7 @@ export class PTYManager extends EventEmitter {
     try {
       session.pty.resize(cols, rows);
       return true;
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error(`[PTYManager] Error resizing terminal ${terminalId}:`, error);
       return false;
     }
@@ -380,7 +380,7 @@ export class PTYManager extends EventEmitter {
       session.pty.kill();
       this.terminals.delete(terminalId);
       return true;
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error(`[PTYManager] Error closing terminal ${terminalId}:`, error);
       this.terminals.delete(terminalId);
       return false;

@@ -108,6 +108,7 @@ export interface WebSocketMessage {
     | 'updateSettings';
   tabId?: string;
   terminalId?: string;
+  // biome-ignore lint/suspicious/noExplicitAny: message envelope carries heterogeneous payloads
   data?: any;
   /** Injected by server relay for sandboxed shared users (control + view) */
   _permission?: 'control' | 'view';
@@ -211,6 +212,7 @@ export interface WebSocketResponse {
     | 'settingsUpdated';
   tabId?: string;
   terminalId?: string;
+  // biome-ignore lint/suspicious/noExplicitAny: message envelope carries heterogeneous payloads
   data?: any;
 }
 

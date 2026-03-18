@@ -21,6 +21,10 @@ import type {
   ToolUseEvent,
 } from './types.js';
 
+/** Parsed JSON from Claude CLI stream — structure varies by event type */
+// biome-ignore lint/suspicious/noExplicitAny: external CLI stream JSON with heterogeneous shapes
+type StreamJson = any;
+
 export interface ClaudeInvokerOptions {
   config: ResolvedHeadlessConfig;
   runningProcesses: Map<number, ChildProcess>;
@@ -281,7 +285,7 @@ interface StreamHandlerContext {
 }
 
 function handleSessionCapture(
-  parsed: any,
+  parsed: StreamJson,
   captured: { claudeSessionId?: string }
 ): void {
   if (parsed.type === 'system' && parsed.subtype === 'init' && parsed.session_id) {
@@ -292,7 +296,7 @@ function handleSessionCapture(
   }
 }
 
-function handleThinkingDelta(event: any, ctx: StreamHandlerContext): string {
+function handleThinkingDelta(event: StreamJson, ctx: StreamHandlerContext): string {
   if (
     event.type !== 'content_block_delta' ||
     event.delta?.type !== 'thinking_delta' ||
@@ -324,7 +328,7 @@ function handleThinkingDelta(event: any, ctx: StreamHandlerContext): string {
   return updated;
 }
 
-function handleTextDelta(event: any, ctx: StreamHandlerContext): string {
+function handleTextDelta(event: StreamJson, ctx: StreamHandlerContext): string {
   if (
     event.type !== 'content_block_delta' ||
     event.delta?.type !== 'text_delta' ||
@@ -366,7 +370,7 @@ function handleTextDelta(event: any, ctx: StreamHandlerContext): string {
   return updated;
 }
 
-function handleToolStart(event: any, ctx: StreamHandlerContext): void {
+function handleToolStart(event: StreamJson, ctx: StreamHandlerContext): void {
   if (
     event.type !== 'content_block_start' ||
     event.content_block?.type !== 'tool_use'
@@ -399,7 +403,7 @@ function handleToolStart(event: any, ctx: StreamHandlerContext): void {
   }
 }
 
-function handleToolInputDelta(event: any, ctx: StreamHandlerContext): void {
+function handleToolInputDelta(event: StreamJson, ctx: StreamHandlerContext): void {
   if (
     event.type !== 'content_block_delta' ||
     event.delta?.type !== 'input_json_delta'
@@ -420,7 +424,7 @@ function handleToolInputDelta(event: any, ctx: StreamHandlerContext): void {
   }
 }
 
-function handleToolComplete(event: any, ctx: StreamHandlerContext): void {
+function handleToolComplete(event: StreamJson, ctx: StreamHandlerContext): void {
   if (event.type !== 'content_block_stop') {
     return;
   }
@@ -431,7 +435,7 @@ function handleToolComplete(event: any, ctx: StreamHandlerContext): void {
     return;
   }
 
-  let completeInput: any = {};
+  let completeInput: Record<string, unknown> = {};
   try {
     completeInput = JSON.parse(toolBuffer.inputJson);
   } catch (_e) {
@@ -460,7 +464,7 @@ function handleToolComplete(event: any, ctx: StreamHandlerContext): void {
 }
 
 /** Accumulate input tokens from a message_start event. Returns true if any tokens were added. */
-function handleMessageStartTokens(event: any, ctx: StreamHandlerContext): boolean {
+function handleMessageStartTokens(event: StreamJson, ctx: StreamHandlerContext): boolean {
   if (event.type !== 'message_start' || !event.message?.usage) return false;
   const usage = event.message.usage;
   ctx.currentStepOutputTokens = 0;
@@ -488,7 +492,7 @@ function handleMessageStartTokens(event: any, ctx: StreamHandlerContext): boolea
  * message_delta event are cumulative" and there can be "one or more message_delta
  * events" per message. We track the delta from the previous value to avoid
  * double-counting when multiple message_delta events fire per step. */
-function handleMessageDeltaTokens(event: any, ctx: StreamHandlerContext): boolean {
+function handleMessageDeltaTokens(event: StreamJson, ctx: StreamHandlerContext): boolean {
   if (event.type !== 'message_delta' || !event.usage) return false;
   if (typeof event.usage.output_tokens !== 'number') return false;
   const increment = event.usage.output_tokens - ctx.currentStepOutputTokens;
@@ -500,7 +504,7 @@ function handleMessageDeltaTokens(event: any, ctx: StreamHandlerContext): boolea
   return true;
 }
 
-function handleTokenUsage(event: any, ctx: StreamHandlerContext): void {
+function handleTokenUsage(event: StreamJson, ctx: StreamHandlerContext): void {
   const changed = handleMessageStartTokens(event, ctx) || handleMessageDeltaTokens(event, ctx);
   if (changed) {
     ctx.lastTokenActivityTime = Date.now();
@@ -514,7 +518,7 @@ function handleTokenUsage(event: any, ctx: StreamHandlerContext): void {
  * accumulated stream-based counts which may be incomplete (e.g., when extended thinking
  * suppresses stream_event emissions).
  */
-function handleResultTokenUsage(parsed: any, ctx: StreamHandlerContext): void {
+function handleResultTokenUsage(parsed: StreamJson, ctx: StreamHandlerContext): void {
   if (!parsed.usage) return;
   const u = parsed.usage;
   const input = (typeof u.input_tokens === 'number' ? u.input_tokens : 0)
@@ -533,7 +537,7 @@ function handleResultTokenUsage(parsed: any, ctx: StreamHandlerContext): void {
   }
 }
 
-function handleToolResult(parsed: any, ctx: StreamHandlerContext): void {
+function handleToolResult(parsed: StreamJson, ctx: StreamHandlerContext): void {
   if (parsed.type !== 'user' || !parsed.message?.content) {
     return;
   }
@@ -583,7 +587,7 @@ function processStreamLines(
   return remainder;
 }
 
-function processStreamEvent(parsed: any, ctx: StreamHandlerContext): void {
+function processStreamEvent(parsed: StreamJson, ctx: StreamHandlerContext): void {
   // Handle error events from Claude CLI (API errors, model errors, etc.)
   if (parsed.type === 'error') {
     const errorMessage = parsed.error?.message || parsed.message || JSON.stringify(parsed);
@@ -870,12 +874,13 @@ function onToolStart(event: ToolUseEvent, s: ToolTrackingState): void {
 /** Handle tool_complete events. Extracted to reduce cognitive complexity. */
 function onToolComplete(event: ToolUseEvent, s: ToolTrackingState): void {
   const id = event.toolId!;
-  s.counters.lastToolInputSummary = summarizeToolInput(event.completeInput);
-  s.toolIdToInput.set(id, event.completeInput);
+  const input = event.completeInput ?? {};
+  s.counters.lastToolInputSummary = summarizeToolInput(input);
+  s.toolIdToInput.set(id, input);
   if (!s.watchdog) return;
   const toolName = s.toolIdToName.get(id);
   if (toolName) {
-    s.watchdog.startWatch(id, toolName, event.completeInput, () => { s.onTimeout(id); });
+    s.watchdog.startWatch(id, toolName, input, () => { s.onTimeout(id); });
   }
 }
 

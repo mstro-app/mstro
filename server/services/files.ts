@@ -332,9 +332,9 @@ export function listDirectory(
       success: true,
       entries: directoryEntries
     }
-  } catch (error: any) {
+  } catch (error: unknown) {
     // Handle permission errors gracefully
-    if (error.code === 'EACCES') {
+    if (error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'EACCES') {
       return {
         success: false,
         error: 'Permission denied'
@@ -344,7 +344,7 @@ export function listDirectory(
     console.error('[FileService] Error listing directory:', error)
     return {
       success: false,
-      error: error.message || 'Failed to list directory'
+      error: error instanceof Error ? error.message : 'Failed to list directory'
     }
   }
 }
@@ -408,11 +408,11 @@ export function writeFile(
       success: true,
       path: resolvedPath.replace(`${workingDir}/`, '')
     }
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('[FileService] Error writing file:', error)
     return {
       success: false,
-      error: error.message || 'Failed to write file'
+      error: error instanceof Error ? error.message : 'Failed to write file'
     }
   }
 }
@@ -471,11 +471,11 @@ export function createFile(
       success: true,
       path: resolvedPath.replace(`${workingDir}/`, '')
     }
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('[FileService] Error creating file:', error)
     return {
       success: false,
-      error: error.message || 'Failed to create file'
+      error: error instanceof Error ? error.message : 'Failed to create file'
     }
   }
 }
@@ -536,11 +536,11 @@ export function createDirectory(
       success: true,
       path: resolvedPath.replace(`${workingDir}/`, '')
     }
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('[FileService] Error creating directory:', error)
     return {
       success: false,
-      error: error.message || 'Failed to create directory'
+      error: error instanceof Error ? error.message : 'Failed to create directory'
     }
   }
 }
@@ -618,11 +618,11 @@ export function deleteFile(
       success: true,
       path: resolvedPath.replace(`${workingDir}/`, '')
     }
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('[FileService] Error deleting file:', error)
     return {
       success: false,
-      error: error.message || 'Failed to delete'
+      error: error instanceof Error ? error.message : 'Failed to delete'
     }
   }
 }
@@ -700,11 +700,11 @@ export function renameFile(
       success: true,
       path: resolvedNewPath.replace(`${workingDir}/`, '')
     }
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('[FileService] Error renaming file:', error)
     return {
       success: false,
-      error: error.message || 'Failed to rename'
+      error: error instanceof Error ? error.message : 'Failed to rename'
     }
   }
 }

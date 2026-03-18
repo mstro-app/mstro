@@ -7,11 +7,11 @@
 
 import { randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import type { IncomingMessage } from 'node:http'
+import type { IncomingMessage, Server } from 'node:http'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 import { serve } from '@hono/node-server'
-import { Hono } from 'hono'
+import { type Context, Hono, type Next } from 'hono'
 import { cors } from 'hono/cors'
 import { logger } from 'hono/logger'
 import { type WebSocket as NodeWebSocket, WebSocketServer } from 'ws'
@@ -26,7 +26,7 @@ import {
 import { AnalyticsEvents, initAnalytics, shutdownAnalytics, trackEvent } from './services/analytics.js'
 import { AuthService } from './services/auth.js'
 import { FileService } from './services/files.js'
-import { InstanceRegistry } from './services/instances.js'
+import { InstanceRegistry, type MstroInstance } from './services/instances.js'
 import { PlatformConnection } from './services/platform.js'
 import { captureException, flushSentry, initSentry } from './services/sentry.js'
 import { getPTYManager, reloadPty } from './services/terminal/pty-manager.js'
@@ -126,7 +126,7 @@ const fileService = new FileService(WORKING_DIR)
 const wsHandler = new WebSocketImproviseHandler()
 
 // Instance registration deferred to startServer() when port is known
-let _currentInstance: any
+let _currentInstance: MstroInstance | undefined
 
 // Global middleware
 // In production, restrict CORS to block cross-origin browser requests to localhost.
@@ -149,7 +149,7 @@ app.use('*', logger())
 // Authentication Middleware
 // ========================================
 
-const authMiddleware = async (c: any, next: any) => {
+const authMiddleware = async (c: Context, next: Next) => {
   // Skip auth for health check and config
   const publicPaths = ['/health', '/api/config']
   if (publicPaths.some(path => c.req.path.startsWith(path))) {
@@ -263,7 +263,7 @@ function wrapWebSocket(ws: NodeWebSocket, workingDir: string): WSContext {
  * This allows messages from the web (via platform) to be handled by the same wsHandler
  */
 function createPlatformRelayContext(
-  platformSend: (message: any) => void,
+  platformSend: (message: unknown) => void,
   workingDir: string
 ): WSContext {
   return {
@@ -305,7 +305,7 @@ async function startServer() {
   })
 
   // Create WebSocket server attached to the HTTP server
-  const wss = new WebSocketServer({ server: server as any })
+  const wss = new WebSocketServer({ server: server as Server })
 
   wss.on('connection', (ws: NodeWebSocket, req: IncomingMessage) => {
     const url = new URL(req.url || '/', `http://localhost:${PORT}`)
@@ -360,7 +360,7 @@ async function startServer() {
 
   // Queue for messages that arrive before relay context is ready
   // This handles race conditions where initTab arrives before web_connected
-  let pendingRelayMessages: any[] = []
+  let pendingRelayMessages: unknown[] = []
 
   // Connect to platform
   const platformConnection = new PlatformConnection(WORKING_DIR, {

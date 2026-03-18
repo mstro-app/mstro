@@ -19,7 +19,7 @@ export interface AuditLogEntry {
   timestamp: string;
   sessionId?: string;
   operation: string;
-  context?: any;
+  context?: unknown;
   decision: 'allow' | 'deny' | 'warn_allow';
   confidence: number;
   reasoning: string;
@@ -68,7 +68,7 @@ export class SecurityAuditLogger {
     confidence: number,
     reasoning: string,
     metadata?: {
-      context?: any;
+      context?: unknown;
       threatLevel?: string;
       layer?: BouncerLayer;
       latencyMs?: number;
@@ -109,14 +109,14 @@ export function logBouncerDecision(
   decision: 'allow' | 'deny' | 'warn_allow' | undefined,
   confidence: number,
   reasoning: string,
-  metadata?: any
+  metadata?: Record<string, unknown>
 ): void {
   // Defensive: handle undefined or invalid decision
   const safeDecision = decision ?? 'deny';
   const validDecisions = ['allow', 'deny', 'warn_allow'];
   const normalizedDecision = validDecisions.includes(safeDecision) ? safeDecision : 'deny';
 
-  const workingDir = metadata?.context?.workingDirectory;
+  const workingDir = (metadata?.context as Record<string, unknown> | undefined)?.workingDirectory as string | undefined;
   const logger = getAuditLogger(workingDir);
   logger.logDecision(operation, normalizedDecision as 'allow' | 'deny' | 'warn_allow', confidence, reasoning, metadata);
 

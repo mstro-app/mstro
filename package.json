@@ -1,6 +1,6 @@
 {
   "name": "mstro-app",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Run Claude Code from any browser - streams live sessions from your machine to mstro.app",
   "type": "module",
   "license": "MIT",

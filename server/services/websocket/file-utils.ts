@@ -7,7 +7,7 @@
  * File type detection, gitignore parsing, and directory scanning utilities.
  */
 
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { type Stats, existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { extname, join, relative, sep } from 'node:path';
 import type { CacheEntry, } from './types.js';
 
@@ -296,7 +296,7 @@ function validateFileAccess(fullPath: string, filePath: string, fileName: string
   return null;
 }
 
-function readValidatedFile(fullPath: string, filePath: string, fileName: string, stats: ReturnType<typeof statSync>): FileContentResult {
+function readValidatedFile(fullPath: string, filePath: string, fileName: string, stats: Stats): FileContentResult {
   if (stats.isDirectory()) return readDirectoryContent(fullPath, filePath, fileName);
 
   const isBin = isBinaryFile(fullPath);

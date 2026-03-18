@@ -7,7 +7,7 @@
  * File type detection, gitignore parsing, and directory scanning utilities.
  */
 
-import { type Stats, existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, type Stats, statSync } from 'node:fs';
 import { extname, join, relative, sep } from 'node:path';
 import type { CacheEntry, } from './types.js';
 

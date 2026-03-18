@@ -18,11 +18,19 @@
 import { type BouncerReviewRequest, reviewOperation } from './bouncer-integration.js';
 
 interface HookInput {
+  // Tool identification (mstro: toolName, Claude Code: tool_name)
   tool_name?: string;
   toolName?: string;
-  input?: Record<string, any>;
-  toolInput?: Record<string, any>;
-  // Conversation context from Claude Code hooks
+  // Tool parameters (mstro: input/toolInput, Claude Code: tool_input)
+  input?: Record<string, unknown>;
+  toolInput?: Record<string, unknown>;
+  tool_input?: Record<string, unknown>;
+  // Claude Code hook metadata
+  hook_event_name?: string;
+  transcript_path?: string;
+  permission_mode?: string;
+  cwd?: string;
+  // Mstro conversation context
   session_id?: string;
   conversation?: {
     messages?: Array<{
@@ -31,7 +39,7 @@ interface HookInput {
     }>;
     last_user_message?: string;
   };
-  // Additional context fields Claude Code may provide
+  // Common fields
   tool_use_id?: string;
   working_directory?: string;
 }
@@ -48,7 +56,7 @@ async function readStdin(): Promise<string> {
   });
 }
 
-function buildOperationString(toolName: string, toolInput: Record<string, any>): string {
+function buildOperationString(toolName: string, toolInput: Record<string, unknown>): string {
   if (toolName === 'Bash' && toolInput.command) {
     return `${toolName}: ${toolInput.command}`;
   }
@@ -57,6 +65,55 @@ function buildOperationString(toolName: string, toolInput: Record<string, any>):
     return filePath ? `${toolName}: ${filePath}` : `${toolName}: ${JSON.stringify(toolInput)}`;
   }
   return `${toolName}: ${JSON.stringify(toolInput)}`;
+}
+
+/**
+ * Detect whether the caller is Claude Code (vs mstro).
+ * Claude Code includes hook_event_name in its payload.
+ */
+function isClaudeCodeHook(hookInput: HookInput): boolean {
+  return hookInput.hook_event_name === 'PreToolUse';
+}
+
+/**
+ * Format a bouncer decision for the calling system.
+ * Claude Code expects: { hookSpecificOutput: { permissionDecision, ... } }
+ * Mstro expects: { decision, reason, confidence, threatLevel, alternative }
+ */
+function formatDecisionOutput(
+  decision: { decision: string; reasoning: string; confidence?: number; threatLevel?: string; alternative?: string },
+  claudeCode: boolean
+): string {
+  const mappedDecision = decision.decision === 'deny' ? 'deny' : 'allow';
+  if (claudeCode) {
+    return JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: mappedDecision,
+        permissionDecisionReason: decision.reasoning,
+      },
+    });
+  }
+  return JSON.stringify({
+    decision: mappedDecision,
+    reason: decision.reasoning,
+    confidence: decision.confidence,
+    threatLevel: decision.threatLevel,
+    alternative: decision.alternative,
+  });
+}
+
+function formatSimpleOutput(d: 'allow' | 'deny', reason: string, claudeCode: boolean): string {
+  if (claudeCode) {
+    return JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: d,
+        permissionDecisionReason: reason,
+      },
+    });
+  }
+  return JSON.stringify({ decision: d, reason });
 }
 
 function extractConversationContext(hookInput: HookInput): string | undefined {
@@ -74,6 +131,7 @@ async function main() {
   const inputStr = await readStdin();
 
   if (!inputStr) {
+    // Can't detect caller without input — output both-compatible allow
     console.log(JSON.stringify({ decision: 'allow', reason: 'Empty input, allowing' }));
     process.exit(0);
   }
@@ -87,8 +145,10 @@ async function main() {
     process.exit(0);
   }
 
+  const claudeCode = isClaudeCodeHook(hookInput);
   const toolName = hookInput.tool_name || hookInput.toolName || 'unknown';
-  const toolInput = hookInput.input || hookInput.toolInput || {};
+  // Claude Code: tool_input, mstro: input/toolInput
+  const toolInput = hookInput.tool_input || hookInput.input || hookInput.toolInput || {};
   const userRequestContext = extractConversationContext(hookInput);
   const lastUserMessage = hookInput.conversation?.last_user_message;
   const recentMessages = hookInput.conversation?.messages?.slice(-5);
@@ -97,7 +157,8 @@ async function main() {
     operation: buildOperationString(toolName, toolInput),
     context: {
       purpose: userRequestContext || 'Tool use request from Claude',
-      workingDirectory: hookInput.working_directory || process.cwd(),
+      // Claude Code: cwd, mstro: working_directory
+      workingDirectory: hookInput.cwd || hookInput.working_directory || process.cwd(),
       toolName,
       toolInput,
       userRequest: lastUserMessage,
@@ -108,19 +169,11 @@ async function main() {
 
   try {
     const decision = await reviewOperation(bouncerRequest);
-    console.log(JSON.stringify({
-      decision: decision.decision === 'deny' ? 'deny' : 'allow',
-      reason: decision.reasoning,
-      confidence: decision.confidence,
-      threatLevel: decision.threatLevel,
-      alternative: decision.alternative,
-    }));
-  } catch (error: any) {
-    console.error('[bouncer-cli] Error:', error.message);
-    console.log(JSON.stringify({
-      decision: 'allow',
-      reason: `Bouncer error: ${error.message}. Allowing to avoid blocking.`
-    }));
+    console.log(formatDecisionOutput(decision, claudeCode));
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('[bouncer-cli] Error:', message);
+    console.log(formatSimpleOutput('allow', `Bouncer error: ${message}. Allowing to avoid blocking.`, claudeCode));
   }
 }
 

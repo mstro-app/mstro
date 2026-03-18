@@ -121,7 +121,7 @@ interface ConnectionCallbacks {
   onError?: (error: string) => void
   onWebConnected?: () => void
   onWebDisconnected?: () => void
-  onRelayedMessage?: (message: any) => void
+  onRelayedMessage?: (message: unknown) => void
 }
 
 /**
@@ -351,15 +351,15 @@ export class PlatformConnection {
     }
   }
 
-  private handleMessage(message: any): void {
+  private handleMessage(message: Record<string, unknown>): void {
     switch (message.type) {
       case 'paired':
         this.isConnected = true
-        this.connectionId = message.connectionId
+        this.connectionId = message.connectionId as string
         // Connection status printed by onConnected callback
         // Start heartbeat to keep server-side TTL refreshed
         this.startHeartbeat()
-        this.callbacks.onConnected?.(message.connectionId)
+        this.callbacks.onConnected?.(message.connectionId as string)
         break
 
       case 'web_connected':
@@ -404,7 +404,7 @@ export class PlatformConnection {
   /**
    * Send message to platform (will be relayed to web if connected)
    */
-  send(message: any): void {
+  send(message: unknown): void {
     if (this.ws && this.ws.readyState === WebSocketImpl.OPEN) {
       this.ws.send(JSON.stringify(message))
     }

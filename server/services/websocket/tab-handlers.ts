@@ -11,7 +11,7 @@ export function handleGetActiveTabs(ctx: HandlerContext, ws: WSContext, workingD
   const registry = ctx.getRegistry(workingDir);
   const allTabs = registry.getAllTabs();
 
-  const tabs: Record<string, any> = {};
+  const tabs: Record<string, unknown> = {};
   for (const [tabId, regTab] of Object.entries(allTabs)) {
     const session = ctx.sessions.get(regTab.sessionId);
     if (session) {

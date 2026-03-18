@@ -20,7 +20,7 @@ async function isPortAvailable(port: number): Promise<boolean> {
   return new Promise((resolve) => {
     const server = createServer()
 
-    server.once('error', (err: any) => {
+    server.once('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'EADDRINUSE') {
         resolve(false)
       } else {

@@ -65,7 +65,7 @@ export function initSentry(): void {
   })
 }
 
-export function captureException(error: unknown, context?: Record<string, any>): void {
+export function captureException(error: unknown, context?: Record<string, unknown>): void {
   if (!initialized) return
   Sentry.captureException(error, context ? { extra: context } : undefined)
 }

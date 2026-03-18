@@ -289,14 +289,14 @@ export class AgentManager {
   /**
    * Extract agent names from a score object
    */
-  extractAgentNamesFromScore(score: any): string[] {
+  extractAgentNamesFromScore(score: { movements?: Array<{ musicians?: Array<{ type?: string; config?: { agent?: string }; role?: string }> }> }): string[] {
     if (!Array.isArray(score.movements)) return [];
 
-    const names = (score.movements as any[])
+    const names = score.movements
       .flatMap(m => Array.isArray(m.musicians) ? m.musicians : [])
-      .filter((m: any) => m.type === 'custom')
-      .map((m: any) => m.config?.agent || m.role)
-      .filter(Boolean);
+      .filter(m => m.type === 'custom')
+      .map(m => m.config?.agent || m.role)
+      .filter(Boolean) as string[];
 
     return [...new Set<string>(names)];
   }
@@ -304,7 +304,7 @@ export class AgentManager {
   /**
    * Ensure all agents required by a score are available
    */
-  async ensureScoreAgentsAvailable(score: any, workingDir: string): Promise<Map<string, AgentInfo>> {
+  async ensureScoreAgentsAvailable(score: { movements?: Array<{ musicians?: Array<{ type?: string; config?: { agent?: string }; role?: string }> }> }, workingDir: string): Promise<Map<string, AgentInfo>> {
     const agentNames = this.extractAgentNamesFromScore(score);
     const results = new Map<string, AgentInfo>();
 

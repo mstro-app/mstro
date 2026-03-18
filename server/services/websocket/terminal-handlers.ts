@@ -83,12 +83,12 @@ function handleTerminalInit(
       shell,
       is_reconnect: isReconnect,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error(`[WebSocketImproviseHandler] Failed to create terminal:`, error);
     ctx.send(ws, {
       type: 'terminalError',
       terminalId,
-      data: { error: error.message || 'Failed to create terminal' }
+      data: { error: (error instanceof Error ? error.message : String(error)) || 'Failed to create terminal' }
     });
     removeTerminalSubscriber(ctx, terminalId, ws);
   }

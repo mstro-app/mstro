@@ -12,8 +12,8 @@ import { MCP_SERVER_PATH, MSTRO_ROOT } from '../../utils/paths.js';
 /**
  * Load user's MCP servers from ~/.claude.json (global + project-level)
  */
-function loadUserMcpServers(workingDir: string, verbose: boolean): Record<string, any> {
-  const servers: Record<string, any> = {};
+function loadUserMcpServers(workingDir: string, verbose: boolean): Record<string, unknown> {
+  const servers: Record<string, unknown> = {};
   const claudeConfigPath = join(homedir(), '.claude.json');
 
   if (!existsSync(claudeConfigPath)) {
@@ -29,7 +29,7 @@ function loadUserMcpServers(workingDir: string, verbose: boolean): Record<string
 
     if (claudeConfig.projects && typeof claudeConfig.projects === 'object') {
       for (const [projectPath, projectConfig] of Object.entries(claudeConfig.projects)) {
-        const projectServers = (projectConfig as any)?.mcpServers;
+        const projectServers = (projectConfig as Record<string, unknown>)?.mcpServers;
         if (workingDir.startsWith(projectPath) && typeof projectServers === 'object') {
           Object.assign(servers, projectServers);
         }
@@ -39,8 +39,8 @@ function loadUserMcpServers(workingDir: string, verbose: boolean): Record<string
     if (verbose) {
       console.log(`[${new Date().toISOString()}] Loaded ${Object.keys(servers).length} user MCP servers from ~/.claude.json`);
     }
-  } catch (parseError: any) {
-    console.error(`[${new Date().toISOString()}] Failed to parse ~/.claude.json: ${parseError.message}`);
+  } catch (parseError: unknown) {
+    console.error(`[${new Date().toISOString()}] Failed to parse ~/.claude.json: ${parseError instanceof Error ? parseError.message : String(parseError)}`);
   }
 
   return servers;
@@ -57,7 +57,7 @@ export function generateMcpConfig(workingDir: string, verbose: boolean = false):
       return null;
     }
 
-    const mcpServers: Record<string, any> = {
+    const mcpServers: Record<string, unknown> = {
       'mstro-bouncer': {
         command: 'npx',
         args: ['tsx', MCP_SERVER_PATH],
@@ -80,8 +80,8 @@ export function generateMcpConfig(workingDir: string, verbose: boolean = false):
     }
 
     return configPath;
-  } catch (error: any) {
-    console.error(`[${new Date().toISOString()}] Failed to generate MCP config: ${error.message}`);
+  } catch (error: unknown) {
+    console.error(`[${new Date().toISOString()}] Failed to generate MCP config: ${error instanceof Error ? error.message : String(error)}`);
     return null;
   }
 }

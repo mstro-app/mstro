@@ -90,7 +90,7 @@ export interface BouncerReviewRequest {
     userRequest?: string;
     conversationHistory?: string[];
     sessionId?: string;
-    [key: string]: any;
+    [key: string]: unknown;
   };
 }
 
@@ -135,7 +135,7 @@ function tryExtractJsonBlock(text: string): string {
   return text;
 }
 
-function validateDecision(parsed: any): BouncerDecision {
+function validateDecision(parsed: Record<string, unknown>): BouncerDecision {
   if (!parsed || typeof parsed.decision !== 'string') {
     console.error('[Bouncer] Invalid parsed response:', parsed);
     throw new Error('Haiku returned invalid response: missing or invalid decision field');
@@ -148,11 +148,11 @@ function validateDecision(parsed: any): BouncerDecision {
   }
 
   return {
-    decision: parsed.decision,
-    confidence: parsed.confidence || 0,
-    reasoning: parsed.reasoning || 'No reasoning provided',
-    threatLevel: parsed.threat_level || 'medium',
-    alternative: parsed.alternative
+    decision: parsed.decision as BouncerDecision['decision'],
+    confidence: (parsed.confidence as number) || 0,
+    reasoning: (parsed.reasoning as string) || 'No reasoning provided',
+    threatLevel: (parsed.threat_level as BouncerDecision['threatLevel']) || 'medium',
+    alternative: parsed.alternative as string | undefined
   };
 }
 
@@ -258,9 +258,9 @@ or
       try {
         const decision = parseHaikuResponse(output.trim());
         resolve(decision);
-      } catch (error: any) {
+      } catch (error: unknown) {
         console.error('[Bouncer] Parse error details:', error);
-        reject(new Error(`Failed to parse Haiku response: ${error.message}`));
+        reject(new Error(`Failed to parse Haiku response: ${error instanceof Error ? error.message : String(error)}`));
       }
     });
 
@@ -490,9 +490,10 @@ export async function reviewOperation(request: BouncerReviewRequest): Promise<Bo
     cacheDecision(operation, decision);
     return decision;
 
-  } catch (error: any) {
+  } catch (error: unknown) {
     const latencyMs = Math.round(performance.now() - startTime);
-    const isTimeout = error.message?.includes('timed out');
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const isTimeout = errorMessage.includes('timed out');
 
     if (isTimeout) {
       // Timeout: default to ALLOW — prefer availability over security stall,
@@ -512,7 +513,7 @@ export async function reviewOperation(request: BouncerReviewRequest): Promise<Bo
         decision.decision,
         decision.confidence,
         decision.reasoning,
-        { context: request.context, threatLevel: decision.threatLevel, layer: 'haiku-timeout', latencyMs, error: error.message }
+        { context: request.context, threatLevel: decision.threatLevel, layer: 'haiku-timeout', latencyMs, error: errorMessage }
       );
       trackEvent(AnalyticsEvents.BOUNCER_TOOL_ALLOWED, {
         layer: 'haiku-timeout',
@@ -525,14 +526,14 @@ export async function reviewOperation(request: BouncerReviewRequest): Promise<Bo
       return decision;
     }
 
-    console.error(`[Bouncer] ⚠️  Haiku analysis failed: ${error.message}`);
+    console.error(`[Bouncer] ⚠️  Haiku analysis failed: ${errorMessage}`);
     captureException(error, { context: 'bouncer.haiku_analysis', operation });
 
     // Fail-safe: deny on non-timeout AI failure
     const decision: BouncerDecision = {
       decision: 'deny',
       confidence: 0,
-      reasoning: `Security analysis failed: ${error.message}. Denying for safety.`,
+      reasoning: `Security analysis failed: ${errorMessage}. Denying for safety.`,
       threatLevel: 'critical'
     };
 
@@ -541,7 +542,7 @@ export async function reviewOperation(request: BouncerReviewRequest): Promise<Bo
       decision.decision,
       decision.confidence,
       decision.reasoning,
-      { context: request.context, threatLevel: decision.threatLevel, layer: 'ai-error', latencyMs, error: error.message }
+      { context: request.context, threatLevel: decision.threatLevel, layer: 'ai-error', latencyMs, error: errorMessage }
     );
 
     return decision;

@@ -44,7 +44,7 @@ function handleReadFile(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessag
   ctx.send(ws, { type: 'fileContent', tabId, data: readFileContent(msg.data.filePath, workingDir) });
 }
 
-function sendFileResult(ctx: HandlerContext, ws: WSContext, type: WebSocketResponse['type'], tabId: string, result: any, successData?: Record<string, any>): void {
+function sendFileResult(ctx: HandlerContext, ws: WSContext, type: WebSocketResponse['type'], tabId: string, result: { success: boolean; path?: string; error?: string }, successData?: Record<string, unknown>): void {
   const data = result.success
     ? { success: true, path: result.path, ...successData }
     : { success: false, path: result.path, error: result.error };

@@ -49,8 +49,8 @@ async function handleGitGetRemoteInfo(ctx: HandlerContext, ws: WSContext, tabId:
         preferredBaseBranch,
       },
     });
-  } catch (error: any) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+  } catch (error: unknown) {
+    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
   }
 }
 
@@ -171,8 +171,8 @@ async function handleGitCreatePR(ctx: HandlerContext, ws: WSContext, msg: WebSoc
     } else {
       ctx.send(ws, { type: 'gitError', tabId, data: { error: 'Could not determine remote URL format for PR creation' } });
     }
-  } catch (error: any) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+  } catch (error: unknown) {
+    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
   }
 }
 
@@ -357,7 +357,7 @@ Respond with ONLY the title and description, nothing else.`;
 
     setTimeout(() => { claude.kill(); }, 30000);
 
-  } catch (error: any) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+  } catch (error: unknown) {
+    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
   }
 }

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { HeadlessRunner } from './runner.js';
 
 // Mock executeClaudeCommand to prevent actual process spawning
@@ -14,7 +14,7 @@ describe('HeadlessRunner', () => {
   describe('constructor', () => {
     it('sets default config values', () => {
       const runner = new HeadlessRunner({});
-      // Access private config via type assertion for testing
+      // biome-ignore lint/suspicious/noExplicitAny: accessing private member for testing
       const config = (runner as any).config;
       expect(config.workingDir).toBe(process.cwd());
       expect(config.tokenBudgetThreshold).toBe(170000);
@@ -30,6 +30,7 @@ describe('HeadlessRunner', () => {
         verbose: true,
         model: 'opus',
       });
+      // biome-ignore lint/suspicious/noExplicitAny: accessing private member for testing
       const config = (runner as any).config;
       expect(config.workingDir).toBe('/tmp/test');
       expect(config.verbose).toBe(true);
@@ -40,7 +41,8 @@ describe('HeadlessRunner', () => {
   describe('cleanup', () => {
     it('sends SIGTERM to all tracked processes', () => {
       const runner = new HeadlessRunner({});
-      const processes = (runner as any).runningProcesses as Map<number, any>;
+      // biome-ignore lint/suspicious/noExplicitAny: accessing private member for testing
+      const processes = (runner as any).runningProcesses as Map<number, unknown>;
 
       const mockProc1 = { kill: vi.fn(), killed: false, exitCode: null };
       const mockProc2 = { kill: vi.fn(), killed: false, exitCode: null };
@@ -63,7 +65,8 @@ describe('HeadlessRunner', () => {
   describe('sweepZombies', () => {
     it('removes processes that have exited', () => {
       const runner = new HeadlessRunner({});
-      const processes = (runner as any).runningProcesses as Map<number, any>;
+      // biome-ignore lint/suspicious/noExplicitAny: accessing private member for testing
+      const processes = (runner as any).runningProcesses as Map<number, unknown>;
 
       // Process that has exited
       processes.set(1, { exitCode: 0, killed: false });
@@ -80,7 +83,8 @@ describe('HeadlessRunner', () => {
 
     it('returns 0 when no zombies', () => {
       const runner = new HeadlessRunner({});
-      const processes = (runner as any).runningProcesses as Map<number, any>;
+      // biome-ignore lint/suspicious/noExplicitAny: accessing private member for testing
+      const processes = (runner as any).runningProcesses as Map<number, unknown>;
       processes.set(1, { exitCode: null, killed: false });
 
       expect(runner.sweepZombies()).toBe(0);

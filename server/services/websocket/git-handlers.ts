@@ -270,8 +270,8 @@ export async function handleGitStatus(ctx: HandlerContext, ws: WSContext, tabId:
     };
 
     ctx.send(ws, { type: 'gitStatus', tabId, data: response });
-  } catch (error: any) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+  } catch (error: unknown) {
+    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
   }
 }
 
@@ -293,8 +293,8 @@ async function handleGitStage(ctx: HandlerContext, ws: WSContext, msg: WebSocket
     }
 
     ctx.send(ws, { type: 'gitStaged', tabId, data: { paths: paths || [] } });
-  } catch (error: any) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+  } catch (error: unknown) {
+    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
   }
 }
 
@@ -313,8 +313,8 @@ async function handleGitUnstage(ctx: HandlerContext, ws: WSContext, msg: WebSock
     }
 
     ctx.send(ws, { type: 'gitUnstaged', tabId, data: { paths } });
-  } catch (error: any) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+  } catch (error: unknown) {
+    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
   }
 }
 
@@ -342,8 +342,8 @@ async function handleGitCommit(ctx: HandlerContext, ws: WSContext, msg: WebSocke
 
     ctx.send(ws, { type: 'gitCommitted', tabId, data: { hash, message } });
     handleGitStatus(ctx, ws, tabId, workingDir);
-  } catch (error: any) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+  } catch (error: unknown) {
+    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
   }
 }
 
@@ -463,8 +463,8 @@ Respond with ONLY the commit message, nothing else.`;
       claude.kill();
     }, 30000);
 
-  } catch (error: any) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+  } catch (error: unknown) {
+    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
   }
 }
 
@@ -539,8 +539,8 @@ async function handleGitPush(ctx: HandlerContext, ws: WSContext, tabId: string, 
     }
 
     ctx.send(ws, { type: 'gitPushed', tabId, data: { output: result.stdout || result.stderr } });
-  } catch (error: any) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+  } catch (error: unknown) {
+    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
   }
 }
 
@@ -553,8 +553,8 @@ async function handleGitPull(ctx: HandlerContext, ws: WSContext, tabId: string, 
     }
 
     ctx.send(ws, { type: 'gitPulled', tabId, data: { output: result.stdout || result.stderr } });
-  } catch (error: any) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+  } catch (error: unknown) {
+    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
   }
 }
 
@@ -580,8 +580,8 @@ async function handleGitLog(ctx: HandlerContext, ws: WSContext, msg: WebSocketMe
     });
 
     ctx.send(ws, { type: 'gitLog', tabId, data: { entries } });
-  } catch (error: any) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+  } catch (error: unknown) {
+    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
   }
 }
 
@@ -643,8 +643,8 @@ async function handleGitDiscoverRepos(ctx: HandlerContext, ws: WSContext, tabId:
     };
 
     ctx.send(ws, { type: 'gitReposDiscovered', tabId, data: response });
-  } catch (error: any) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+  } catch (error: unknown) {
+    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
   }
 }
 
@@ -712,8 +712,8 @@ async function handleGitListBranches(ctx: HandlerContext, ws: WSContext, tabId: 
       .filter(b => b.name !== 'origin/HEAD');
 
     ctx.send(ws, { type: 'gitBranchList', tabId, data: { branches, current: currentBranch } });
-  } catch (error: any) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+  } catch (error: unknown) {
+    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
   }
 }
 
@@ -746,8 +746,8 @@ async function handleGitCheckout(ctx: HandlerContext, ws: WSContext, msg: WebSoc
 
     ctx.send(ws, { type: 'gitCheckedOut', tabId, data: { branch, previous } });
     handleGitStatus(ctx, ws, tabId, workingDir);
-  } catch (error: any) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+  } catch (error: unknown) {
+    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
   }
 }
 
@@ -773,8 +773,8 @@ async function handleGitCreateBranch(ctx: HandlerContext, ws: WSContext, msg: We
     }
 
     ctx.send(ws, { type: 'gitBranchCreated', tabId, data: { name, hash: hashResult.stdout.trim() } });
-  } catch (error: any) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+  } catch (error: unknown) {
+    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
   }
 }
 
@@ -799,8 +799,8 @@ async function handleGitDeleteBranch(ctx: HandlerContext, ws: WSContext, msg: We
     }
 
     ctx.send(ws, { type: 'gitBranchDeleted', tabId, data: { name } });
-  } catch (error: any) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+  } catch (error: unknown) {
+    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
   }
 }
 
@@ -833,8 +833,8 @@ async function handleGitDiff(ctx: HandlerContext, ws: WSContext, msg: WebSocketM
       tabId,
       data: { path, original, modified, staged: !!staged },
     });
-  } catch (error: any) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+  } catch (error: unknown) {
+    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
   }
 }
 
@@ -863,8 +863,8 @@ async function handleGitListTags(ctx: HandlerContext, ws: WSContext, tabId: stri
       });
 
     ctx.send(ws, { type: 'gitTagList', tabId, data: { tags } });
-  } catch (error: any) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+  } catch (error: unknown) {
+    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
   }
 }
 
@@ -893,8 +893,8 @@ async function handleGitCreateTag(ctx: HandlerContext, ws: WSContext, msg: WebSo
 
     const hashResult = await executeGitCommand(['rev-parse', '--short', name], workingDir);
     ctx.send(ws, { type: 'gitTagCreated', tabId, data: { name, hash: hashResult.stdout.trim() } });
-  } catch (error: any) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+  } catch (error: unknown) {
+    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
   }
 }
 
@@ -918,7 +918,7 @@ async function handleGitPushTag(ctx: HandlerContext, ws: WSContext, msg: WebSock
     }
 
     ctx.send(ws, { type: 'gitTagPushed', tabId, data: { name: name || 'all', output: result.stderr || result.stdout } });
-  } catch (error: any) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error.message } });
+  } catch (error: unknown) {
+    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
   }
 }

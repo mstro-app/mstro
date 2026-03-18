@@ -43,10 +43,10 @@ class MockWebSocket extends EventEmitter {
 
   public readyState: number = MockWebSocket.CONNECTING
   public url: string
-  public onopen: ((event: any) => void) | null = null
-  public onclose: ((event: any) => void) | null = null
-  public onerror: ((event: any) => void) | null = null
-  public onmessage: ((event: any) => void) | null = null
+  public onopen: ((event: Event) => void) | null = null
+  public onclose: ((event: CloseEvent) => void) | null = null
+  public onerror: ((event: Event) => void) | null = null
+  public onmessage: ((event: MessageEvent) => void) | null = null
 
   constructor(url: string) {
     super()
@@ -60,7 +60,7 @@ class MockWebSocket extends EventEmitter {
   close(): void {
     this.readyState = MockWebSocket.CLOSED
     if (this.onclose) {
-      this.onclose({ code: 1000, reason: 'Normal closure' })
+      this.onclose({ code: 1000, reason: 'Normal closure' } as CloseEvent)
     }
   }
 
@@ -68,26 +68,26 @@ class MockWebSocket extends EventEmitter {
   triggerOpen(): void {
     this.readyState = MockWebSocket.OPEN
     if (this.onopen) {
-      this.onopen({})
+      this.onopen({} as Event)
     }
   }
 
-  triggerMessage(data: any): void {
+  triggerMessage(data: unknown): void {
     if (this.onmessage) {
-      this.onmessage({ data: JSON.stringify(data) })
+      this.onmessage({ data: JSON.stringify(data) } as MessageEvent)
     }
   }
 
   triggerClose(code: number = 1000, reason: string = ''): void {
     this.readyState = MockWebSocket.CLOSED
     if (this.onclose) {
-      this.onclose({ code, reason })
+      this.onclose({ code, reason } as CloseEvent)
     }
   }
 
   triggerError(): void {
     if (this.onerror) {
-      this.onerror({})
+      this.onerror({} as Event)
     }
   }
 }
@@ -100,6 +100,7 @@ function createMockWebSocket(url: string): MockWebSocket {
   return lastWebSocketInstance
 }
 
+// biome-ignore lint/suspicious/noExplicitAny: mock constructor needs static properties
 const WebSocketConstructor = vi.fn(createMockWebSocket) as any
 WebSocketConstructor.OPEN = MockWebSocket.OPEN
 WebSocketConstructor.CONNECTING = MockWebSocket.CONNECTING
@@ -121,6 +122,7 @@ vi.mock('undici', () => ({
 mockOs.homedir.mockReturnValue('/home/testuser')
 
 // Set global WebSocket to the mock constructor so platform.ts uses it directly
+// biome-ignore lint/suspicious/noExplicitAny: assigning mock to global WebSocket for testing
 ;(global as any).WebSocket = WebSocketConstructor
 
 // Now import the module under test
@@ -909,7 +911,7 @@ describe('Platform Connection Service', () => {
 
       // Manually trigger with invalid JSON
       if (lastWebSocketInstance!.onmessage) {
-        lastWebSocketInstance!.onmessage({ data: 'invalid json {' } as any)
+        lastWebSocketInstance!.onmessage({ data: 'invalid json {' } as MessageEvent)
       }
 
       expect(console.error).toHaveBeenCalledWith(
@@ -942,6 +944,7 @@ describe('Platform Connection Service', () => {
       mockFs.existsSync.mockReturnValue(true)
       mockFs.readFileSync.mockReturnValue(JSON.stringify(credentials))
 
+      // biome-ignore lint/suspicious/noExplicitAny: accessing mock methods on fetch for testing
       const mockFetch = global.fetch as any
       mockFetch.mockResolvedValue({
         ok: true,
@@ -980,6 +983,7 @@ describe('Platform Connection Service', () => {
       mockFs.existsSync.mockReturnValue(true)
       mockFs.readFileSync.mockReturnValue(JSON.stringify(credentials))
 
+      // biome-ignore lint/suspicious/noExplicitAny: accessing mock methods on fetch for testing
       const mockFetch = global.fetch as any
       mockFetch.mockResolvedValue({
         ok: true,
@@ -1041,6 +1045,7 @@ describe('Platform Connection Service', () => {
       mockFs.existsSync.mockReturnValue(true)
       mockFs.readFileSync.mockReturnValue(JSON.stringify(credentials))
 
+      // biome-ignore lint/suspicious/noExplicitAny: accessing mock methods on fetch for testing
       const mockFetch = global.fetch as any
       mockFetch.mockResolvedValue({
         ok: true,
@@ -1075,6 +1080,7 @@ describe('Platform Connection Service', () => {
       mockFs.existsSync.mockReturnValue(true)
       mockFs.readFileSync.mockReturnValue(JSON.stringify(credentials))
 
+      // biome-ignore lint/suspicious/noExplicitAny: accessing mock methods on fetch for testing
       const mockFetch = global.fetch as any
       mockFetch.mockResolvedValue({
         ok: false,
@@ -1109,6 +1115,7 @@ describe('Platform Connection Service', () => {
       mockFs.existsSync.mockReturnValue(true)
       mockFs.readFileSync.mockReturnValue(JSON.stringify(credentials))
 
+      // biome-ignore lint/suspicious/noExplicitAny: accessing mock methods on fetch for testing
       const mockFetch = global.fetch as any
       mockFetch.mockRejectedValue(new Error('Network error'))
 
@@ -1142,6 +1149,7 @@ describe('Platform Connection Service', () => {
 
       lastWebSocketInstance!.triggerOpen()
 
+      // biome-ignore lint/suspicious/noExplicitAny: accessing mock methods on fetch for testing
       const mockFetch = global.fetch as any
       mockFetch.mockClear()
 

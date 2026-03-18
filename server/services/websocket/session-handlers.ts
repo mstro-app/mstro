@@ -10,8 +10,8 @@ import type { SessionRegistry } from './session-registry.js';
 import type { WebSocketMessage, WSContext } from './types.js';
 
 /** Convert tool history entries into OutputLine-compatible lines */
-function convertToolHistoryToLines(tools: any[], ts: number): any[] {
-  const lines: any[] = [];
+function convertToolHistoryToLines(tools: Array<{ toolName: string; toolInput?: Record<string, unknown>; result?: string; isError?: boolean }>, ts: number): Array<Record<string, unknown>> {
+  const lines: Array<Record<string, unknown>> = [];
   for (const tool of tools) {
     lines.push({ type: 'tool-call', text: '', toolName: tool.toolName, toolInput: tool.toolInput || {}, timestamp: ts });
     if (tool.result !== undefined) {
@@ -22,8 +22,8 @@ function convertToolHistoryToLines(tools: any[], ts: number): any[] {
 }
 
 /** Convert a single movement record into OutputLine-compatible entries */
-function convertMovementToLines(movement: { userPrompt: string; timestamp: string; thinkingOutput?: string; toolUseHistory?: any[]; assistantResponse?: string; errorOutput?: string; tokensUsed: number; durationMs?: number }): any[] {
-  const lines: any[] = [];
+function convertMovementToLines(movement: { userPrompt: string; timestamp: string; thinkingOutput?: string; toolUseHistory?: Array<{ toolName: string; toolInput?: Record<string, unknown>; result?: string; isError?: boolean }>; assistantResponse?: string; errorOutput?: string; tokensUsed: number; durationMs?: number }): Array<Record<string, unknown>> {
+  const lines: Array<Record<string, unknown>> = [];
   const ts = new Date(movement.timestamp).getTime();
 
   lines.push({ type: 'user', text: movement.userPrompt, timestamp: ts });
@@ -67,7 +67,7 @@ function getSession(ctx: HandlerContext, ws: WSContext, tabId: string): Improvis
   return ctx.sessions.get(sessionId) || null;
 }
 
-export function buildOutputHistory(session: ImprovisationSessionManager): any[] {
+export function buildOutputHistory(session: ImprovisationSessionManager): Array<Record<string, unknown>> {
   const history = session.getHistory();
   return history.movements.flatMap(convertMovementToLines);
 }
@@ -88,7 +88,7 @@ export function setupSessionListeners(ctx: HandlerContext, session: Improvisatio
     ctx.broadcastToAll({ type: 'tabStateChanged', data: { tabId, isExecuting: true, executionStartTimestamp: session.executionStartTimestamp } });
   });
 
-  session.on('onMovementComplete', (movement: any) => {
+  session.on('onMovementComplete', (movement: Record<string, unknown>) => {
     ctx.send(ws, { type: 'movementComplete', tabId, data: movement });
 
     const registry = ctx.getRegistry('');
@@ -99,7 +99,7 @@ export function setupSessionListeners(ctx: HandlerContext, session: Improvisatio
 
     if (ctx.usageReporter && movement.tokensUsed) {
       ctx.usageReporter({
-        tokensUsed: movement.tokensUsed,
+        tokensUsed: movement.tokensUsed as number,
         sessionId: session.getSessionInfo().sessionId,
         movementId: `${movement.sequenceNumber}`
       });
@@ -111,15 +111,15 @@ export function setupSessionListeners(ctx: HandlerContext, session: Improvisatio
     ctx.broadcastToAll({ type: 'tabStateChanged', data: { tabId, isExecuting: false } });
   });
 
-  session.on('onSessionUpdate', (history: any) => {
+  session.on('onSessionUpdate', (history: Record<string, unknown>) => {
     ctx.send(ws, { type: 'sessionUpdate', tabId, data: history });
   });
 
-  session.on('onPlanNeedsConfirmation', (plan: any) => {
+  session.on('onPlanNeedsConfirmation', (plan: Record<string, unknown>) => {
     ctx.send(ws, { type: 'approvalRequired', tabId, data: plan });
   });
 
-  session.on('onToolUse', (event: any) => {
+  session.on('onToolUse', (event: Record<string, unknown>) => {
     ctx.send(ws, { type: 'toolUse', tabId, data: { ...event, timestamp: Date.now() } });
   });
 
@@ -163,13 +163,13 @@ export function handleSessionMessage(ctx: HandlerContext, ws: WSContext, msg: We
     }
     case 'approve': {
       const session = requireSession(ctx, ws, tabId);
-      (session as any).respondToApproval?.(true);
+      session.respondToApproval(true);
       ctx.send(ws, { type: 'output', tabId, data: { text: '\n✅ Approved - proceeding with operation\n' } });
       break;
     }
     case 'reject': {
       const session = requireSession(ctx, ws, tabId);
-      (session as any).respondToApproval?.(false);
+      session.respondToApproval(false);
       ctx.send(ws, { type: 'output', tabId, data: { text: '\n🚫 Rejected - operation cancelled\n' } });
       break;
     }
@@ -309,8 +309,8 @@ export async function resumeHistoricalSession(
 
   try {
     session = ImprovisationSessionManager.resumeFromHistory(workingDir, historicalSessionId, { model: getModel() });
-  } catch (error: any) {
-    console.warn(`[WebSocketImproviseHandler] Could not resume session ${historicalSessionId}: ${error.message}. Creating new session.`);
+  } catch (error: unknown) {
+    console.warn(`[WebSocketImproviseHandler] Could not resume session ${historicalSessionId}: ${error instanceof Error ? error.message : String(error)}. Creating new session.`);
     session = new ImprovisationSessionManager({ workingDir, model: getModel() });
     isNewSession = true;
   }
@@ -381,7 +381,7 @@ function getSessionsCount(workingDir: string): number {
   return readdirSync(sessionsDir).filter((name: string) => name.endsWith('.json')).length;
 }
 
-function getSessionsList(workingDir: string, limit: number = 20, offset: number = 0): { sessions: any[]; total: number; hasMore: boolean } {
+function getSessionsList(workingDir: string, limit: number = 20, offset: number = 0): { sessions: Array<Record<string, unknown> | null>; total: number; hasMore: boolean } {
   const sessionsDir = join(workingDir, '.mstro', 'history');
 
   if (!existsSync(sessionsDir)) {
@@ -405,8 +405,8 @@ function getSessionsList(workingDir: string, limit: number = 20, offset: number 
       const historyData = JSON.parse(readFileSync(historyPath, 'utf-8'));
       const firstPrompt = historyData.movements?.[0]?.userPrompt || '';
 
-      const movementPreviews = (historyData.movements || []).slice(0, 3).map((m: any) => ({
-        userPrompt: m.userPrompt?.slice(0, 100) || ''
+      const movementPreviews = (historyData.movements || []).slice(0, 3).map((m: Record<string, unknown>) => ({
+        userPrompt: (typeof m.userPrompt === 'string' ? m.userPrompt : '').slice(0, 100) || ''
       }));
 
       return {
@@ -426,7 +426,7 @@ function getSessionsList(workingDir: string, limit: number = 20, offset: number 
   return { sessions, total, hasMore: offset + limit < total };
 }
 
-function getSessionById(workingDir: string, sessionId: string): any {
+function getSessionById(workingDir: string, sessionId: string): Record<string, unknown> | null {
   const sessionsDir = join(workingDir, '.mstro', 'history');
   if (!existsSync(sessionsDir)) return null;
 
@@ -508,32 +508,33 @@ function clearAllSessions(workingDir: string): { success: boolean; deletedCount:
   }
 }
 
-function movementMatchesQuery(movements: any[] | undefined, lowerQuery: string): boolean {
+function movementMatchesQuery(movements: Array<Record<string, unknown>> | undefined, lowerQuery: string): boolean {
   if (!movements) return false;
-  return movements.some((m: any) =>
-    m.userPrompt?.toLowerCase().includes(lowerQuery) ||
-    m.summary?.toLowerCase().includes(lowerQuery) ||
-    m.assistantResponse?.toLowerCase().includes(lowerQuery)
+  return movements.some((m: Record<string, unknown>) =>
+    (typeof m.userPrompt === 'string' && m.userPrompt.toLowerCase().includes(lowerQuery)) ||
+    (typeof m.summary === 'string' && m.summary.toLowerCase().includes(lowerQuery)) ||
+    (typeof m.assistantResponse === 'string' && m.assistantResponse.toLowerCase().includes(lowerQuery))
   );
 }
 
-function buildSessionSummary(historyData: any): any {
-  const firstPrompt = historyData.movements?.[0]?.userPrompt || '';
-  const movementPreviews = (historyData.movements || []).slice(0, 3).map((m: any) => ({
-    userPrompt: m.userPrompt?.slice(0, 100) || ''
+function buildSessionSummary(historyData: Record<string, unknown>): Record<string, unknown> {
+  const movements = historyData.movements as Array<Record<string, unknown>> | undefined;
+  const firstPrompt = (typeof movements?.[0]?.userPrompt === 'string' ? movements[0].userPrompt : '') || '';
+  const movementPreviews = (movements || []).slice(0, 3).map((m: Record<string, unknown>) => ({
+    userPrompt: (typeof m.userPrompt === 'string' ? m.userPrompt : '').slice(0, 100) || ''
   }));
   return {
     sessionId: historyData.sessionId,
     startedAt: historyData.startedAt,
     lastActivityAt: historyData.lastActivityAt,
     totalTokens: historyData.totalTokens,
-    movementCount: historyData.movements?.length || 0,
+    movementCount: movements?.length || 0,
     title: firstPrompt.slice(0, 80) + (firstPrompt.length > 80 ? '...' : ''),
     movements: movementPreviews
   };
 }
 
-function searchSessions(workingDir: string, query: string, limit: number = 20, offset: number = 0): { sessions: any[]; total: number; hasMore: boolean } {
+function searchSessions(workingDir: string, query: string, limit: number = 20, offset: number = 0): { sessions: Array<Record<string, unknown>>; total: number; hasMore: boolean } {
   const sessionsDir = join(workingDir, '.mstro', 'history');
   if (!existsSync(sessionsDir)) return { sessions: [], total: 0, hasMore: false };
 
@@ -548,7 +549,7 @@ function searchSessions(workingDir: string, query: string, limit: number = 20, o
         return timestampB - timestampA;
       });
 
-    const allMatches: any[] = [];
+    const allMatches: Array<Record<string, unknown>> = [];
     for (const filename of historyFiles) {
       try {
         const content = readFileSync(join(sessionsDir, filename), 'utf-8');

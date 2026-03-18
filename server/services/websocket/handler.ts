@@ -103,12 +103,12 @@ export class WebSocketImproviseHandler implements HandlerContext {
       delete msg._permission;
 
       await this.dispatchMessage(ws, msg, tabId, workingDir, permission);
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('[WebSocketImproviseHandler] Error handling message:', error);
       captureException(error, { context: 'websocket.handleMessage' });
       this.send(ws, {
         type: 'error',
-        data: { message: error.message }
+        data: { message: error instanceof Error ? error.message : String(error) }
       });
     }
   }

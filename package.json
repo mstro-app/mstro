@@ -36,7 +36,9 @@
     "!**/*.backup",
     "!**/*.bak",
     "!**/.env",
-    "!**/.env.*"
+    "!**/.env.*",
+    "!**/*.test.ts",
+    "!**/*.spec.ts"
   ],
   "scripts": {
     "postinstall": "node bin/postinstall.js",

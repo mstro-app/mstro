@@ -71,12 +71,12 @@ export function validatePathWithinWorkingDir(
       valid: true,
       resolvedPath
     };
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('[PathUtils] Error validating path:', error);
     return {
       valid: false,
       resolvedPath: '',
-      error: `Invalid path: ${error.message}`
+      error: `Invalid path: ${error instanceof Error ? error.message : String(error)}`
     };
   }
 }

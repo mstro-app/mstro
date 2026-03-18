@@ -114,7 +114,7 @@ export class ImprovisationSessionManager extends EventEmitter {
   private currentRunner: HeadlessRunner | null = null;
   private options: ImprovisationOptions;
   private pendingApproval?: {
-    plan: any;
+    plan: unknown;
     resolve: (approved: boolean) => void;
   };
   private outputQueue: Array<{ text: string; timestamp: number }> = [];
@@ -129,7 +129,7 @@ export class ImprovisationSessionManager extends EventEmitter {
   /** Timestamp when current execution started (for accurate elapsed time across reconnects) */
   private _executionStartTimestamp: number | undefined;
   /** Buffered events during current execution, for replay on reconnect */
-  private executionEventLog: Array<{ type: string; data: any; timestamp: number }> = [];
+  private executionEventLog: Array<{ type: string; data: unknown; timestamp: number }> = [];
   /** Set by cancel() to signal the retry loop to exit */
   private _cancelled: boolean = false;
 
@@ -383,19 +383,20 @@ export class ImprovisationSessionManager extends EventEmitter {
       this.emitMovementComplete(movement, result, _execStart, sequenceNumber);
       return movement;
 
-    } catch (error: any) {
+    } catch (error: unknown) {
       this._isExecuting = false;
       this._executionStartTimestamp = undefined;
       this.executionEventLog = [];
       this.currentRunner = null;
       this.emit('onMovementError', error);
+      const errorMessage = error instanceof Error ? error.message : String(error);
       trackEvent(AnalyticsEvents.IMPROVISE_MOVEMENT_ERROR, {
-        error_message: error.message?.slice(0, 200),
+        error_message: errorMessage.slice(0, 200),
         sequence_number: this.history.movements.length + 1,
         duration_ms: Date.now() - _execStart,
         model: this.options.model || 'default',
       });
-      this.queueOutput(`\n❌ Error: ${error.message}\n`);
+      this.queueOutput(`\n❌ Error: ${errorMessage}\n`);
       this.flushOutputQueue();
       throw error;
     } finally {
@@ -1510,7 +1511,7 @@ export class ImprovisationSessionManager extends EventEmitter {
    * Request user approval for a plan
    * Returns a promise that resolves when the user approves/rejects
    */
-  async requestApproval(plan: any): Promise<boolean> {
+  async requestApproval(plan: unknown): Promise<boolean> {
     return new Promise((resolve) => {
       this.pendingApproval = { plan, resolve };
       this.emit('onApprovalRequired', plan);
@@ -1559,7 +1560,7 @@ export class ImprovisationSessionManager extends EventEmitter {
    * Get buffered execution events for replay on reconnect.
    * Only meaningful while isExecuting is true.
    */
-  getExecutionEventLog(): Array<{ type: string; data: any; timestamp: number }> {
+  getExecutionEventLog(): Array<{ type: string; data: unknown; timestamp: number }> {
     return this.executionEventLog;
   }
 

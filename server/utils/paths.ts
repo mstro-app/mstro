@@ -29,17 +29,3 @@ export const MSTRO_ROOT = resolve(__dirname, '../..');
  */
 export const MCP_SERVER_PATH = resolve(MSTRO_ROOT, 'server/mcp/server.ts');
 
-/**
- * Path to the MCP bouncer configuration template
- */
-export const MCP_CONFIG_TEMPLATE_PATH = resolve(MSTRO_ROOT, 'mstro-bouncer-mcp.json');
-
-/**
- * Path to the hooks directory
- */
-export const HOOKS_DIR = resolve(MSTRO_ROOT, 'hooks');
-
-/**
- * Path to the bouncer hook script
- */
-export const BOUNCER_HOOK = resolve(HOOKS_DIR, 'bouncer.sh');

@@ -93,7 +93,6 @@ server/
 │   ├── server.ts                         # MCP server entry
 │   ├── bouncer-integration.ts            # 2-layer security (patterns + AI)
 │   ├── security-patterns.ts              # Threat pattern matching
-│   ├── bouncer-cli.ts                    # CLI wrapper for hook integration
 │   └── security-audit.ts                 # Audit logging
 └── utils/
     ├── paths.ts                          # Path utilities

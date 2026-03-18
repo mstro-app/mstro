@@ -272,17 +272,49 @@ or
 }
 
 /**
+ * Finalize a bouncer decision: log, track analytics, cache, and return.
+ */
+function finalizeDecision(
+  operation: string,
+  decision: BouncerDecision,
+  layer: string,
+  startTime: number,
+  context: BouncerReviewRequest['context'],
+  logFn: typeof import('./security-audit.js')['logBouncerDecision'],
+  opts?: { error?: string; skipCache?: boolean; skipAnalytics?: boolean },
+): BouncerDecision {
+  const latencyMs = Math.round(performance.now() - startTime);
+
+  logFn(operation, decision.decision, decision.confidence, decision.reasoning, {
+    context, threatLevel: decision.threatLevel, layer, latencyMs, ...(opts?.error && { error: opts.error }),
+  });
+
+  if (!opts?.skipAnalytics) {
+    const event = decision.decision === 'deny' ? AnalyticsEvents.BOUNCER_TOOL_DENIED : AnalyticsEvents.BOUNCER_TOOL_ALLOWED;
+    trackEvent(event, {
+      layer,
+      operation_length: operation.length,
+      threat_level: decision.threatLevel,
+      confidence: decision.confidence,
+      latency_ms: latencyMs,
+    });
+  }
+
+  if (!opts?.skipCache) cacheDecision(operation, decision);
+  return decision;
+}
+
+/**
  * Main bouncer review function - 2-layer hybrid system
  */
 export async function reviewOperation(request: BouncerReviewRequest): Promise<BouncerDecision> {
-  // Import audit logger
   const { logBouncerDecision } = await import('./security-audit.js');
-
   const startTime = performance.now();
-
   const { operation } = request;
+  const fin = (d: BouncerDecision, layer: string, opts?: Parameters<typeof finalizeDecision>[6]) =>
+    finalizeDecision(operation, d, layer, startTime, request.context, logBouncerDecision, opts);
 
-  // Check cache first (pattern-layer decisions and prior Haiku results)
+  // Check cache first
   const cached = getCachedDecision(operation);
   if (cached) {
     console.error(`[Bouncer] ⚡ Cache hit: ${cached.decision} (${cached.confidence}%)`);
@@ -295,257 +327,70 @@ export async function reviewOperation(request: BouncerReviewRequest): Promise<Bo
     console.error(`[Bouncer] User request: ${request.context.userRequest}`);
   }
 
-  // ========================================
-  // PRE-CHECK: Malformed/empty tool calls
-  // ========================================
-  // Empty-param Edit/Write calls are no-ops that will fail validation anyway.
-  // Allow immediately instead of wasting ~8s on Haiku analysis.
+  // PRE-CHECK: Empty-param Edit/Write calls are no-ops — allow immediately
   const toolInput = request.context?.toolInput;
   if (toolInput && typeof toolInput === 'object' && Object.keys(toolInput).length === 0) {
     console.error('[Bouncer] ⚡ Fast path: Empty tool parameters (no-op)');
-    const latencyMs = Math.round(performance.now() - startTime);
-
-    const decision: BouncerDecision = {
-      decision: 'allow',
-      confidence: 95,
-      reasoning: 'Empty tool parameters - operation is a no-op with no side effects.',
-      threatLevel: 'low'
-    };
-
-    logBouncerDecision(
-      operation,
-      decision.decision,
-      decision.confidence,
-      decision.reasoning,
-      { context: request.context, threatLevel: decision.threatLevel, layer: 'pattern-noop', latencyMs }
-    );
-
-    cacheDecision(operation, decision);
-    return decision;
+    return fin({ decision: 'allow', confidence: 95, reasoning: 'Empty tool parameters - operation is a no-op with no side effects.', threatLevel: 'low' }, 'pattern-noop', { skipAnalytics: true });
   }
 
-  // ========================================
   // LAYER 1: Pattern-Based Fast Path (< 5ms)
-  // ========================================
 
-  // Check safe operations FIRST - allows trusted sources (e.g., brew, rustup)
+  // Check safe operations FIRST — allows trusted sources (e.g., brew, rustup)
   // to pass before hitting critical threat patterns like curl|bash
   const safeOperation = matchesPattern(operation, SAFE_OPERATIONS);
   if (safeOperation) {
     console.error('[Bouncer] ⚡ Fast path: Safe operation approved');
-    const latencyMs = Math.round(performance.now() - startTime);
-
-    const decision: BouncerDecision = {
-      decision: 'allow',
-      confidence: 95,
-      reasoning: 'Operation matches known-safe patterns. No security concerns detected.',
-      threatLevel: 'low'
-    };
-
-    logBouncerDecision(
-      operation,
-      decision.decision,
-      decision.confidence,
-      decision.reasoning,
-      { context: request.context, threatLevel: decision.threatLevel, layer: 'pattern-safe', latencyMs }
-    );
-    trackEvent(AnalyticsEvents.BOUNCER_TOOL_ALLOWED, {
-      layer: 'pattern-safe',
-      operation_length: operation.length,
-      threat_level: 'low',
-      confidence: 95,
-      latency_ms: latencyMs,
-    });
-
-    cacheDecision(operation, decision);
-    return decision;
+    return fin({ decision: 'allow', confidence: 95, reasoning: 'Operation matches known-safe patterns. No security concerns detected.', threatLevel: 'low' }, 'pattern-safe');
   }
 
-  // Check critical threats (catastrophic operations like rm -rf /, fork bombs)
-  // These are ALWAYS denied - no context can justify them
+  // Critical threats (rm -rf /, fork bombs) — ALWAYS denied
   const criticalThreat = matchesPattern(operation, CRITICAL_THREATS);
   if (criticalThreat) {
     console.error('[Bouncer] ⚡ Fast path: CRITICAL THREAT detected');
-    const latencyMs = Math.round(performance.now() - startTime);
-
-    const decision: BouncerDecision = {
-      decision: 'deny',
-      confidence: 99,
-      reasoning: `🚨 CRITICAL THREAT: ${criticalThreat.reason}`,
-      threatLevel: 'critical',
+    return fin({
+      decision: 'deny', confidence: 99, reasoning: `🚨 CRITICAL THREAT: ${criticalThreat.reason}`, threatLevel: 'critical',
       alternative: 'This operation should never be performed. If you need to accomplish a specific task, please describe your goal and I can suggest safe alternatives.',
-      enforceable: true
-    };
-
-    logBouncerDecision(
-      operation,
-      decision.decision,
-      decision.confidence,
-      decision.reasoning,
-      { context: request.context, threatLevel: decision.threatLevel, layer: 'pattern-critical', latencyMs }
-    );
-    trackEvent(AnalyticsEvents.BOUNCER_TOOL_DENIED, {
-      layer: 'pattern-critical',
-      operation_length: operation.length,
-      threat_level: 'critical',
-      confidence: 99,
-      latency_ms: latencyMs,
-    });
-
-    cacheDecision(operation, decision);
-    return decision;
+      enforceable: true,
+    }, 'pattern-critical');
   }
 
-  // ========================================
   // LAYER 2: Haiku AI Analysis (~200-500ms)
-  // ========================================
 
-  // Only invoke AI for operations that truly need context
+  // Default allow for operations that don't need AI review
   if (!requiresAIReview(operation)) {
-    // Default allow for operations that don't match any pattern
     console.error('[Bouncer] ⚡ Fast path: No concerning patterns, allowing');
-    const latencyMs = Math.round(performance.now() - startTime);
-
-    const decision: BouncerDecision = {
-      decision: 'allow',
-      confidence: 80,
-      reasoning: 'Operation appears safe based on pattern analysis. No obvious threats detected.',
-      threatLevel: 'low'
-    };
-
-    logBouncerDecision(
-      operation,
-      decision.decision,
-      decision.confidence,
-      decision.reasoning,
-      { context: request.context, threatLevel: decision.threatLevel, layer: 'pattern-default', latencyMs }
-    );
-    trackEvent(AnalyticsEvents.BOUNCER_TOOL_ALLOWED, {
-      layer: 'pattern-default',
-      operation_length: operation.length,
-      threat_level: 'low',
-      confidence: 80,
-      latency_ms: latencyMs,
-    });
-
-    cacheDecision(operation, decision);
-    return decision;
+    return fin({ decision: 'allow', confidence: 80, reasoning: 'Operation appears safe based on pattern analysis. No obvious threats detected.', threatLevel: 'low' }, 'pattern-default');
   }
 
-  // Check if AI analysis is enabled
-  const useAI = process.env.BOUNCER_USE_AI !== 'false';
-
-  if (!useAI) {
+  if (process.env.BOUNCER_USE_AI === 'false') {
     console.error('[Bouncer] AI analysis disabled (BOUNCER_USE_AI=false)');
-    const latencyMs = Math.round(performance.now() - startTime);
-
-    const decision: BouncerDecision = {
-      decision: 'warn_allow',
-      confidence: 60,
-      reasoning: 'Operation requires review but AI analysis is disabled. Proceeding with caution.',
-      threatLevel: 'medium'
-    };
-
-    logBouncerDecision(
-      operation,
-      decision.decision,
-      decision.confidence,
-      decision.reasoning,
-      { context: request.context, threatLevel: decision.threatLevel, layer: 'ai-disabled', latencyMs }
-    );
-
-    return decision;
+    return fin({ decision: 'warn_allow', confidence: 60, reasoning: 'Operation requires review but AI analysis is disabled. Proceeding with caution.', threatLevel: 'medium' }, 'ai-disabled', { skipCache: true, skipAnalytics: true });
   }
 
   console.error('[Bouncer] 🤖 Invoking Haiku for AI analysis...');
-  trackEvent(AnalyticsEvents.BOUNCER_HAIKU_REVIEW, {
-    operation_length: operation.length,
-  });
+  trackEvent(AnalyticsEvents.BOUNCER_HAIKU_REVIEW, { operation_length: operation.length });
 
-  // Get Claude command and working directory from context or use defaults
   const claudeCommand = process.env.CLAUDE_COMMAND || 'claude';
   const workingDir = request.context?.workingDirectory || process.cwd();
 
   try {
     const decision = await analyzeWithHaiku(request, claudeCommand, workingDir);
-    const latencyMs = Math.round(performance.now() - startTime);
-    console.error(`[Bouncer] ✓ Haiku decision: ${decision.decision} (${decision.confidence}% confidence) [${latencyMs}ms]`);
+    console.error(`[Bouncer] ✓ Haiku decision: ${decision.decision} (${decision.confidence}% confidence) [${Math.round(performance.now() - startTime)}ms]`);
     console.error(`[Bouncer] Reasoning: ${decision.reasoning}`);
-
-    logBouncerDecision(
-      operation,
-      decision.decision,
-      decision.confidence,
-      decision.reasoning,
-      { context: request.context, threatLevel: decision.threatLevel, layer: 'haiku-ai', latencyMs }
-    );
-    trackEvent(decision.decision === 'deny' ? AnalyticsEvents.BOUNCER_TOOL_DENIED : AnalyticsEvents.BOUNCER_TOOL_ALLOWED, {
-      layer: 'haiku-ai',
-      operation_length: operation.length,
-      threat_level: decision.threatLevel,
-      confidence: decision.confidence,
-      latency_ms: latencyMs,
-    });
-
-    cacheDecision(operation, decision);
-    return decision;
-
+    return fin(decision, 'haiku-ai');
   } catch (error: unknown) {
-    const latencyMs = Math.round(performance.now() - startTime);
     const errorMessage = error instanceof Error ? error.message : String(error);
-    const isTimeout = errorMessage.includes('timed out');
 
-    if (isTimeout) {
-      // Timeout: default to ALLOW — prefer availability over security stall,
-      // since the user drove the interaction
+    if (errorMessage.includes('timed out')) {
       console.error(`[Bouncer] ⚠️  Haiku analysis timed out after ${HAIKU_TIMEOUT_MS}ms — defaulting to ALLOW`);
       captureException(error, { context: 'bouncer.haiku_timeout', operation });
-
-      const decision: BouncerDecision = {
-        decision: 'allow',
-        confidence: 50,
-        reasoning: `Security analysis timed out after ${HAIKU_TIMEOUT_MS}ms. Defaulting to allow — user initiated the action.`,
-        threatLevel: 'medium'
-      };
-
-      logBouncerDecision(
-        operation,
-        decision.decision,
-        decision.confidence,
-        decision.reasoning,
-        { context: request.context, threatLevel: decision.threatLevel, layer: 'haiku-timeout', latencyMs, error: errorMessage }
-      );
-      trackEvent(AnalyticsEvents.BOUNCER_TOOL_ALLOWED, {
-        layer: 'haiku-timeout',
-        operation_length: operation.length,
-        threat_level: 'medium',
-        confidence: 50,
-        latency_ms: latencyMs,
-      });
-
-      return decision;
+      return fin({ decision: 'allow', confidence: 50, reasoning: `Security analysis timed out after ${HAIKU_TIMEOUT_MS}ms. Defaulting to allow — user initiated the action.`, threatLevel: 'medium' }, 'haiku-timeout', { skipCache: true });
     }
 
     console.error(`[Bouncer] ⚠️  Haiku analysis failed: ${errorMessage}`);
     captureException(error, { context: 'bouncer.haiku_analysis', operation });
-
-    // Fail-safe: deny on non-timeout AI failure
-    const decision: BouncerDecision = {
-      decision: 'deny',
-      confidence: 0,
-      reasoning: `Security analysis failed: ${errorMessage}. Denying for safety.`,
-      threatLevel: 'critical'
-    };
-
-    logBouncerDecision(
-      operation,
-      decision.decision,
-      decision.confidence,
-      decision.reasoning,
-      { context: request.context, threatLevel: decision.threatLevel, layer: 'ai-error', latencyMs, error: errorMessage }
-    );
-
-    return decision;
+    return fin({ decision: 'deny', confidence: 0, reasoning: `Security analysis failed: ${errorMessage}. Denying for safety.`, threatLevel: 'critical' }, 'ai-error', { skipCache: true, skipAnalytics: true, error: errorMessage });
   }
 }
 

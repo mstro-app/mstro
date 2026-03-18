@@ -69,7 +69,6 @@ server/
     server.ts                       # MCP server entry
     bouncer-integration.ts          # 2-layer security (patterns + Haiku AI)
     security-patterns.ts            # Threat pattern matching
-    bouncer-cli.ts                  # CLI for bouncer testing
     security-audit.ts               # Audit logging
   utils/
     paths.ts                        # Path utilities
@@ -79,9 +78,6 @@ bin/
   mstro.js                          # Main CLI entry (npm bin)
   commands/                         # CLI subcommands: login, logout, status, whoami
   postinstall.js                    # Post-install setup
-  configure-claude.js               # Configure Claude hooks
-hooks/
-  bouncer.sh                   # Pre-tool-use security hook for Claude Code
 ```
 
 ## API Endpoints
@@ -92,17 +88,16 @@ hooks/
 
 ## Security Bouncer
 
-2-layer tool approval system for Claude Code:
+2-layer tool approval system for mstro sessions:
 
 1. **Pattern Matching** (<5ms) — Critical threats -> DENY, known-safe -> ALLOW
 2. **Haiku AI Analysis** (~200-500ms) — Context-aware decisions for ambiguous cases
 
-Installed via `hooks/bouncer.sh` -> `~/.claude/hooks/`
+Integrated via MCP in headless sessions. Not active for standalone Claude Code.
 
 ## File Locations
 
 - Client config: `~/.mstro/` (client-id, credentials, session-token, frecency data)
-- Bouncer hook: `~/.claude/hooks/bouncer.sh`
 
 ## Development Notes
 

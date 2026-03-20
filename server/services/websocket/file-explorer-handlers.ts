@@ -74,7 +74,22 @@ export function handleFileExplorerMessage(ctx: HandlerContext, ws: WSContext, ms
     cancelSearch: () => handleCancelSearch(ctx, tabId),
     findDefinition: () => handleFindDefinition(ctx, ws, msg, tabId, workingDir),
   };
-  handlers[msg.type]?.();
+  const handler = handlers[msg.type];
+  if (!handler) return;
+
+  try {
+    handler();
+  } catch (error: unknown) {
+    // Send a domain-specific fileError so the web client can resolve pending
+    // promises instead of letting the generic handler send { type: 'error' }
+    // which no file-explorer listener handles (causing orphaned promises).
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    ctx.send(ws, {
+      type: 'fileError',
+      tabId,
+      data: { operation: msg.type, path: msg.data?.dirPath || msg.data?.filePath || '', error: errorMessage },
+    });
+  }
 }
 
 function handleListDirectory(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): void {

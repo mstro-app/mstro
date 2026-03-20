@@ -390,6 +390,19 @@ function parsePort(args) {
   return null;
 }
 
+// Extract --server / -s value (platform server URL, for local dev/testing)
+// --dev is a shorthand for --server http://localhost:4102
+function parseServerUrl(args) {
+  const serverIndex = args.findIndex(a => a === '--server' || a === '-s');
+  if (serverIndex !== -1 && args[serverIndex + 1]) {
+    return args[serverIndex + 1];
+  }
+  if (args.includes('--dev')) {
+    return 'http://localhost:4102';
+  }
+  return null;
+}
+
 /**
  * Show update notification if available
  */
@@ -468,10 +481,10 @@ async function startServer(envOverrides) {
 
 async function main() {
   const requestedPort = parsePort(args);
-  const isDevMode = args.includes('--dev');
+  const serverUrl = parseServerUrl(args);
   const envOverrides = {
     ...(requestedPort ? { PORT: String(requestedPort) } : {}),
-    ...(isDevMode ? { PLATFORM_URL: 'http://localhost:4102' } : {}),
+    ...(serverUrl ? { PLATFORM_URL: serverUrl } : {}),
   };
 
   const subcommand = args.find(arg => !arg.startsWith('-') && !arg.startsWith('--'));

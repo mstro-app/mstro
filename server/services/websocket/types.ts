@@ -157,6 +157,7 @@ export interface WebSocketResponse {
     | 'contentSearchComplete'
     | 'contentSearchError'
     | 'definitionResult'
+    | 'fileError'
     // Terminal sync response types
     | 'terminalCreated'
     | 'terminalClosed'

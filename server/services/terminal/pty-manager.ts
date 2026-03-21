@@ -102,6 +102,47 @@ export function getPtyInstallInstructions(): string {
 // Import type separately for type-checking (doesn't require the module to load)
 type IPty = import('node-pty').IPty;
 
+/**
+ * Fixed-size buffer that retains the most recent PTY output for replay on reconnect.
+ * Stores raw string chunks and evicts oldest data when the total exceeds maxBytes.
+ */
+class ScrollbackBuffer {
+  private chunks: string[] = [];
+  private totalLength = 0;
+  private maxBytes: number;
+
+  constructor(maxBytes: number) {
+    this.maxBytes = maxBytes;
+  }
+
+  append(data: string): void {
+    this.chunks.push(data);
+    this.totalLength += data.length;
+    // Evict oldest chunks until under budget
+    while (this.totalLength > this.maxBytes && this.chunks.length > 1) {
+      const removed = this.chunks.shift()!;
+      this.totalLength -= removed.length;
+    }
+    // If a single chunk exceeds max, truncate from the front
+    if (this.totalLength > this.maxBytes && this.chunks.length === 1) {
+      const excess = this.totalLength - this.maxBytes;
+      this.chunks[0] = this.chunks[0].slice(excess);
+      this.totalLength = this.chunks[0].length;
+    }
+  }
+
+  getContents(): string {
+    return this.chunks.join('');
+  }
+
+  clear(): void {
+    this.chunks = [];
+    this.totalLength = 0;
+  }
+}
+
+const SCROLLBACK_MAX_BYTES = 256 * 1024; // 256KB
+
 export interface PTYSession {
   id: string;
   pty: IPty;
@@ -117,6 +158,8 @@ export interface PTYSession {
   // Output coalescing: buffer small chunks into fewer WS messages
   _outputBuffer: string;
   _outputTimer: ReturnType<typeof setTimeout> | null;
+  // Scrollback ring buffer for replay on reconnect
+  scrollback: ScrollbackBuffer;
 }
 
 /**
@@ -201,7 +244,7 @@ export class PTYManager extends EventEmitter {
     rows: number = 24,
     requestedShell?: string,
     options?: { sandboxed?: boolean }
-  ): { shell: string; cwd: string; isReconnect: boolean } {
+  ): { shell: string; cwd: string; isReconnect: boolean; platform: string } {
     // Check if node-pty is available
     if (!pty) {
       throw new Error(`PTY_NOT_AVAILABLE:${getPtyInstallInstructions()}`);
@@ -221,6 +264,7 @@ export class PTYManager extends EventEmitter {
         shell: existingSession.shell,
         cwd: existingSession.cwd,
         isReconnect: true,
+        platform: platform(),
       };
     }
 
@@ -259,6 +303,7 @@ export class PTYManager extends EventEmitter {
         rows,
         _outputBuffer: '',
         _outputTimer: null,
+        scrollback: new ScrollbackBuffer(SCROLLBACK_MAX_BYTES),
       };
       this.terminals.set(terminalId, session);
 
@@ -288,6 +333,7 @@ export class PTYManager extends EventEmitter {
       };
 
       ptyProcess.onData((data: string) => {
+        session.scrollback.append(data);
         session.lastActivityAt = Date.now();
         session._outputBuffer += data;
         // Flush immediately if buffer exceeds high-water mark
@@ -310,7 +356,7 @@ export class PTYManager extends EventEmitter {
         this.terminals.delete(terminalId);
       });
 
-      return { shell: session.shell, cwd, isReconnect: false };
+      return { shell: session.shell, cwd, isReconnect: false, platform: platform() };
     } catch (error: unknown) {
       console.error(`[PTYManager] Failed to create terminal ${terminalId}:`, error);
       this.emit('error', terminalId, error instanceof Error ? error.message : 'Failed to create terminal');
@@ -385,6 +431,15 @@ export class PTYManager extends EventEmitter {
       this.terminals.delete(terminalId);
       return false;
     }
+  }
+
+  /**
+   * Get scrollback buffer contents for replay on reconnect
+   */
+  getScrollback(terminalId: string): string | null {
+    const session = this.terminals.get(terminalId);
+    if (!session) return null;
+    return session.scrollback.getContents();
   }
 
   /**

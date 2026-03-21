@@ -1,6 +1,7 @@
 // Copyright (c) 2025-present Mstro, Inc. All rights reserved.
 // Licensed under the MIT License. See LICENSE file for details.
 
+import { platform } from 'node:os';
 import { AnalyticsEvents, trackEvent } from '../analytics.js';
 import { getPTYManager } from '../terminal/pty-manager.js';
 import type { HandlerContext } from './handler-context.js';
@@ -58,7 +59,7 @@ function handleTerminalInit(
   setupTerminalBroadcastListeners(ctx, terminalId);
 
   try {
-    const { shell, cwd, isReconnect } = ptyManager.create(
+    const { shell, cwd, isReconnect, platform } = ptyManager.create(
       terminalId,
       workingDir,
       cols || 80,
@@ -77,8 +78,17 @@ function handleTerminalInit(
     ctx.send(ws, {
       type: 'terminalReady',
       terminalId,
-      data: { shell, cwd, isReconnect }
+      data: { shell, cwd, isReconnect, platform }
     });
+
+    // Send scrollback buffer so reconnecting clients see prior output
+    if (isReconnect) {
+      const scrollback = ptyManager.getScrollback(terminalId);
+      if (scrollback) {
+        ctx.send(ws, { type: 'terminalScrollback', terminalId, data: { scrollback } });
+      }
+    }
+
     trackEvent(AnalyticsEvents.TERMINAL_SESSION_CREATED, {
       shell,
       is_reconnect: isReconnect,
@@ -116,9 +126,16 @@ function handleTerminalReconnect(ctx: HandlerContext, ws: WSContext, terminalId:
     data: {
       shell: sessionInfo.shell,
       cwd: sessionInfo.cwd,
-      isReconnect: true
+      isReconnect: true,
+      platform: platform(),
     }
   });
+
+  // Send scrollback buffer so reconnecting clients see prior output
+  const scrollback = ptyManager.getScrollback(terminalId);
+  if (scrollback) {
+    ctx.send(ws, { type: 'terminalScrollback', terminalId, data: { scrollback } });
+  }
 
   ptyManager.resize(terminalId, sessionInfo.cols, sessionInfo.rows);
 }
@@ -269,9 +286,28 @@ function setupTerminalBroadcastListeners(ctx: HandlerContext, terminalId: string
 /**
  * Clean up terminal subscribers for a disconnected WS context.
  * Called from handler.ts handleClose().
+ *
+ * After removing the ws, also cleans up any subscriber Sets that are now empty
+ * and their associated PTY event listeners — preventing stale state accumulation
+ * across repeated connect/disconnect cycles (WebSocket hiccups).
  */
 export function cleanupTerminalSubscribers(ctx: HandlerContext, ws: WSContext): void {
-  for (const subs of ctx.terminalSubscribers.values()) {
+  const emptyTerminals: string[] = [];
+
+  for (const [terminalId, subs] of ctx.terminalSubscribers) {
     subs.delete(ws);
+    if (subs.size === 0) {
+      emptyTerminals.push(terminalId);
+    }
+  }
+
+  // Clean up empty subscriber sets and their PTY event listeners
+  for (const terminalId of emptyTerminals) {
+    ctx.terminalSubscribers.delete(terminalId);
+    const cleanup = ctx.terminalListenerCleanups.get(terminalId);
+    if (cleanup) {
+      cleanup();
+      ctx.terminalListenerCleanups.delete(terminalId);
+    }
   }
 }

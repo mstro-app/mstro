@@ -188,13 +188,13 @@ const GIT_PR_TYPES = new Set([
 
 // Worktree/merge message types that route to git-worktree-handlers
 const GIT_WORKTREE_TYPES = new Set([
-  'gitWorktreeList', 'gitWorktreeCreate', 'gitWorktreeRemove',
+  'gitWorktreeList', 'gitWorktreeCreate', 'gitWorktreeCreateAndAssign', 'gitWorktreeRemove',
   'tabWorktreeSwitch', 'gitWorktreePush', 'gitWorktreeCreatePR',
   'gitMergePreview', 'gitWorktreeMerge', 'gitMergeAbort', 'gitMergeComplete',
 ]);
 
 /** Route git messages to appropriate sub-handler */
-export function handleGitMessage(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): void {
+export async function handleGitMessage(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): Promise<void> {
   const gitDir = ctx.gitDirectories.get(tabId) || workingDir;
 
   if (GIT_PR_TYPES.has(msg.type)) {
@@ -202,7 +202,7 @@ export function handleGitMessage(ctx: HandlerContext, ws: WSContext, msg: WebSoc
     return;
   }
   if (GIT_WORKTREE_TYPES.has(msg.type)) {
-    handleGitWorktreeMessage(ctx, ws, msg, tabId, gitDir, workingDir);
+    await handleGitWorktreeMessage(ctx, ws, msg, tabId, gitDir, workingDir);
     return;
   }
 

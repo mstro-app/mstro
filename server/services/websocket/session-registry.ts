@@ -21,6 +21,8 @@ export interface RegisteredTab {
   lastActivityAt: string
   order: number
   hasUnviewedCompletion: boolean
+  worktreePath?: string
+  worktreeBranch?: string
 }
 
 interface RegistryData {
@@ -163,6 +165,22 @@ export class SessionRegistry {
   markTabUnviewed(tabId: string): void {
     if (this.data.tabs[tabId]) {
       this.data.tabs[tabId].hasUnviewedCompletion = true
+      this.save()
+    }
+  }
+
+  /**
+   * Update worktree assignment for a tab. Pass null to clear.
+   */
+  updateTabWorktree(tabId: string, worktreePath: string | null, worktreeBranch: string | null): void {
+    if (this.data.tabs[tabId]) {
+      if (worktreePath) {
+        this.data.tabs[tabId].worktreePath = worktreePath
+        this.data.tabs[tabId].worktreeBranch = worktreeBranch || undefined
+      } else {
+        delete this.data.tabs[tabId].worktreePath
+        delete this.data.tabs[tabId].worktreeBranch
+      }
       this.save()
     }
   }

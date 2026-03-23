@@ -283,6 +283,13 @@ export class ImprovisationSessionManager extends EventEmitter {
 
     const paths: string[] = [];
     for (const attachment of attachments) {
+      // Pre-uploaded files are already on disk from chunked upload
+      if ((attachment as FileAttachment & { _preUploaded?: boolean })._preUploaded) {
+        if (existsSync(attachment.filePath)) {
+          paths.push(attachment.filePath);
+        }
+        continue;
+      }
       const filePath = join(attachDir, attachment.fileName);
       try {
         // All paste content arrives as base64 — decode to binary
@@ -490,6 +497,20 @@ export class ImprovisationSessionManager extends EventEmitter {
     userPrompt: string,
     attachments: FileAttachment[] | undefined,
   ): { prompt: string; imageAttachments: FileAttachment[] | undefined } {
+    // Hydrate pre-uploaded image attachments: read content from disk
+    if (attachments) {
+      for (const attachment of attachments) {
+        const preUploaded = (attachment as FileAttachment & { _preUploaded?: boolean })._preUploaded;
+        if (preUploaded && attachment.isImage && !attachment.content && existsSync(attachment.filePath)) {
+          try {
+            attachment.content = readFileSync(attachment.filePath).toString('base64');
+          } catch {
+            console.error(`Failed to read pre-uploaded image ${attachment.filePath}`);
+          }
+        }
+      }
+    }
+
     const diskPaths = attachments ? this.persistAttachments(attachments) : [];
     const prompt = this.buildPromptWithAttachments(userPrompt, attachments, diskPaths);
 

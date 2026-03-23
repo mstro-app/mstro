@@ -86,6 +86,7 @@ export interface WebSocketMessage {
     // Worktree operations
     | 'gitWorktreeList'
     | 'gitWorktreeCreate'
+    | 'gitWorktreeCreateAndAssign'
     | 'gitWorktreeRemove'
     | 'tabWorktreeSwitch'
     | 'gitWorktreePush'
@@ -105,7 +106,12 @@ export interface WebSocketMessage {
     | 'markTabViewed'
     // Settings message types
     | 'getSettings'
-    | 'updateSettings';
+    | 'updateSettings'
+    // File upload message types (chunked remote uploads)
+    | 'fileUploadStart'
+    | 'fileUploadChunk'
+    | 'fileUploadComplete'
+    | 'fileUploadCancel';
   tabId?: string;
   terminalId?: string;
   // biome-ignore lint/suspicious/noExplicitAny: message envelope carries heterogeneous payloads
@@ -191,6 +197,7 @@ export interface WebSocketResponse {
     // Worktree response types
     | 'gitWorktreeListResult'
     | 'gitWorktreeCreated'
+    | 'gitWorktreeCreatedAndAssigned'
     | 'gitWorktreeRemoved'
     | 'tabWorktreeSwitched'
     | 'gitWorktreePushed'
@@ -211,7 +218,11 @@ export interface WebSocketResponse {
     | 'tabStateChanged'
     // Settings response types
     | 'settings'
-    | 'settingsUpdated';
+    | 'settingsUpdated'
+    // File upload response types
+    | 'fileUploadAck'
+    | 'fileUploadReady'
+    | 'fileUploadError';
   tabId?: string;
   terminalId?: string;
   // biome-ignore lint/suspicious/noExplicitAny: message envelope carries heterogeneous payloads

@@ -14,6 +14,8 @@ export function handleGetActiveTabs(ctx: HandlerContext, ws: WSContext, workingD
   const tabs: Record<string, unknown> = {};
   for (const [tabId, regTab] of Object.entries(allTabs)) {
     const session = ctx.sessions.get(regTab.sessionId);
+    const worktreePath = ctx.gitDirectories.get(tabId);
+    const worktreeBranch = ctx.gitBranches.get(tabId);
     if (session) {
       tabs[tabId] = {
         tabName: regTab.tabName,
@@ -25,6 +27,7 @@ export function handleGetActiveTabs(ctx: HandlerContext, ws: WSContext, workingD
         outputHistory: buildOutputHistory(session),
         executionEvents: session.isExecuting ? session.getExecutionEventLog() : undefined,
         ...(session.isExecuting && session.executionStartTimestamp ? { executionStartTimestamp: session.executionStartTimestamp } : {}),
+        ...(worktreePath ? { worktreePath, worktreeBranch } : {}),
       };
     } else {
       tabs[tabId] = {
@@ -35,6 +38,7 @@ export function handleGetActiveTabs(ctx: HandlerContext, ws: WSContext, workingD
         sessionId: regTab.sessionId,
         isExecuting: false,
         outputHistory: [],
+        ...(worktreePath ? { worktreePath, worktreeBranch } : {}),
       };
     }
   }
@@ -65,6 +69,8 @@ export function handleSyncPromptText(ctx: HandlerContext, _ws: WSContext, msg: W
 export function handleRemoveTab(ctx: HandlerContext, _ws: WSContext, tabId: string, workingDir: string): void {
   const registry = ctx.getRegistry(workingDir);
   registry.unregisterTab(tabId);
+  ctx.gitDirectories.delete(tabId);
+  ctx.gitBranches.delete(tabId);
 
   ctx.broadcastToAll({
     type: 'tabRemoved',

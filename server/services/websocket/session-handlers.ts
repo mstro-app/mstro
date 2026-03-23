@@ -3,7 +3,7 @@
 
 import { existsSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import { ImprovisationSessionManager } from '../../cli/improvisation-session-manager.js';
+import { type FileAttachment, ImprovisationSessionManager } from '../../cli/improvisation-session-manager.js';
 import { getModel } from '../settings.js';
 import type { HandlerContext } from './handler-context.js';
 import type { SessionRegistry } from './session-registry.js';
@@ -128,6 +128,29 @@ export function setupSessionListeners(ctx: HandlerContext, session: Improvisatio
   });
 }
 
+/** Merge pre-uploaded files (from chunked upload) with any inline attachments */
+function mergePreUploadedAttachments(ctx: HandlerContext, tabId: string, inlineAttachments?: FileAttachment[]): FileAttachment[] | undefined {
+  if (!ctx.fileUploadHandler) return inlineAttachments;
+  const preUploaded = ctx.fileUploadHandler.getAndClearCompletedUploads(tabId);
+  if (preUploaded.length === 0) return inlineAttachments;
+
+  const merged: (FileAttachment & { _preUploaded?: boolean })[] = [...(inlineAttachments || [])];
+  for (const upload of preUploaded) {
+    const alreadyIncluded = merged.some(a => a.fileName === upload.fileName);
+    if (!alreadyIncluded) {
+      merged.push({
+        fileName: upload.fileName,
+        filePath: upload.filePath,
+        content: '',
+        isImage: upload.isImage,
+        mimeType: upload.mimeType,
+        _preUploaded: true,
+      });
+    }
+  }
+  return merged;
+}
+
 export function handleSessionMessage(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, permission?: 'control' | 'view'): void {
   switch (msg.type) {
     case 'execute': {
@@ -135,7 +158,8 @@ export function handleSessionMessage(ctx: HandlerContext, ws: WSContext, msg: We
       const session = requireSession(ctx, ws, tabId);
       const sandboxed = permission === 'control' || permission === 'view';
       const worktreeDir = ctx.gitDirectories.get(tabId);
-      session.executePrompt(msg.data.prompt, msg.data.attachments, { sandboxed, workingDir: worktreeDir });
+      const attachments = mergePreUploadedAttachments(ctx, tabId, msg.data.attachments);
+      session.executePrompt(msg.data.prompt, attachments, { sandboxed, workingDir: worktreeDir });
       break;
     }
     case 'cancel': {
@@ -237,12 +261,22 @@ export async function initializeTab(ctx: HandlerContext, ws: WSContext, tabId: s
       if (tabMap) tabMap.set(tabId, diskSessionId);
       registry.touchTab(tabId);
 
+      // Restore worktree state from registry
+      const regTab = registry.getTab(tabId);
+      if (regTab?.worktreePath && !ctx.gitDirectories.has(tabId)) {
+        ctx.gitDirectories.set(tabId, regTab.worktreePath);
+        if (regTab.worktreeBranch) ctx.gitBranches.set(tabId, regTab.worktreeBranch);
+      }
+      const worktreePath = ctx.gitDirectories.get(tabId);
+      const worktreeBranch = ctx.gitBranches.get(tabId);
+
       ctx.send(ws, {
         type: 'tabInitialized',
         tabId,
         data: {
           ...diskSession.getSessionInfo(),
           outputHistory: buildOutputHistory(diskSession),
+          ...(worktreePath ? { worktreePath, worktreeBranch } : {}),
         }
       });
       return;
@@ -352,11 +386,21 @@ function reattachSession(
   if (tabMap) tabMap.set(tabId, sessionId);
   registry.touchTab(tabId);
 
+  // Restore worktree state from registry if not already in memory
+  const regTab = registry.getTab(tabId);
+  if (regTab?.worktreePath && !ctx.gitDirectories.has(tabId)) {
+    ctx.gitDirectories.set(tabId, regTab.worktreePath);
+    if (regTab.worktreeBranch) ctx.gitBranches.set(tabId, regTab.worktreeBranch);
+  }
+
   const outputHistory = buildOutputHistory(session);
 
   const executionEvents = session.isExecuting
     ? session.getExecutionEventLog()
     : undefined;
+
+  const worktreePath = ctx.gitDirectories.get(tabId);
+  const worktreeBranch = ctx.gitBranches.get(tabId);
 
   ctx.send(ws, {
     type: 'tabInitialized',
@@ -367,6 +411,7 @@ function reattachSession(
       isExecuting: session.isExecuting,
       executionEvents,
       ...(session.isExecuting && session.executionStartTimestamp ? { executionStartTimestamp: session.executionStartTimestamp } : {}),
+      ...(worktreePath ? { worktreePath, worktreeBranch } : {}),
     }
   });
 }

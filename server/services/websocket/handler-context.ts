@@ -4,6 +4,7 @@
 import type { ChildProcess } from 'node:child_process';
 import type { ImprovisationSessionManager } from '../../cli/improvisation-session-manager.js';
 import type { AutocompleteService } from './autocomplete.js';
+import type { FileUploadHandler } from './file-upload-handler.js';
 import type { SessionRegistry } from './session-registry.js';
 import type { WebSocketResponse, WSContext } from './types.js';
 
@@ -25,11 +26,13 @@ export interface HandlerContext {
   connections: Map<WSContext, Map<string, string>>;
   allConnections: Set<WSContext>;
   gitDirectories: Map<string, string>;
+  gitBranches: Map<string, string>;
   activeSearches: Map<string, ChildProcess>;
   terminalSubscribers: Map<string, Set<WSContext>>;
   terminalListenerCleanups: Map<string, () => void>;
   autocompleteService: AutocompleteService;
   usageReporter: UsageReporter | null;
+  fileUploadHandler: FileUploadHandler | null;
 
   // Registry access
   getRegistry(workingDir: string): SessionRegistry;

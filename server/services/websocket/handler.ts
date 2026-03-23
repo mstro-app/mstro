@@ -16,6 +16,7 @@ import type { ImprovisationSessionManager } from '../../cli/improvisation-sessio
 import { captureException } from '../sentry.js';
 import { AutocompleteService } from './autocomplete.js';
 import { handleFileExplorerMessage, handleFileMessage } from './file-explorer-handlers.js';
+import { FileUploadHandler } from './file-upload-handler.js';
 import { handleGitMessage } from './git-handlers.js';
 import type { HandlerContext, UsageReporter } from './handler-context.js';
 import { handleHistoryMessage, handleSessionMessage, initializeTab, resumeHistoricalSession } from './session-handlers.js';
@@ -34,11 +35,13 @@ export class WebSocketImproviseHandler implements HandlerContext {
   private frecencyPath: string;
   usageReporter: UsageReporter | null = null;
   gitDirectories: Map<string, string> = new Map();
+  gitBranches: Map<string, string> = new Map();
   private sessionRegistry: SessionRegistry | null = null;
   allConnections: Set<WSContext> = new Set();
   activeSearches: Map<string, ChildProcess> = new Map();
   terminalListenerCleanups: Map<string, () => void> = new Map();
   terminalSubscribers: Map<string, Set<WSContext>> = new Map();
+  fileUploadHandler: FileUploadHandler | null = null;
 
   constructor() {
     this.frecencyPath = join(homedir(), '.mstro', 'autocomplete-frecency.json');
@@ -192,6 +195,7 @@ export class WebSocketImproviseHandler implements HandlerContext {
       case 'gitPushTag':
       case 'gitWorktreeList':
       case 'gitWorktreeCreate':
+      case 'gitWorktreeCreateAndAssign':
       case 'gitWorktreeRemove':
       case 'tabWorktreeSwitch':
       case 'gitWorktreePush':
@@ -221,8 +225,37 @@ export class WebSocketImproviseHandler implements HandlerContext {
         return handleGetSettings(this, ws);
       case 'updateSettings':
         return handleUpdateSettings(this, ws, msg);
+      // File upload messages (chunked remote uploads)
+      case 'fileUploadStart':
+      case 'fileUploadChunk':
+      case 'fileUploadComplete':
+      case 'fileUploadCancel':
+        return this.handleFileUploadMessage(ws, msg, tabId, workingDir);
       default:
         throw new Error(`Unknown message type: ${msg.type}`);
+    }
+  }
+
+  private handleFileUploadMessage(ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): void {
+    if (!this.fileUploadHandler) {
+      this.fileUploadHandler = new FileUploadHandler(workingDir);
+    }
+    const handler = this.fileUploadHandler;
+    const send = this.send.bind(this);
+
+    switch (msg.type) {
+      case 'fileUploadStart':
+        handler.handleUploadStart(ws, send, tabId, msg.data);
+        break;
+      case 'fileUploadChunk':
+        handler.handleUploadChunk(ws, send, tabId, msg.data);
+        break;
+      case 'fileUploadComplete':
+        handler.handleUploadComplete(ws, send, tabId, msg.data);
+        break;
+      case 'fileUploadCancel':
+        handler.handleUploadCancel(ws, send, tabId, msg.data);
+        break;
     }
   }
 

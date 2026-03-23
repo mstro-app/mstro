@@ -6,10 +6,11 @@ import { executeGitCommand, handleGitStatus, spawnWithOutput } from './git-handl
 import type { HandlerContext } from './handler-context.js';
 import type { WebSocketMessage, WorktreeInfo, WSContext } from './types.js';
 
-export function handleGitWorktreeMessage(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, gitDir: string, workingDir: string): void {
-  const handlers: Record<string, () => void> = {
+export async function handleGitWorktreeMessage(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, gitDir: string, workingDir: string): Promise<void> {
+  const handlers: Record<string, () => Promise<void>> = {
     gitWorktreeList: () => handleGitWorktreeList(ctx, ws, tabId, gitDir),
     gitWorktreeCreate: () => handleGitWorktreeCreate(ctx, ws, msg, tabId, gitDir),
+    gitWorktreeCreateAndAssign: () => handleGitWorktreeCreateAndAssign(ctx, ws, msg, tabId, gitDir, workingDir),
     gitWorktreeRemove: () => handleGitWorktreeRemove(ctx, ws, msg, tabId, gitDir),
     tabWorktreeSwitch: () => handleTabWorktreeSwitch(ctx, ws, msg, tabId, workingDir),
     gitWorktreePush: () => handleGitWorktreePush(ctx, ws, msg, tabId, gitDir),
@@ -19,7 +20,7 @@ export function handleGitWorktreeMessage(ctx: HandlerContext, ws: WSContext, msg
     gitMergeAbort: () => handleGitMergeAbort(ctx, ws, tabId, gitDir),
     gitMergeComplete: () => handleGitMergeComplete(ctx, ws, msg, tabId, gitDir),
   };
-  handlers[msg.type]?.();
+  await handlers[msg.type]?.();
 }
 
 function applyWorktreePorcelainLine(line: string, worktrees: WorktreeInfo[], current: Partial<WorktreeInfo>): Partial<WorktreeInfo> {
@@ -90,6 +91,44 @@ async function handleGitWorktreeCreate(ctx: HandlerContext, ws: WSContext, msg: 
   }
 }
 
+async function handleGitWorktreeCreateAndAssign(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, gitDir: string, workingDir: string): Promise<void> {
+  try {
+    const { branchName, baseBranch, path: worktreePath } = msg.data || {};
+    if (!branchName) {
+      ctx.send(ws, { type: 'gitError', tabId, data: { error: 'Branch name is required' } });
+      return;
+    }
+
+    const repoName = gitDir.split('/').pop() || 'repo';
+    const wtPath = worktreePath || join(dirname(gitDir), `${repoName}-worktrees`, branchName);
+
+    const args = ['worktree', 'add', wtPath, '-b', branchName, ...(baseBranch ? [baseBranch] : [])];
+    const result = await executeGitCommand(args, gitDir);
+    if (result.exitCode !== 0) {
+      ctx.send(ws, { type: 'gitError', tabId, data: { error: result.stderr || 'Failed to create worktree' } });
+      return;
+    }
+
+    const headResult = await executeGitCommand(['rev-parse', '--short', 'HEAD'], wtPath);
+
+    // Assign to tab
+    ctx.gitDirectories.set(tabId, wtPath);
+    ctx.gitBranches.set(tabId, branchName);
+    const registry = ctx.getRegistry(workingDir);
+    registry.updateTabWorktree(tabId, wtPath, branchName);
+
+    ctx.send(ws, {
+      type: 'gitWorktreeCreatedAndAssigned',
+      tabId,
+      data: { tabId, path: wtPath, branch: branchName, head: headResult.stdout.trim() },
+    });
+
+    handleGitStatus(ctx, ws, tabId, wtPath);
+  } catch (error: unknown) {
+    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
+  }
+}
+
 async function handleGitWorktreeRemove(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): Promise<void> {
   try {
     const { path: wtPath, force, deleteBranch } = msg.data || {};
@@ -127,8 +166,11 @@ async function handleTabWorktreeSwitch(ctx: HandlerContext, ws: WSContext, msg: 
   try {
     const { tabId: targetTabId, worktreePath } = msg.data || {};
     const resolvedTabId = targetTabId || tabId;
+    const registry = ctx.getRegistry(workingDir);
     if (!worktreePath) {
       ctx.gitDirectories.delete(resolvedTabId);
+      ctx.gitBranches.delete(resolvedTabId);
+      registry.updateTabWorktree(resolvedTabId, null, null);
       ctx.send(ws, { type: 'tabWorktreeSwitched', tabId: resolvedTabId, data: { tabId: resolvedTabId, worktreePath: workingDir, branch: '' } });
       handleGitStatus(ctx, ws, resolvedTabId, workingDir);
       return;
@@ -138,6 +180,8 @@ async function handleTabWorktreeSwitch(ctx: HandlerContext, ws: WSContext, msg: 
 
     const branchResult = await executeGitCommand(['rev-parse', '--abbrev-ref', 'HEAD'], worktreePath);
     const branch = branchResult.stdout.trim();
+    ctx.gitBranches.set(resolvedTabId, branch);
+    registry.updateTabWorktree(resolvedTabId, worktreePath, branch);
 
     ctx.send(ws, { type: 'tabWorktreeSwitched', tabId: resolvedTabId, data: { tabId: resolvedTabId, worktreePath, branch } });
     handleGitStatus(ctx, ws, resolvedTabId, worktreePath);

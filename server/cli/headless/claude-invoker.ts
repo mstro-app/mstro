@@ -137,15 +137,10 @@ async function runStallAssessment(
 /** Regex matching Claude Code's internal tool timeout messages */
 const NATIVE_TIMEOUT_PATTERN = /^(\w+) timed out — (continuing|retrying) with (\d+) results? preserved$/;
 
-/** Quick prefix check: does incomplete text look like it might be a timeout? */
-const TIMEOUT_PREFIX_PATTERN = /^(\w+) timed/;
-
-/** Known tool names that Claude Code may report timeouts for */
-const NATIVE_TIMEOUT_TOOL_NAMES = new Set([
-  'Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash',
-  'WebFetch', 'WebSearch', 'Task', 'TodoRead', 'TodoWrite',
-  'NotebookEdit', 'MultiEdit',
-]);
+/** Quick prefix check: does incomplete text look like it might be a timeout?
+ *  Matches any capitalized tool name followed by " timed" — no hardcoded set
+ *  needed because the full NATIVE_TIMEOUT_PATTERN validates on the next chunk. */
+const TIMEOUT_PREFIX_PATTERN = /^[A-Z]\w* timed/;
 
 interface NativeTimeoutEvent {
   toolName: string;
@@ -203,8 +198,7 @@ class NativeTimeoutDetector {
 
     // Handle incomplete trailing text
     if (incomplete) {
-      const prefixMatch = incomplete.match(TIMEOUT_PREFIX_PATTERN);
-      if (prefixMatch && NATIVE_TIMEOUT_TOOL_NAMES.has(prefixMatch[1])) {
+      if (TIMEOUT_PREFIX_PATTERN.test(incomplete)) {
         // Looks like the start of a timeout message — hold it
         this.lineBuffer = incomplete;
       } else {

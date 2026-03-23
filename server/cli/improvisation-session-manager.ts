@@ -492,30 +492,50 @@ export class ImprovisationSessionManager extends EventEmitter {
     return result;
   }
 
+  /** MIME types that the Claude API can accept as image content blocks */
+  private static readonly SUPPORTED_IMAGE_MIMES = new Set([
+    'image/jpeg', 'image/png', 'image/gif', 'image/webp',
+  ]);
+
+  /** Hydrate pre-uploaded images from disk and downgrade unsupported formats */
+  private hydrateAndFilterAttachments(attachments: FileAttachment[]): void {
+    for (const attachment of attachments) {
+      // Pre-uploaded images need their content read from disk
+      const preUploaded = (attachment as FileAttachment & { _preUploaded?: boolean })._preUploaded;
+      if (preUploaded && attachment.isImage && !attachment.content && existsSync(attachment.filePath)) {
+        try {
+          attachment.content = readFileSync(attachment.filePath).toString('base64');
+        } catch (err) {
+          console.error(`Failed to read pre-uploaded image ${attachment.filePath}:`, err);
+          attachment.isImage = false;
+        }
+      }
+
+      // Downgrade unsupported image formats (SVG, BMP, TIFF, ICO, etc.) to text attachments
+      if (attachment.isImage) {
+        const mime = (attachment.mimeType || '').toLowerCase();
+        if (mime && !ImprovisationSessionManager.SUPPORTED_IMAGE_MIMES.has(mime)) {
+          attachment.isImage = false;
+        }
+      }
+    }
+  }
+
   /** Prepare prompt with attachments and limit image count */
   private preparePromptAndAttachments(
     userPrompt: string,
     attachments: FileAttachment[] | undefined,
   ): { prompt: string; imageAttachments: FileAttachment[] | undefined } {
-    // Hydrate pre-uploaded image attachments: read content from disk
     if (attachments) {
-      for (const attachment of attachments) {
-        const preUploaded = (attachment as FileAttachment & { _preUploaded?: boolean })._preUploaded;
-        if (preUploaded && attachment.isImage && !attachment.content && existsSync(attachment.filePath)) {
-          try {
-            attachment.content = readFileSync(attachment.filePath).toString('base64');
-          } catch {
-            console.error(`Failed to read pre-uploaded image ${attachment.filePath}`);
-          }
-        }
-      }
+      this.hydrateAndFilterAttachments(attachments);
     }
 
     const diskPaths = attachments ? this.persistAttachments(attachments) : [];
     const prompt = this.buildPromptWithAttachments(userPrompt, attachments, diskPaths);
 
     const MAX_IMAGE_ATTACHMENTS = 20;
-    const allImages = attachments?.filter(a => a.isImage);
+    // Only include images that have valid content
+    const allImages = attachments?.filter(a => a.isImage && a.content);
     let imageAttachments = allImages;
     if (allImages && allImages.length > MAX_IMAGE_ATTACHMENTS) {
       imageAttachments = allImages.slice(-MAX_IMAGE_ATTACHMENTS);

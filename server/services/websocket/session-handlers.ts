@@ -230,6 +230,47 @@ export function handleHistoryMessage(ctx: HandlerContext, ws: WSContext, msg: We
   }
 }
 
+function tryResumeFromDisk(
+  ctx: HandlerContext,
+  ws: WSContext,
+  tabId: string,
+  workingDir: string,
+  registrySessionId: string,
+  tabMap: Map<string, string> | undefined,
+  registry: SessionRegistry
+): boolean {
+  try {
+    const diskSession = ImprovisationSessionManager.resumeFromHistory(workingDir, registrySessionId);
+    setupSessionListeners(ctx, diskSession, ws, tabId);
+    const diskSessionId = diskSession.getSessionInfo().sessionId;
+    ctx.sessions.set(diskSessionId, diskSession);
+    if (tabMap) tabMap.set(tabId, diskSessionId);
+    registry.touchTab(tabId);
+
+    // Restore worktree state from registry
+    const regTab = registry.getTab(tabId);
+    if (regTab?.worktreePath && !ctx.gitDirectories.has(tabId)) {
+      ctx.gitDirectories.set(tabId, regTab.worktreePath);
+      if (regTab.worktreeBranch) ctx.gitBranches.set(tabId, regTab.worktreeBranch);
+    }
+    const worktreePath = ctx.gitDirectories.get(tabId);
+    const worktreeBranch = ctx.gitBranches.get(tabId);
+
+    ctx.send(ws, {
+      type: 'tabInitialized',
+      tabId,
+      data: {
+        ...diskSession.getSessionInfo(),
+        outputHistory: buildOutputHistory(diskSession),
+        ...(worktreePath ? { worktreePath, worktreeBranch } : {}),
+      }
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function initializeTab(ctx: HandlerContext, ws: WSContext, tabId: string, workingDir: string, tabName?: string): Promise<void> {
   const tabMap = ctx.connections.get(ws);
   const registry = ctx.getRegistry(workingDir);
@@ -253,35 +294,8 @@ export async function initializeTab(ctx: HandlerContext, ws: WSContext, tabId: s
       return;
     }
 
-    try {
-      const diskSession = ImprovisationSessionManager.resumeFromHistory(workingDir, registrySessionId);
-      setupSessionListeners(ctx, diskSession, ws, tabId);
-      const diskSessionId = diskSession.getSessionInfo().sessionId;
-      ctx.sessions.set(diskSessionId, diskSession);
-      if (tabMap) tabMap.set(tabId, diskSessionId);
-      registry.touchTab(tabId);
-
-      // Restore worktree state from registry
-      const regTab = registry.getTab(tabId);
-      if (regTab?.worktreePath && !ctx.gitDirectories.has(tabId)) {
-        ctx.gitDirectories.set(tabId, regTab.worktreePath);
-        if (regTab.worktreeBranch) ctx.gitBranches.set(tabId, regTab.worktreeBranch);
-      }
-      const worktreePath = ctx.gitDirectories.get(tabId);
-      const worktreeBranch = ctx.gitBranches.get(tabId);
-
-      ctx.send(ws, {
-        type: 'tabInitialized',
-        tabId,
-        data: {
-          ...diskSession.getSessionInfo(),
-          outputHistory: buildOutputHistory(diskSession),
-          ...(worktreePath ? { worktreePath, worktreeBranch } : {}),
-        }
-      });
+    if (tryResumeFromDisk(ctx, ws, tabId, workingDir, registrySessionId, tabMap, registry)) {
       return;
-    } catch {
-      // Disk session not found — fall through to create new
     }
   }
 

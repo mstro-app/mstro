@@ -7,6 +7,43 @@ import type { HandlerContext } from './handler-context.js';
 import { buildOutputHistory, setupSessionListeners } from './session-handlers.js';
 import type { WebSocketMessage, WSContext } from './types.js';
 
+function buildActiveTabData(
+  regTab: { tabName: string; createdAt: string; order: number; hasUnviewedCompletion?: boolean; sessionId: string },
+  session: ImprovisationSessionManager,
+  worktreePath: string | undefined,
+  worktreeBranch: string | undefined,
+): Record<string, unknown> {
+  return {
+    tabName: regTab.tabName,
+    createdAt: regTab.createdAt,
+    order: regTab.order,
+    hasUnviewedCompletion: regTab.hasUnviewedCompletion,
+    sessionInfo: session.getSessionInfo(),
+    isExecuting: session.isExecuting,
+    outputHistory: buildOutputHistory(session),
+    executionEvents: session.isExecuting ? session.getExecutionEventLog() : undefined,
+    ...(session.isExecuting && session.executionStartTimestamp ? { executionStartTimestamp: session.executionStartTimestamp } : {}),
+    ...(worktreePath ? { worktreePath, worktreeBranch } : {}),
+  };
+}
+
+function buildInactiveTabData(
+  regTab: { tabName: string; createdAt: string; order: number; hasUnviewedCompletion?: boolean; sessionId: string },
+  worktreePath: string | undefined,
+  worktreeBranch: string | undefined,
+): Record<string, unknown> {
+  return {
+    tabName: regTab.tabName,
+    createdAt: regTab.createdAt,
+    order: regTab.order,
+    hasUnviewedCompletion: regTab.hasUnviewedCompletion,
+    sessionId: regTab.sessionId,
+    isExecuting: false,
+    outputHistory: [],
+    ...(worktreePath ? { worktreePath, worktreeBranch } : {}),
+  };
+}
+
 export function handleGetActiveTabs(ctx: HandlerContext, ws: WSContext, workingDir: string): void {
   const registry = ctx.getRegistry(workingDir);
   const allTabs = registry.getAllTabs();
@@ -16,31 +53,9 @@ export function handleGetActiveTabs(ctx: HandlerContext, ws: WSContext, workingD
     const session = ctx.sessions.get(regTab.sessionId);
     const worktreePath = ctx.gitDirectories.get(tabId);
     const worktreeBranch = ctx.gitBranches.get(tabId);
-    if (session) {
-      tabs[tabId] = {
-        tabName: regTab.tabName,
-        createdAt: regTab.createdAt,
-        order: regTab.order,
-        hasUnviewedCompletion: regTab.hasUnviewedCompletion,
-        sessionInfo: session.getSessionInfo(),
-        isExecuting: session.isExecuting,
-        outputHistory: buildOutputHistory(session),
-        executionEvents: session.isExecuting ? session.getExecutionEventLog() : undefined,
-        ...(session.isExecuting && session.executionStartTimestamp ? { executionStartTimestamp: session.executionStartTimestamp } : {}),
-        ...(worktreePath ? { worktreePath, worktreeBranch } : {}),
-      };
-    } else {
-      tabs[tabId] = {
-        tabName: regTab.tabName,
-        createdAt: regTab.createdAt,
-        order: regTab.order,
-        hasUnviewedCompletion: regTab.hasUnviewedCompletion,
-        sessionId: regTab.sessionId,
-        isExecuting: false,
-        outputHistory: [],
-        ...(worktreePath ? { worktreePath, worktreeBranch } : {}),
-      };
-    }
+    tabs[tabId] = session
+      ? buildActiveTabData(regTab, session, worktreePath, worktreeBranch)
+      : buildInactiveTabData(regTab, worktreePath, worktreeBranch);
   }
 
   ctx.send(ws, { type: 'activeTabs', data: { tabs } });

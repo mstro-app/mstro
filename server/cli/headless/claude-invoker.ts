@@ -12,6 +12,7 @@ import { sanitizeEnvForSandbox } from '../../services/sandbox-utils.js';
 import { generateMcpConfig } from './mcp-config.js';
 import { detectErrorInStderr, } from './output-utils.js';
 import { buildMultimodalMessage } from './prompt-utils.js';
+import { killProcessGroup } from './runner.js';
 import { assessStall, assessToolTimeout, classifyError, type StallContext } from './stall-assessor.js';
 import { ToolWatchdog } from './tool-watchdog.js';
 import type {
@@ -73,10 +74,10 @@ function terminateStallProcess(
 ): void {
   clearInterval(interval);
   config.outputCallback?.(message);
-  claudeProcess.kill('SIGTERM');
+  if (claudeProcess.pid) killProcessGroup(claudeProcess.pid, 'SIGTERM');
   setTimeout(() => {
-    if (!claudeProcess.killed) {
-      claudeProcess.kill('SIGKILL');
+    if (!claudeProcess.killed && claudeProcess.pid) {
+      killProcessGroup(claudeProcess.pid, 'SIGKILL');
     }
   }, 5000);
 }
@@ -932,9 +933,9 @@ function executeToolTimeout(
   verboseLog(config.verbose, `[WATCHDOG] Killing process due to ${toolName} timeout`);
   watchdog.clearAll();
   clearInterval(killCtx.stallCheckInterval);
-  killCtx.claudeProcess.kill('SIGTERM');
+  if (killCtx.claudeProcess.pid) killProcessGroup(killCtx.claudeProcess.pid, 'SIGTERM');
   const proc = killCtx.claudeProcess;
-  setTimeout(() => { if (!proc.killed) proc.kill('SIGKILL'); }, 5000);
+  setTimeout(() => { if (!proc.killed && proc.pid) killProcessGroup(proc.pid, 'SIGKILL'); }, 5000);
 }
 
 /** Set up tool activity tracking and watchdog. Extracted to reduce cognitive complexity. */
@@ -1031,6 +1032,7 @@ function spawnAndRegister(
 
   const claudeProcess = spawn(config.claudeCommand, args, {
     cwd: config.workingDir,
+    detached: true,
     env: config.sandboxed
       ? sanitizeEnvForSandbox(process.env, config.workingDir)
       : { ...process.env },

@@ -132,6 +132,12 @@ export class ImprovisationSessionManager extends EventEmitter {
   private executionEventLog: Array<{ type: string; data: unknown; timestamp: number }> = [];
   /** Set by cancel() to signal the retry loop to exit */
   private _cancelled: boolean = false;
+  /** True when cancel() has already emitted movementComplete (prevents double-emit) */
+  private _cancelCompleteEmitted: boolean = false;
+  /** Current execution's user prompt (for cancel to build movement record) */
+  private _currentUserPrompt: string = '';
+  /** Current execution's sequence number (for cancel to build movement record) */
+  private _currentSequenceNumber: number = 0;
 
   /**
    * Resume from a historical session.
@@ -328,10 +334,13 @@ export class ImprovisationSessionManager extends EventEmitter {
     const _execStart = Date.now();
     this._isExecuting = true;
     this._cancelled = false;
+    this._cancelCompleteEmitted = false;
     this._executionStartTimestamp = _execStart;
     this.executionEventLog = [];
 
     const sequenceNumber = this.history.movements.length + 1;
+    this._currentUserPrompt = userPrompt;
+    this._currentSequenceNumber = sequenceNumber;
     this.emit('onMovementStart', sequenceNumber, userPrompt);
     trackEvent(AnalyticsEvents.IMPROVISE_PROMPT_RECEIVED, {
       prompt_length: userPrompt.length,
@@ -423,6 +432,13 @@ export class ImprovisationSessionManager extends EventEmitter {
     this._executionStartTimestamp = undefined;
     this.executionEventLog = [];
     this.currentRunner = null;
+
+    // If cancel() already emitted movementComplete, just clean up state —
+    // don't double-emit or double-persist.
+    if (this._cancelCompleteEmitted) {
+      const existing = this.history.movements.find(m => m.sequenceNumber === sequenceNumber);
+      if (existing) return existing;
+    }
 
     const cancelledMovement: MovementRecord = {
       id: `prompt-${sequenceNumber}`,
@@ -1510,16 +1526,47 @@ export class ImprovisationSessionManager extends EventEmitter {
   }
 
   /**
-   * Cancel current execution
+   * Cancel current execution — immediately emits movementComplete so the web
+   * gets instant feedback, then cleans up the process tree in the background.
    */
   cancel(): void {
     this._cancelled = true;
+
     if (this.currentRunner) {
       this.currentRunner.cleanup();
       this.currentRunner = null;
-      this.queueOutput('\n⚠ Execution cancelled\n');
-      this.flushOutputQueue();
     }
+
+    // Emit movementComplete immediately so the web UI updates without waiting
+    // for the process tree to fully die (SIGTERM → SIGKILL can take up to 5s).
+    if (this._isExecuting && !this._cancelCompleteEmitted) {
+      this._cancelCompleteEmitted = true;
+      const execStart = this._executionStartTimestamp || Date.now();
+      this._isExecuting = false;
+      this._executionStartTimestamp = undefined;
+
+      const cancelledMovement: MovementRecord = {
+        id: `prompt-${this._currentSequenceNumber}`,
+        sequenceNumber: this._currentSequenceNumber,
+        userPrompt: this._currentUserPrompt,
+        timestamp: new Date().toISOString(),
+        tokensUsed: 0,
+        summary: '',
+        filesModified: [],
+        errorOutput: 'Execution cancelled by user',
+        durationMs: Date.now() - execStart,
+      };
+      this.persistMovement(cancelledMovement);
+
+      const fallbackResult = {
+        completed: false, needsHandoff: false, totalTokens: 0, sessionId: '',
+        output: '', exitCode: 1, signalName: 'SIGTERM',
+      } as HeadlessRunResult;
+      this.emitMovementComplete(cancelledMovement, fallbackResult, execStart, this._currentSequenceNumber);
+    }
+
+    this.queueOutput('\n⚠ Execution cancelled\n');
+    this.flushOutputQueue();
   }
 
   /**

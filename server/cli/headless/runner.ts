@@ -22,6 +22,19 @@ import type {
 // Re-export types for backward compatibility
 export type { ExecutionCheckpoint, HeadlessConfig, ImageAttachment, SessionResult, SessionState, ToolTimeoutProfile, ToolUseEvent } from './types.js';
 
+/**
+ * Kill an entire process group by sending a signal to -pid.
+ * Falls back to direct kill if the process group kill fails.
+ */
+export function killProcessGroup(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    // Process group kill failed (e.g. not a group leader) — try direct kill
+    try { process.kill(pid, signal); } catch { /* already dead */ }
+  }
+}
+
 export class HeadlessRunner {
   private config: ResolvedHeadlessConfig;
   private runningProcesses: Map<number, ChildProcess> = new Map();
@@ -175,22 +188,22 @@ export class HeadlessRunner {
   }
 
   /**
-   * Cleanup on exit — SIGTERM all tracked processes, then SIGKILL stragglers after 5s
+   * Cleanup on exit — SIGTERM all tracked process groups, then SIGKILL stragglers after 5s
    */
   cleanup(): void {
     if (this.runningProcesses.size === 0) return;
 
     const pids = new Set<number>();
-    for (const [pid, proc] of this.runningProcesses) {
+    for (const [pid] of this.runningProcesses) {
       pids.add(pid);
-      try { proc.kill('SIGTERM'); } catch { /* already dead */ }
+      killProcessGroup(pid, 'SIGTERM');
     }
 
     // SIGKILL fallback after 5 seconds for any process that didn't exit
     setTimeout(() => {
       for (const [pid, proc] of this.runningProcesses) {
         if (pids.has(pid) && !proc.killed) {
-          try { proc.kill('SIGKILL'); } catch { /* already dead */ }
+          killProcessGroup(pid, 'SIGKILL');
         }
       }
       this.runningProcesses.clear();

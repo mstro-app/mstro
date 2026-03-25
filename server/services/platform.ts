@@ -196,26 +196,25 @@ export class PlatformConnection {
   private startHeartbeat(): void {
     this.missedPongs = 0
     // Send ping every 2 minutes (server TTL is 5 minutes)
-    this.heartbeatInterval = setInterval(() => {
-      if (this.ws && this.isConnected) {
-        // Check if previous pong was missed
-        if (this.missedPongs >= MAX_MISSED_PONGS) {
-          console.log(`[Platform] ${this.missedPongs} pongs missed — forcing reconnect`)
-          this.missedPongs = 0
-          this.stopHeartbeat()
-          if (this.ws) {
-            try { this.ws.close() } catch { /* ignore */ }
-          }
-          return
-        }
-        this.missedPongs++
-        try {
-          this.ws.send(JSON.stringify({ type: 'ping' }))
-        } catch {
-          // Send failed — onclose will handle reconnect
-        }
-      }
-    }, 2 * 60 * 1000)
+    this.heartbeatInterval = setInterval(() => this.heartbeatTick(), 2 * 60 * 1000)
+  }
+
+  private heartbeatTick(): void {
+    if (!this.ws || !this.isConnected) return
+
+    if (this.missedPongs >= MAX_MISSED_PONGS) {
+      console.log(`[Platform] ${this.missedPongs} pongs missed — forcing reconnect`)
+      this.missedPongs = 0
+      this.stopHeartbeat()
+      try { this.ws.close() } catch { /* ignore */ }
+      return
+    }
+    this.missedPongs++
+    try {
+      this.ws.send(JSON.stringify({ type: 'ping' }))
+    } catch {
+      // Send failed — onclose will handle reconnect
+    }
   }
 
   /**

@@ -312,7 +312,9 @@ export class PTYManager extends EventEmitter {
       // wraps echoed chars in multi-part ANSI sequences (RPROMPT, syntax highlighting).
       // A longer window on macOS ensures these multi-part sequences arrive as one chunk,
       // which the browser's predictive echo can match correctly.
-      const OUTPUT_COALESCE_MS = platform() === 'darwin' ? 24 : 8;
+      // 32ms on macOS captures full zsh redraw cycles (RPROMPT + syntax highlighting)
+      // that 24ms often split across coalesce boundaries.
+      const OUTPUT_COALESCE_MS = platform() === 'darwin' ? 32 : 8;
       // High-water mark: flush immediately when buffer exceeds this size
       // to prevent unbounded memory growth during high-output commands (e.g. `yes`)
       const OUTPUT_HIGH_WATER = 64 * 1024; // 64KB

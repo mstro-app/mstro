@@ -117,6 +117,9 @@ interface ConnectionCallbacks {
 /**
  * Platform WebSocket connection with token-based authentication
  */
+/** Number of missed pongs before treating connection as dead */
+const MAX_MISSED_PONGS = 2
+
 export class PlatformConnection {
   private ws: WebSocket | null = null
   private reconnectTimeout: ReturnType<typeof setTimeout> | null = null
@@ -130,6 +133,7 @@ export class PlatformConnection {
   private isConnected = false
   private tokenRefreshInterval: ReturnType<typeof setInterval> | null = null
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null
+  private missedPongs = 0
 
   constructor(
     workingDirectory: string,
@@ -184,16 +188,31 @@ export class PlatformConnection {
   }
 
   /**
-   * Start heartbeat to keep connection alive and refresh server-side TTL
+   * Start heartbeat to keep connection alive and refresh server-side TTL.
+   * Tracks missed pongs — if the server doesn't respond to MAX_MISSED_PONGS
+   * consecutive pings, the connection is considered dead and force-closed
+   * to trigger reconnection.
    */
   private startHeartbeat(): void {
+    this.missedPongs = 0
     // Send ping every 2 minutes (server TTL is 5 minutes)
     this.heartbeatInterval = setInterval(() => {
       if (this.ws && this.isConnected) {
+        // Check if previous pong was missed
+        if (this.missedPongs >= MAX_MISSED_PONGS) {
+          console.log(`[Platform] ${this.missedPongs} pongs missed — forcing reconnect`)
+          this.missedPongs = 0
+          this.stopHeartbeat()
+          if (this.ws) {
+            try { this.ws.close() } catch { /* ignore */ }
+          }
+          return
+        }
+        this.missedPongs++
         try {
           this.ws.send(JSON.stringify({ type: 'ping' }))
         } catch {
-          // Ignore send errors - will reconnect if disconnected
+          // Send failed — onclose will handle reconnect
         }
       }
     }, 2 * 60 * 1000)
@@ -363,7 +382,7 @@ export class PlatformConnection {
         break
 
       case 'pong':
-        // Heartbeat response, ignore
+        this.missedPongs = 0
         break
 
       default:

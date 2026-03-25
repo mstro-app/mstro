@@ -820,9 +820,15 @@ describe('Platform Connection Service', () => {
       vi.advanceTimersByTime(2 * 60 * 1000)
       expect(sentMessages.length).toBe(1)
 
+      // Simulate pong to reset missed counter
+      lastWebSocketInstance!.triggerMessage({ type: 'pong' })
+
       // Second ping at 4 minutes
       vi.advanceTimersByTime(2 * 60 * 1000)
       expect(sentMessages.length).toBe(2)
+
+      // Simulate pong
+      lastWebSocketInstance!.triggerMessage({ type: 'pong' })
 
       // Third ping at 6 minutes
       vi.advanceTimersByTime(2 * 60 * 1000)
@@ -831,6 +837,28 @@ describe('Platform Connection Service', () => {
       sentMessages.forEach((msg) => {
         expect(JSON.parse(msg)).toEqual({ type: 'ping' })
       })
+    })
+
+    it('should force reconnect after MAX_MISSED_PONGS missed pongs', () => {
+      const connection = new PlatformConnection('/test/dir')
+      connection.connect()
+
+      lastWebSocketInstance!.triggerOpen()
+      lastWebSocketInstance!.triggerMessage({ type: 'paired', connectionId: 'conn-123' })
+
+      expect(connection.isConnectedToPlatform()).toBe(true)
+
+      // First ping at 2 minutes (missedPongs goes to 1)
+      vi.advanceTimersByTime(2 * 60 * 1000)
+
+      // Second ping at 4 minutes (missedPongs goes to 2, no pong received)
+      vi.advanceTimersByTime(2 * 60 * 1000)
+
+      // Third tick at 6 minutes — missedPongs >= MAX_MISSED_PONGS, force close
+      vi.advanceTimersByTime(2 * 60 * 1000)
+
+      // Connection should be closed (onclose fires, sets isConnected=false)
+      expect(connection.isConnectedToPlatform()).toBe(false)
     })
 
     it('should trigger onWebConnected callback on "web_connected" message', () => {

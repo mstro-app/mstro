@@ -5,6 +5,9 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     include: ['server/**/*.test.ts', 'tests/**/*.test.ts'],
+    fileParallelism: false,
+    sequence: { concurrent: false },
+    reporters: ['default', './vitest-test-logger.ts'],
     coverage: {
       provider: 'v8',
       include: ['server/**/*.ts'],

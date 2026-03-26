@@ -55,6 +55,8 @@ The Bouncer automatically approves or blocks tool calls during mstro sessions. I
 1. **Pattern matching** (<5ms): Known-safe operations are allowed instantly. Known-dangerous patterns (destructive commands, fork bombs) are blocked instantly.
 2. **AI analysis** (~200-500ms): Ambiguous operations are reviewed by a fast AI model to determine if they look like legitimate development work or prompt injection.
 
+The bouncer is validated by 400+ tests covering 22 MITRE ATT&CK techniques. For full details — architecture, threat coverage, known limitations, and vulnerability reporting — see **[SECURITY.md](./SECURITY.md)**.
+
 ## CLI Reference
 
 ### Commands
@@ -145,6 +147,7 @@ sudo apt install tmux
 
 - **Web App**: [mstro.app](https://mstro.app)
 - **GitHub**: [github.com/mstro-app/mstro](https://github.com/mstro-app/mstro)
+- **Security**: [SECURITY.md](./SECURITY.md) — vulnerability reporting, bouncer architecture, MITRE ATT&CK coverage
 
 ## Telemetry
 

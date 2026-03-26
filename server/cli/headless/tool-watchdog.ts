@@ -49,6 +49,14 @@ export const DEFAULT_TOOL_TIMEOUT_PROFILES: Record<string, ToolTimeoutProfile> =
     useAdaptive: true,         // learn from past Task durations via EMA
     useHaikuTiebreaker: true,
   },
+  // Claude Code renamed the Task tool to Agent — keep both for backward compatibility
+  Agent: {
+    coldStartMs: 900_000,      // 15 min — subagents are inherently long-running
+    floorMs: 600_000,          // 10 min minimum (research agents routinely take 7-10 min)
+    ceilingMs: 2_700_000,      // 45 min hard cap
+    useAdaptive: true,         // learn from past Agent durations via EMA
+    useHaikuTiebreaker: true,
+  },
   Bash: {
     coldStartMs: 300_000,      // 5 min
     floorMs: 120_000,          // 2 min minimum

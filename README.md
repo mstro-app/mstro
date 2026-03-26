@@ -2,15 +2,9 @@
 
 Run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) from any browser. The CLI runs locally on your machine and streams live sessions to [mstro.app](https://mstro.app) via a secure WebSocket relay.
 
-**mstro** runs on your laptop, cloud VM, or CI server and connects to the mstro.app web interface. You write prompts in the browser, Claude Code runs in your terminal.
-
 ## How It Works
 
-```
-Browser (mstro.app)  <--WebSocket-->  Platform Server (relay)  <--WebSocket-->  mstro (your machine)
-                                                                           |
-                                                                      Claude Code CLI
-```
+Run Claude Code on a powerful local or remote machine and interact with it from your phone, tablet, or any device with a browser.
 
 1. `mstro` starts a local server and connects to the mstro.app platform
 2. You open [mstro.app](https://mstro.app) in any browser and see your connected machine
@@ -18,7 +12,6 @@ Browser (mstro.app)  <--WebSocket-->  Platform Server (relay)  <--WebSocket-->  
 4. Claude Code runs locally with full access to your project files
 5. Output streams back to the browser in real-time
 
-Run Claude Code on a powerful remote machine and interact with it from your phone, tablet, or any device with a browser.
 
 ## Installation
 

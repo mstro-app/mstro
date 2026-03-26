@@ -311,6 +311,46 @@ function finalizeDecision(
 }
 
 /**
+ * Layer 2: Haiku AI analysis with timeout/error handling.
+ */
+async function runHaikuAnalysis(
+  request: BouncerReviewRequest,
+  operation: string,
+  startTime: number,
+  fin: (d: BouncerDecision, layer: string, opts?: Parameters<typeof finalizeDecision>[6]) => BouncerDecision,
+): Promise<BouncerDecision> {
+  if (process.env.BOUNCER_USE_AI === 'false') {
+    console.error('[Bouncer] AI analysis disabled (BOUNCER_USE_AI=false)');
+    return fin({ decision: 'warn_allow', confidence: 60, reasoning: 'Operation requires review but AI analysis is disabled. Proceeding with caution.', threatLevel: 'medium' }, 'ai-disabled', { skipCache: true, skipAnalytics: true });
+  }
+
+  console.error('[Bouncer] 🤖 Invoking Haiku for AI analysis...');
+  trackEvent(AnalyticsEvents.BOUNCER_HAIKU_REVIEW, { operation_length: operation.length });
+
+  const claudeCommand = process.env.CLAUDE_COMMAND || 'claude';
+  const workingDir = request.context?.workingDirectory || process.cwd();
+
+  try {
+    const decision = await analyzeWithHaiku(request, claudeCommand, workingDir);
+    console.error(`[Bouncer] ✓ Haiku decision: ${decision.decision} (${decision.confidence}% confidence) [${Math.round(performance.now() - startTime)}ms]`);
+    console.error(`[Bouncer] Reasoning: ${decision.reasoning}`);
+    return fin(decision, 'haiku-ai');
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+
+    if (errorMessage.includes('timed out')) {
+      console.error(`[Bouncer] ⚠️  Haiku analysis timed out after ${HAIKU_TIMEOUT_MS}ms — defaulting to ALLOW`);
+      captureException(error, { context: 'bouncer.haiku_timeout', operation });
+      return fin({ decision: 'allow', confidence: 50, reasoning: `Security analysis timed out after ${HAIKU_TIMEOUT_MS}ms. Defaulting to allow — user initiated the action.`, threatLevel: 'medium' }, 'haiku-timeout', { skipCache: true });
+    }
+
+    console.error(`[Bouncer] ⚠️  Haiku analysis failed: ${errorMessage}`);
+    captureException(error, { context: 'bouncer.haiku_analysis', operation });
+    return fin({ decision: 'deny', confidence: 0, reasoning: `Security analysis failed: ${errorMessage}. Denying for safety.`, threatLevel: 'critical' }, 'ai-error', { skipCache: true, skipAnalytics: true, error: errorMessage });
+  }
+}
+
+/**
  * Main bouncer review function - 2-layer hybrid system
  */
 export async function reviewOperation(request: BouncerReviewRequest): Promise<BouncerDecision> {
@@ -373,36 +413,7 @@ export async function reviewOperation(request: BouncerReviewRequest): Promise<Bo
   }
 
   // LAYER 2: Haiku AI Analysis (~200-500ms)
-
-  if (process.env.BOUNCER_USE_AI === 'false') {
-    console.error('[Bouncer] AI analysis disabled (BOUNCER_USE_AI=false)');
-    return fin({ decision: 'warn_allow', confidence: 60, reasoning: 'Operation requires review but AI analysis is disabled. Proceeding with caution.', threatLevel: 'medium' }, 'ai-disabled', { skipCache: true, skipAnalytics: true });
-  }
-
-  console.error('[Bouncer] 🤖 Invoking Haiku for AI analysis...');
-  trackEvent(AnalyticsEvents.BOUNCER_HAIKU_REVIEW, { operation_length: operation.length });
-
-  const claudeCommand = process.env.CLAUDE_COMMAND || 'claude';
-  const workingDir = request.context?.workingDirectory || process.cwd();
-
-  try {
-    const decision = await analyzeWithHaiku(request, claudeCommand, workingDir);
-    console.error(`[Bouncer] ✓ Haiku decision: ${decision.decision} (${decision.confidence}% confidence) [${Math.round(performance.now() - startTime)}ms]`);
-    console.error(`[Bouncer] Reasoning: ${decision.reasoning}`);
-    return fin(decision, 'haiku-ai');
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-
-    if (errorMessage.includes('timed out')) {
-      console.error(`[Bouncer] ⚠️  Haiku analysis timed out after ${HAIKU_TIMEOUT_MS}ms — defaulting to ALLOW`);
-      captureException(error, { context: 'bouncer.haiku_timeout', operation });
-      return fin({ decision: 'allow', confidence: 50, reasoning: `Security analysis timed out after ${HAIKU_TIMEOUT_MS}ms. Defaulting to allow — user initiated the action.`, threatLevel: 'medium' }, 'haiku-timeout', { skipCache: true });
-    }
-
-    console.error(`[Bouncer] ⚠️  Haiku analysis failed: ${errorMessage}`);
-    captureException(error, { context: 'bouncer.haiku_analysis', operation });
-    return fin({ decision: 'deny', confidence: 0, reasoning: `Security analysis failed: ${errorMessage}. Denying for safety.`, threatLevel: 'critical' }, 'ai-error', { skipCache: true, skipAnalytics: true, error: errorMessage });
-  }
+  return runHaikuAnalysis(request, operation, startTime, fin);
 }
 
 /**

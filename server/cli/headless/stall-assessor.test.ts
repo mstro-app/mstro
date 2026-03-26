@@ -89,6 +89,26 @@ describe('assessStall - quickHeuristic paths', () => {
     expect(verdict.reason).toContain('Task subagent');
   });
 
+  it('extends for Agent tool via pendingToolNames (Claude Code renamed Task to Agent)', async () => {
+    const ctx = makeContext({
+      pendingToolCount: 1,
+      pendingToolNames: new Set(['Agent']),
+    });
+    const verdict = await assessStall(ctx, 'claude', false, false);
+    expect(verdict.action).toBe('extend');
+    expect(verdict.reason).toContain('subagent');
+  });
+
+  it('extends for Agent tool via lastToolName fallback', async () => {
+    const ctx = makeContext({
+      pendingToolCount: 1,
+      lastToolName: 'Agent',
+    });
+    const verdict = await assessStall(ctx, 'claude', false, false);
+    expect(verdict.action).toBe('extend');
+    expect(verdict.reason).toContain('subagent');
+  });
+
   it('scales Task extension with pending count', async () => {
     const ctx1 = makeContext({
       pendingToolCount: 1,

@@ -568,25 +568,24 @@ describe('Adversarial: Coverage metrics', () => {
       'Indirect injection': Object.values(INDIRECT_INJECTION_PAYLOADS).flat(),
     };
 
-    const coverage: Record<string, { total: number; denied: number; reviewed: number; autoAllowed: number }> = {};
-
-    for (const [category, payloads] of Object.entries(categories)) {
+    async function collectCategoryStats(payloads: string[]) {
       const stats = { total: payloads.length, denied: 0, reviewed: 0, autoAllowed: 0 };
-
       for (const payload of payloads) {
         const result = await reviewOperation({ operation: payload });
         if (result.decision === 'deny') {
           stats.denied++;
-        } else if (result.decision === 'warn_allow') {
+        } else if (result.decision === 'warn_allow' || result.confidence < 95) {
           stats.reviewed++;
-        } else if (result.confidence >= 95) {
-          stats.autoAllowed++;
         } else {
-          stats.reviewed++; // Low-confidence allow counts as "reviewed"
+          stats.autoAllowed++;
         }
       }
+      return stats;
+    }
 
-      coverage[category] = stats;
+    const coverage: Record<string, { total: number; denied: number; reviewed: number; autoAllowed: number }> = {};
+    for (const [category, payloads] of Object.entries(categories)) {
+      coverage[category] = await collectCategoryStats(payloads);
     }
 
     // Log coverage report

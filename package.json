@@ -71,6 +71,7 @@
     "minimatch": ">=10.2.1"
   },
   "devDependencies": {
+    "@anthropic-ai/sandbox-runtime": "^0.0.42",
     "@biomejs/biome": "^2.3.13",
     "@types/node": "^24.10.7",
     "@types/ws": "^8.18.1",

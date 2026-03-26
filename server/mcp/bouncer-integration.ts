@@ -38,6 +38,7 @@ import { captureException } from '../services/sentry.js';
 import {
   CRITICAL_THREATS,
   matchesPattern,
+  normalizeOperation,
   requiresAIReview,
   SAFE_OPERATIONS
 } from './security-patterns.js';
@@ -66,6 +67,11 @@ function getCachedDecision(operation: string): BouncerDecision | null {
     return null;
   }
   return entry.decision;
+}
+
+/** Clear the decision cache. Exposed for testing statistical reliability (multiple runs per operation). */
+export function clearDecisionCache(): void {
+  decisionCache.clear();
 }
 
 function cacheDecision(operation: string, decision: BouncerDecision): void {
@@ -310,7 +316,8 @@ function finalizeDecision(
 export async function reviewOperation(request: BouncerReviewRequest): Promise<BouncerDecision> {
   const { logBouncerDecision } = await import('./security-audit.js');
   const startTime = performance.now();
-  const { operation } = request;
+  const { operation: rawOperation } = request;
+  const operation = normalizeOperation(rawOperation);
   const fin = (d: BouncerDecision, layer: string, opts?: Parameters<typeof finalizeDecision>[6]) =>
     finalizeDecision(operation, d, layer, startTime, request.context, logBouncerDecision, opts);
 
@@ -336,15 +343,9 @@ export async function reviewOperation(request: BouncerReviewRequest): Promise<Bo
 
   // LAYER 1: Pattern-Based Fast Path (< 5ms)
 
-  // Check safe operations FIRST — allows trusted sources (e.g., brew, rustup)
-  // to pass before hitting critical threat patterns like curl|bash
-  const safeOperation = matchesPattern(operation, SAFE_OPERATIONS);
-  if (safeOperation) {
-    console.error('[Bouncer] ⚡ Fast path: Safe operation approved');
-    return fin({ decision: 'allow', confidence: 95, reasoning: 'Operation matches known-safe patterns. No security concerns detected.', threatLevel: 'low' }, 'pattern-safe');
-  }
-
-  // Critical threats (rm -rf /, fork bombs) — ALWAYS denied
+  // Critical threats (rm -rf /, fork bombs) — ALWAYS denied, checked first
+  // to prevent chained commands (e.g., "echo hello; rm -rf /") from bypassing
+  // via a safe prefix match.
   const criticalThreat = matchesPattern(operation, CRITICAL_THREATS);
   if (criticalThreat) {
     console.error('[Bouncer] ⚡ Fast path: CRITICAL THREAT detected');
@@ -355,13 +356,23 @@ export async function reviewOperation(request: BouncerReviewRequest): Promise<Bo
     }, 'pattern-critical');
   }
 
-  // LAYER 2: Haiku AI Analysis (~200-500ms)
-
-  // Default allow for operations that don't need AI review
+  // Use requiresAIReview() for nuanced routing — handles sensitive paths,
+  // safe operations with guards (chain operators, pipes, expansion), and
+  // exfiltration patterns in a single consistent check.
   if (!requiresAIReview(operation)) {
-    console.error('[Bouncer] ⚡ Fast path: No concerning patterns, allowing');
-    return fin({ decision: 'allow', confidence: 80, reasoning: 'Operation appears safe based on pattern analysis. No obvious threats detected.', threatLevel: 'low' }, 'pattern-default');
+    const isSafe = matchesPattern(operation, SAFE_OPERATIONS);
+    console.error(`[Bouncer] ⚡ Fast path: ${isSafe ? 'Safe operation approved' : 'No concerning patterns, allowing'}`);
+    return fin({
+      decision: 'allow',
+      confidence: isSafe ? 95 : 80,
+      reasoning: isSafe
+        ? 'Operation matches known-safe patterns. No security concerns detected.'
+        : 'Operation appears safe based on pattern analysis. No obvious threats detected.',
+      threatLevel: 'low'
+    }, isSafe ? 'pattern-safe' : 'pattern-default');
   }
+
+  // LAYER 2: Haiku AI Analysis (~200-500ms)
 
   if (process.env.BOUNCER_USE_AI === 'false') {
     console.error('[Bouncer] AI analysis disabled (BOUNCER_USE_AI=false)');

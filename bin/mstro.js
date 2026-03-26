@@ -404,21 +404,56 @@ function parseServerUrl(args) {
 }
 
 /**
- * Show update notification if available
+ * Auto-update if a new version is available.
+ * Installs the update globally and re-execs mstro with the same arguments.
+ * Returns true if the process was re-spawned (caller should return).
  */
-function showUpdateNotification() {
+async function autoUpdate() {
   try {
-    if (notifier.update && semverGt(notifier.update.latest, notifier.update.current)) {
-      const { current, latest, type } = notifier.update;
-      const updateCmd = `npm i -g ${pkg.name}`;
-
-      log('');
-      log(`  ${colors.yellow}Update available:${colors.reset} ${colors.dim}${current}${colors.reset} → ${colors.green}${latest}${colors.reset} ${colors.dim}(${type})${colors.reset}`);
-      log(`  Run: ${colors.cyan}${updateCmd}${colors.reset}`);
-      log('');
+    if (!notifier.update || !semverGt(notifier.update.latest, notifier.update.current)) {
+      return false;
     }
+
+    const { current, latest, type } = notifier.update;
+    log(`\n  Updating mstro: ${colors.dim}${current}${colors.reset} → ${colors.green}${latest}${colors.reset} ${colors.dim}(${type})${colors.reset}`);
+
+    const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+
+    const success = await new Promise((resolve) => {
+      const child = spawn(npmCmd, ['install', '-g', pkg.name], {
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
+      child.on('error', () => resolve(false));
+      child.on('exit', (code) => resolve(code === 0));
+    });
+
+    if (!success) {
+      log(`  Update failed — continuing with v${current}`, colors.yellow);
+      log(`  Run manually: ${colors.cyan}npm i -g ${pkg.name}${colors.reset}\n`);
+      return false;
+    }
+
+    log(`  Updated to v${latest}. Restarting...\n`, colors.green);
+
+    // Re-exec with the newly installed version
+    const child = spawn(process.argv[0], process.argv.slice(1), {
+      stdio: 'inherit',
+      env: { ...process.env, MSTRO_SKIP_UPDATE_CHECK: '1' },
+    });
+
+    // Parent ignores SIGINT — child handles it via shared terminal
+    process.on('SIGINT', () => {});
+    process.on('SIGTERM', () => child.kill('SIGTERM'));
+
+    child.on('exit', (code, signal) => {
+      process.exit(signal ? 1 : (code || 0));
+    });
+    child.on('error', () => process.exit(1));
+
+    return true;
   } catch {
-    // Don't let a corrupted cache or invalid semver crash the CLI
+    // Don't let update logic crash the CLI
+    return false;
   }
 }
 
@@ -475,11 +510,18 @@ async function startServer(envOverrides) {
 
   await ensurePtySetup();
 
-  showUpdateNotification();
   runNpmScript('start', [], envOverrides);
 }
 
 async function main() {
+  // Auto-update before doing anything else
+  if (process.env.MSTRO_SKIP_UPDATE_CHECK) {
+    delete process.env.MSTRO_SKIP_UPDATE_CHECK;
+  } else {
+    const updated = await autoUpdate();
+    if (updated) return; // Re-spawned child takes over
+  }
+
   const requestedPort = parsePort(args);
   const serverUrl = parseServerUrl(args);
   const envOverrides = {
@@ -530,13 +572,11 @@ async function main() {
   // Flag-based commands
   if (args.includes('--version') || args.includes('-V')) {
     log(`mstro v${pkg.version}`);
-    showUpdateNotification();
     return;
   }
 
   if (args.includes('--help') || args.includes('-h')) {
     showHelp();
-    showUpdateNotification();
     return;
   }
 
@@ -544,7 +584,6 @@ async function main() {
   const handler = subcommand ? commands.get(subcommand) : undefined;
   if (handler) {
     await handler();
-    showUpdateNotification();
     return;
   }
 

@@ -31,6 +31,16 @@ describe('ToolWatchdog', () => {
       expect(task.ceilingMs).toBe(2_700_000);
     });
 
+    it('returns Agent profile with same long timeouts as Task', () => {
+      const watchdog = new ToolWatchdog();
+      const agent = watchdog.getProfile('Agent');
+      expect(agent.coldStartMs).toBe(900_000);
+      expect(agent.floorMs).toBe(600_000);
+      expect(agent.ceilingMs).toBe(2_700_000);
+      expect(agent.useAdaptive).toBe(true);
+      expect(agent.useHaikuTiebreaker).toBe(true);
+    });
+
     it('returns default profile for unknown tools', () => {
       const watchdog = new ToolWatchdog();
       const unknown = watchdog.getProfile('SomeNewTool');

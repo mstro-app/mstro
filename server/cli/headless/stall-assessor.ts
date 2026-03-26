@@ -87,7 +87,9 @@ function quickHeuristic(ctx: StallContext, toolWatchdogActive = false): StallVer
   // Task/subagent launches are known to produce long silence periods.
   // The parent Claude process emits nothing while waiting for subagent results.
   // Check pendingToolNames (reliable) first, fall back to lastToolName (legacy).
-  const hasTaskPending = pendingNames.has('Task') || (ctx.lastToolName === 'Task' && hasPendingTools);
+  // Claude Code renamed Task → Agent; check both for backward compatibility
+  const hasTaskPending = pendingNames.has('Task') || pendingNames.has('Agent')
+    || ((ctx.lastToolName === 'Task' || ctx.lastToolName === 'Agent') && hasPendingTools);
   if (hasTaskPending) {
     const extensionMin = Math.min(30, 10 + ctx.pendingToolCount * 5);
     return {
@@ -191,6 +193,7 @@ export async function assessToolTimeout(
     WebFetch: 'fetches a URL, converts HTML to markdown, and runs a Haiku summarization pass',
     WebSearch: 'performs a web search and returns results',
     Task: 'spawns a subagent that runs autonomously with its own tools',
+    Agent: 'spawns a subagent that runs autonomously with its own tools',
     Bash: 'executes a shell command',
   };
   const toolDesc = toolDescriptions[toolName] || `executes the ${toolName} tool`;

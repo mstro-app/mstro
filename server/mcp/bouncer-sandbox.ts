@@ -67,10 +67,10 @@ export class BouncerSandboxHarness {
       }
 
       const deps = SandboxManager.checkDependencies();
-      if (!deps.satisfied) {
+      if (deps.errors.length > 0) {
         return {
           available: false,
-          reason: `Missing dependencies: ${deps.missing?.join(', ') ?? 'unknown'}`,
+          reason: `Missing dependencies: ${deps.errors.join(', ')}`,
         };
       }
 
@@ -137,7 +137,6 @@ export class BouncerSandboxHarness {
       }
 
       // Check violation store
-      const store = this.sandboxManager.getSandboxViolationStore();
       const stderr = this.sandboxManager.annotateStderrWithSandboxFailures(command, '');
       if (stderr) {
         violations.push(stderr);

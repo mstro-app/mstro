@@ -542,6 +542,22 @@ function handleFindDefinition(ctx: HandlerContext, ws: WSContext, msg: WebSocket
       `(fn|struct|enum|trait|type|const|static|mod)\\s+${s}\\b`,
       `impl\\s+${s}\\b`,
     ],
+    swift: (s) => [
+      `(func|class|struct|enum|protocol|typealias|actor)\\s+${s}\\b`,
+      `(let|var)\\s+${s}\\b`,
+      `extension\\s+${s}\\b`,
+    ],
+    kotlin: (s) => [
+      `(fun|class|object|interface|typealias|enum\\s+class)\\s+${s}\\b`,
+      `(val|var)\\s+${s}\\b`,
+    ],
+    java: (s) => [
+      `(class|interface|enum)\\s+${s}\\b`,
+      `(public|private|protected|static)?\\s*(void|int|String|boolean|\\w+)\\s+${s}\\s*\\(`,
+    ],
+    ruby: (s) => [
+      `(def|class|module)\\s+${s}\\b`,
+    ],
   };
 
   const LANGUAGE_GLOBS: Record<string, string> = {
@@ -550,6 +566,10 @@ function handleFindDefinition(ctx: HandlerContext, ws: WSContext, msg: WebSocket
     python: '*.py',
     go: '*.go',
     rust: '*.rs',
+    swift: '*.swift',
+    kotlin: '*.{kt,kts}',
+    java: '*.java',
+    ruby: '*.rb',
   };
 
   const patterns = DEFINITION_PATTERNS[language] || DEFINITION_PATTERNS.typescript;

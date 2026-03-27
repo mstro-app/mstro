@@ -11,10 +11,50 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { HeadlessRunner } from '../../cli/headless/index.js';
+import { HeadlessRunner, type ToolUseEvent } from '../../cli/headless/index.js';
 import type { HandlerContext } from '../websocket/handler-context.js';
 import type { WSContext } from '../websocket/types.js';
 import { getNextId, parsePlanDirectory, resolvePmDir } from './parser.js';
+
+const PROMPT_TOOL_MESSAGES: Record<string, string> = {
+  Glob: 'Discovering project files...',
+  Read: 'Reading project structure...',
+  Grep: 'Searching codebase...',
+  Write: 'Creating project files...',
+  Edit: 'Updating project files...',
+  Bash: 'Running commands...',
+};
+
+function getPromptToolCompleteMessage(event: ToolUseEvent): string | null {
+  const input = event.completeInput;
+  if (!input) return null;
+  if (event.toolName === 'Write' && input.file_path) {
+    const filename = String(input.file_path).split('/').pop() ?? '';
+    return `Created ${filename}`;
+  }
+  if (event.toolName === 'Edit' && input.file_path) {
+    const filename = String(input.file_path).split('/').pop() ?? '';
+    return `Updated ${filename}`;
+  }
+  if (event.toolName === 'Read' && input.file_path) {
+    return `Read ${String(input.file_path).split('/').slice(-2).join('/')}`;
+  }
+  return null;
+}
+
+function createPromptProgressTracker() {
+  const seenToolStarts = new Set<string>();
+
+  return (event: ToolUseEvent): string | null => {
+    if (event.type === 'tool_start' && event.toolName) {
+      if (seenToolStarts.has(event.toolName)) return null;
+      seenToolStarts.add(event.toolName);
+      return PROMPT_TOOL_MESSAGES[event.toolName] ?? null;
+    }
+    if (event.type === 'tool_complete') return getPromptToolCompleteMessage(event);
+    return null;
+  };
+}
 
 function readFileOrEmpty(path: string): string {
   try {
@@ -66,6 +106,11 @@ Follow these rules:
 User request: ${userPrompt}`;
 
   try {
+    ctx.broadcastToAll({
+      type: 'planPromptProgress',
+      data: { message: 'Starting project planning...' },
+    });
+
     const runner = new HeadlessRunner({
       workingDir,
       directPrompt: enrichedPrompt,
@@ -75,9 +120,31 @@ User request: ${userPrompt}`;
           data: { token: text },
         });
       },
+      toolUseCallback: (() => {
+        const getProgressMessage = createPromptProgressTracker();
+        return (event: ToolUseEvent) => {
+          const message = getProgressMessage(event);
+          if (message) {
+            ctx.broadcastToAll({
+              type: 'planPromptProgress',
+              data: { message },
+            });
+          }
+        };
+      })(),
+    });
+
+    ctx.broadcastToAll({
+      type: 'planPromptProgress',
+      data: { message: 'Claude is planning your project...' },
     });
 
     const result = await runner.run();
+
+    ctx.broadcastToAll({
+      type: 'planPromptProgress',
+      data: { message: 'Finalizing project plan...' },
+    });
 
     ctx.send(ws, {
       type: 'planPromptResponse',

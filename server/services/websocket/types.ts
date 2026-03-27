@@ -273,6 +273,7 @@ export interface WebSocketResponse {
     | 'planIssueDeleted'
     | 'planScaffolded'
     | 'planPromptStreaming'
+    | 'planPromptProgress'
     | 'planPromptResponse'
     | 'planExecutionStarted'
     | 'planExecutionProgress'

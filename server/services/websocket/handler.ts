@@ -19,6 +19,7 @@ import { handleFileExplorerMessage, handleFileMessage } from './file-explorer-ha
 import { FileUploadHandler } from './file-upload-handler.js';
 import { handleGitMessage } from './git-handlers.js';
 import type { HandlerContext, UsageReporter } from './handler-context.js';
+import { handlePlanMessage } from './plan-handlers.js';
 import { handleQualityMessage } from './quality-handlers.js';
 import { handleHistoryMessage, handleSessionMessage, initializeTab, resumeHistoricalSession } from './session-handlers.js';
 import { SessionRegistry } from './session-registry.js';
@@ -226,7 +227,26 @@ export class WebSocketImproviseHandler implements HandlerContext {
       case 'qualityScan':
       case 'qualityInstallTools':
       case 'qualityCodeReview':
+      case 'qualityLoadState':
+      case 'qualitySaveDirectories':
         return handleQualityMessage(this, ws, msg, tabId, workingDir);
+      // Plan messages
+      case 'planInit':
+      case 'planGetState':
+      case 'planListIssues':
+      case 'planGetIssue':
+      case 'planGetSprint':
+      case 'planGetMilestone':
+      case 'planCreateIssue':
+      case 'planUpdateIssue':
+      case 'planDeleteIssue':
+      case 'planScaffold':
+      case 'planPrompt':
+      case 'planExecute':
+      case 'planPause':
+      case 'planStop':
+      case 'planResume':
+        return handlePlanMessage(this, ws, msg, tabId, workingDir, permission);
       // Settings messages
       case 'getSettings':
         return handleGetSettings(this, ws);

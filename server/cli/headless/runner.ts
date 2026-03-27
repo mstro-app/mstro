@@ -122,6 +122,7 @@ export class HeadlessRunner {
           nativeTimeoutCount: result.nativeTimeoutCount,
           postTimeoutOutput: result.postTimeoutOutput,
           resumeBufferedOutput: result.resumeBufferedOutput,
+          stopReason: result.stopReason,
         };
       }
 
@@ -150,6 +151,7 @@ export class HeadlessRunner {
         nativeTimeoutCount: result.nativeTimeoutCount,
         postTimeoutOutput: result.postTimeoutOutput,
         resumeBufferedOutput: result.resumeBufferedOutput,
+        stopReason: result.stopReason,
       };
     }
 
@@ -168,6 +170,7 @@ export class HeadlessRunner {
       nativeTimeoutCount: result.nativeTimeoutCount,
       postTimeoutOutput: result.postTimeoutOutput,
       resumeBufferedOutput: result.resumeBufferedOutput,
+      stopReason: result.stopReason,
     };
   }
 

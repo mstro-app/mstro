@@ -277,6 +277,8 @@ interface StreamHandlerContext {
   currentStepOutputTokens: number;
   /** Timestamp of the last token usage change (tokens still flowing = process alive) */
   lastTokenActivityTime: number;
+  /** Claude Code result event stop_reason (e.g., 'end_turn', 'max_tokens') */
+  stopReason?: string;
 }
 
 function handleSessionCapture(
@@ -590,9 +592,12 @@ function processStreamEvent(parsed: StreamJson, ctx: StreamHandlerContext): void
     return;
   }
 
-  // Handle result events — extract definitive token usage and surface errors
+  // Handle result events — extract definitive token usage, stop_reason, and surface errors
   if (parsed.type === 'result') {
     handleResultTokenUsage(parsed, ctx);
+    if (parsed.stop_reason) {
+      ctx.stopReason = parsed.stop_reason;
+    }
     if (parsed.is_error) {
       const errorMessage = parsed.error || parsed.result || 'Unknown error in result';
       ctx.config.outputCallback?.(`\n[[MSTRO_ERROR:CLAUDE_RESULT_ERROR]] ${errorMessage}\n`);
@@ -1210,5 +1215,6 @@ function buildCloseResult(
     postTimeoutOutput: postTimeout,
     resumeBufferedOutput: resumeBuffered,
     apiTokenUsage: hasTokenUsage ? { ...ctx.apiTokenUsage } : undefined,
+    stopReason: ctx.stopReason,
   };
 }

@@ -112,11 +112,29 @@ export interface WebSocketMessage {
     | 'qualityScan'
     | 'qualityInstallTools'
     | 'qualityCodeReview'
+    | 'qualityLoadState'
+    | 'qualitySaveDirectories'
     // File upload message types (chunked remote uploads)
     | 'fileUploadStart'
     | 'fileUploadChunk'
     | 'fileUploadComplete'
-    | 'fileUploadCancel';
+    | 'fileUploadCancel'
+    // Plan message types
+    | 'planInit'
+    | 'planGetState'
+    | 'planListIssues'
+    | 'planGetIssue'
+    | 'planGetSprint'
+    | 'planGetMilestone'
+    | 'planCreateIssue'
+    | 'planUpdateIssue'
+    | 'planDeleteIssue'
+    | 'planScaffold'
+    | 'planPrompt'
+    | 'planExecute'
+    | 'planPause'
+    | 'planStop'
+    | 'planResume';
   tabId?: string;
   terminalId?: string;
   // biome-ignore lint/suspicious/noExplicitAny: message envelope carries heterogeneous payloads
@@ -233,10 +251,32 @@ export interface WebSocketResponse {
     | 'qualityCodeReview'
     | 'qualityPostSession'
     | 'qualityError'
+    | 'qualityStateLoaded'
     // File upload response types
     | 'fileUploadAck'
     | 'fileUploadReady'
-    | 'fileUploadError';
+    | 'fileUploadError'
+    // Plan response types
+    | 'planState'
+    | 'planIssueList'
+    | 'planIssue'
+    | 'planSprint'
+    | 'planMilestone'
+    | 'planNotFound'
+    | 'planStateUpdated'
+    | 'planIssueUpdated'
+    | 'planIssueCreated'
+    | 'planIssueDeleted'
+    | 'planScaffolded'
+    | 'planPromptStreaming'
+    | 'planPromptResponse'
+    | 'planExecutionStarted'
+    | 'planExecutionProgress'
+    | 'planExecutionOutput'
+    | 'planExecutionMetrics'
+    | 'planExecutionComplete'
+    | 'planExecutionError'
+    | 'planError';
   tabId?: string;
   terminalId?: string;
   // biome-ignore lint/suspicious/noExplicitAny: message envelope carries heterogeneous payloads

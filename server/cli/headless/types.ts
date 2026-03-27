@@ -165,6 +165,8 @@ export interface SessionResult {
   /** Assistant text buffered during resume assessment — held back until thinking/tool activity
    *  confirms Claude has context. Undefined when not in resume mode or buffer was flushed. */
   resumeBufferedOutput?: string;
+  /** Claude Code result event stop_reason: 'end_turn', 'max_tokens', or undefined if not captured */
+  stopReason?: string;
 }
 
 export interface ToolUseAccumulator {
@@ -200,6 +202,8 @@ export interface ExecutionResult {
   resumeBufferedOutput?: string;
   /** Actual API token usage from Claude Code stream events (summed across all turns) */
   apiTokenUsage?: { inputTokens: number; outputTokens: number };
+  /** Claude Code result event stop_reason: 'end_turn', 'max_tokens', or undefined if not captured */
+  stopReason?: string;
 }
 
 /** Resolved config with all defaults applied */

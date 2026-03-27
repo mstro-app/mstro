@@ -112,6 +112,7 @@ export interface WebSocketMessage {
     | 'qualityScan'
     | 'qualityInstallTools'
     | 'qualityCodeReview'
+    | 'qualityFixIssues'
     | 'qualityLoadState'
     | 'qualitySaveDirectories'
     // File upload message types (chunked remote uploads)
@@ -251,6 +252,8 @@ export interface WebSocketResponse {
     | 'qualityCodeReview'
     | 'qualityCodeReviewProgress'
     | 'qualityPostSession'
+    | 'qualityFixProgress'
+    | 'qualityFixComplete'
     | 'qualityError'
     | 'qualityStateLoaded'
     // File upload response types

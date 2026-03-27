@@ -33,6 +33,7 @@ export function handleQualityMessage(
     qualityScan: () => handleScan(ctx, ws, msg, workingDir),
     qualityInstallTools: () => handleInstallTools(ctx, ws, msg, workingDir),
     qualityCodeReview: () => handleCodeReview(ctx, ws, msg, workingDir),
+    qualityFixIssues: () => handleFixIssues(ctx, ws, msg, workingDir),
     qualityLoadState: () => handleLoadState(ctx, ws, workingDir),
     qualitySaveDirectories: () => handleSaveDirectories(ctx, ws, msg, workingDir),
   };
@@ -126,12 +127,16 @@ async function handleScan(
   const reportPath = msg.data?.path || '.';
 
   try {
+    // Detect installed tools so the scan can skip unavailable categories
+    const { tools: detectedTools } = await detectTools(dirPath);
+    const installedToolNames = detectedTools.filter((t) => t.installed).map((t) => t.name);
+
     const results = await runQualityScan(dirPath, (progress) => {
       ctx.send(ws, {
         type: 'qualityScanProgress',
         data: { path: reportPath, progress },
       });
-    });
+    }, installedToolNames);
     ctx.send(ws, {
       type: 'qualityScanResults',
       data: { path: reportPath, results },
@@ -187,11 +192,14 @@ async function handleInstallTools(
 // Code Review Agent
 // ============================================================================
 
-const CODE_REVIEW_PROMPT = `You are an expert code review agent. Your task is to perform a comprehensive, language-agnostic code review of the project in the current working directory.
+function buildCodeReviewPrompt(dirPath: string): string {
+  return `You are an expert code review agent. Your task is to perform a comprehensive, language-agnostic code review of the project in the current working directory.
+
+IMPORTANT: Your current working directory is "${dirPath}". Only review files within this directory. Do NOT traverse parent directories or review files outside this path.
 
 ## Review Process
 
-1. **Discover**: Use Glob to find source files (e.g. "src/**/*.{ts,tsx,js,py,rs,go,java,rb,php}"). Understand the project structure.
+1. **Discover**: Use Glob to find source files (e.g. "**/*.{ts,tsx,js,py,rs,go,java,rb,php}"). Understand the project structure. Only search within the current directory.
 2. **Read**: Read the most important files — entry points, core modules, handlers, services. Prioritize files with recent git changes (\`git diff --name-only HEAD~5\` via Bash if available).
 3. **Analyze**: Look for real, actionable issues across these categories:
    - **security**: Injection vulnerabilities (SQL, XSS, command), hardcoded secrets/credentials, auth bypasses, insecure crypto, path traversal, SSRF, unsafe deserialization
@@ -227,6 +235,7 @@ After your analysis, output EXACTLY one JSON code block with your findings. No o
   "summary": "Brief 1-2 sentence summary of overall code quality."
 }
 \`\`\``;
+}
 
 interface CodeReviewFinding {
   severity: 'critical' | 'high' | 'medium' | 'low';
@@ -342,7 +351,7 @@ async function handleCodeReview(
 
     const runner = new HeadlessRunner({
       workingDir: dirPath,
-      directPrompt: CODE_REVIEW_PROMPT,
+      directPrompt: buildCodeReviewPrompt(dirPath),
       stallWarningMs: 120_000,
       stallKillMs: 600_000,
       stallHardCapMs: 900_000,
@@ -394,5 +403,168 @@ async function handleCodeReview(
     });
   } finally {
     activeReviews.delete(dirPath);
+  }
+}
+
+// ============================================================================
+// Fix Issues Agent
+// ============================================================================
+
+interface FindingForFix {
+  severity: string;
+  category: string;
+  file: string;
+  line: number | null;
+  title: string;
+  description: string;
+  suggestion?: string;
+}
+
+function buildFixPrompt(findings: FindingForFix[], section?: string): string {
+  const filtered = section ? findings.filter((f) => f.category === section) : findings;
+  const sorted = filtered.sort((a, b) => {
+    const order: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
+    return (order[a.severity] ?? 4) - (order[b.severity] ?? 4);
+  });
+
+  const issueList = sorted.slice(0, 30).map((f, i) => {
+    const loc = f.line ? `${f.file}:${f.line}` : f.file;
+    const parts = [`${i + 1}. [${f.severity.toUpperCase()}] ${loc} — ${f.title}`];
+    if (f.description) parts.push(`   ${f.description}`);
+    if (f.suggestion) parts.push(`   Suggestion: ${f.suggestion}`);
+    return parts.join('\n');
+  }).join('\n\n');
+
+  return `You are a code quality fix agent. Fix the following quality issues in the codebase.
+
+## Issues to Fix (${sorted.length} total, showing top ${Math.min(30, sorted.length)})
+
+${issueList}
+
+## Rules
+
+- Fix each issue by editing the relevant file at the specified location.
+- For complexity issues: refactor into smaller functions. For long files: split or extract modules. For long functions: break into smaller functions.
+- For security issues: apply the suggested fix or use secure coding best practices.
+- For bugs: fix the root cause, not just the symptom.
+- For linting/formatting: apply the standard for the project.
+- Do NOT introduce new issues. Make minimal, focused changes.
+- After fixing, verify the changes compile/pass linting if tools are available.
+- Work through the issues systematically from most to least severe.`;
+}
+
+const activeFixes = new Set<string>();
+
+async function handleFixIssues(
+  ctx: HandlerContext,
+  ws: WSContext,
+  msg: WebSocketMessage,
+  workingDir: string,
+): Promise<void> {
+  const dirPath = resolvePath(workingDir, msg.data?.path);
+  const reportPath = msg.data?.path || '.';
+  const section: string | undefined = msg.data?.section;
+  const findings: FindingForFix[] = msg.data?.findings || [];
+
+  if (activeFixes.has(dirPath)) {
+    ctx.send(ws, {
+      type: 'qualityError',
+      data: { path: reportPath, error: 'A fix operation is already running for this directory.' },
+    });
+    return;
+  }
+
+  if (findings.length === 0) {
+    ctx.send(ws, {
+      type: 'qualityError',
+      data: { path: reportPath, error: 'No findings to fix.' },
+    });
+    return;
+  }
+
+  activeFixes.add(dirPath);
+  try {
+    ctx.send(ws, {
+      type: 'qualityFixProgress',
+      data: { path: reportPath, message: 'Starting Claude Code to fix issues...' },
+    });
+
+    const prompt = buildFixPrompt(findings, section);
+
+    const runner = new HeadlessRunner({
+      workingDir: dirPath,
+      directPrompt: prompt,
+      stallWarningMs: 120_000,
+      stallKillMs: 600_000,
+      stallHardCapMs: 900_000,
+      toolUseCallback: (() => {
+        const seenTools = new Set<string>();
+        return (event: ToolUseEvent) => {
+          if (event.type === 'tool_start' && event.toolName) {
+            if (seenTools.has(event.toolName)) return;
+            seenTools.add(event.toolName);
+            const messages: Record<string, string> = {
+              Read: 'Reading files to understand issues...',
+              Edit: 'Applying fixes...',
+              Write: 'Writing fixes...',
+              Grep: 'Searching for related code...',
+              Bash: 'Running verification...',
+            };
+            const message = messages[event.toolName];
+            if (message) {
+              ctx.send(ws, {
+                type: 'qualityFixProgress',
+                data: { path: reportPath, message },
+              });
+            }
+          }
+          if (event.type === 'tool_complete' && event.toolName === 'Edit' && event.completeInput?.file_path) {
+            ctx.send(ws, {
+              type: 'qualityFixProgress',
+              data: { path: reportPath, message: `Fixed ${String(event.completeInput.file_path).split('/').slice(-2).join('/')}` },
+            });
+          }
+        };
+      })(),
+    });
+
+    await runner.run();
+
+    ctx.send(ws, {
+      type: 'qualityFixProgress',
+      data: { path: reportPath, message: 'Fixes applied. Re-running quality checks...' },
+    });
+
+    // Re-run quality scan after fixing
+    const { tools: detectedTools } = await detectTools(dirPath);
+    const installedToolNames = detectedTools.filter((t) => t.installed).map((t) => t.name);
+
+    const results = await runQualityScan(dirPath, (progress) => {
+      ctx.send(ws, {
+        type: 'qualityScanProgress',
+        data: { path: reportPath, progress },
+      });
+    }, installedToolNames);
+
+    ctx.send(ws, {
+      type: 'qualityFixComplete',
+      data: { path: reportPath, results },
+    });
+
+    // Persist
+    try {
+      const persistence = getPersistence(workingDir);
+      persistence.saveReport(reportPath, results);
+      persistence.appendHistory(results, reportPath);
+    } catch {
+      // Persistence failure should not break the fix flow
+    }
+  } catch (error) {
+    ctx.send(ws, {
+      type: 'qualityError',
+      data: { path: reportPath, error: error instanceof Error ? error.message : String(error) },
+    });
+  } finally {
+    activeFixes.delete(dirPath);
   }
 }

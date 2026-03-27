@@ -133,6 +133,7 @@ export interface WebSocketMessage {
     | 'planScaffold'
     | 'planPrompt'
     | 'planExecute'
+    | 'planExecuteEpic'
     | 'planPause'
     | 'planStop'
     | 'planResume';

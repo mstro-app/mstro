@@ -211,6 +211,7 @@ export function handlePlanMessage(
     planScaffold: () => handleScaffold(ctx, ws, msg, workingDir, permission),
     planPrompt: () => handlePrompt(ctx, ws, msg, workingDir, permission),
     planExecute: () => handleExecute(ctx, ws, workingDir, permission),
+    planExecuteEpic: () => handleExecuteEpic(ctx, ws, msg, workingDir, permission),
     planPause: () => handlePause(ctx, ws, workingDir, permission),
     planStop: () => handleStop(ctx, ws, workingDir, permission),
     planResume: () => handleResume(ctx, ws, workingDir, permission),
@@ -501,6 +502,36 @@ function handleExecute(
 
   ctx.send(ws, { type: 'planExecutionStarted', data: { status: 'executing' } });
   executor.start().catch(error => {
+    ctx.send(ws, {
+      type: 'planExecutionError',
+      data: { error: error instanceof Error ? error.message : String(error) },
+    });
+  });
+}
+
+function handleExecuteEpic(
+  ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage,
+  workingDir: string, permission?: 'control' | 'view',
+): void {
+  if (denyIfViewOnly(ctx, ws, permission)) return;
+
+  const epicPath = msg.data?.epicPath;
+  if (!epicPath) {
+    ctx.send(ws, { type: 'planError', data: { error: 'Epic path required' } });
+    return;
+  }
+
+  const executor = getExecutor(workingDir);
+
+  if (executor.getStatus() === 'executing' || executor.getStatus() === 'starting') {
+    ctx.send(ws, { type: 'planError', data: { error: 'Execution already in progress' } });
+    return;
+  }
+
+  wireExecutorEvents(executor, ctx, workingDir);
+
+  ctx.send(ws, { type: 'planExecutionStarted', data: { status: 'executing', epicPath } });
+  executor.startEpic(epicPath).catch(error => {
     ctx.send(ws, {
       type: 'planExecutionError',
       data: { error: error instanceof Error ? error.message : String(error) },

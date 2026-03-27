@@ -31,6 +31,7 @@ export class PlanExecutor extends EventEmitter {
   private workingDir: string;
   private shouldStop = false;
   private shouldPause = false;
+  private epicScope: string | null = null;
   private metrics: ExecutionMetrics = {
     issuesCompleted: 0,
     issuesAttempted: 0,
@@ -49,6 +50,11 @@ export class PlanExecutor extends EventEmitter {
 
   getMetrics(): ExecutionMetrics {
     return { ...this.metrics };
+  }
+
+  async startEpic(epicPath: string): Promise<void> {
+    this.epicScope = epicPath;
+    return this.start();
   }
 
   async start(): Promise<void> {
@@ -112,9 +118,9 @@ export class PlanExecutor extends EventEmitter {
       this.emit('error', 'Project is paused');
       return null;
     }
-    const readyIssues = resolveReadyToWork(fullState.issues);
+    const readyIssues = resolveReadyToWork(fullState.issues, this.epicScope ?? undefined);
     if (readyIssues.length === 0) {
-      this.emit('complete', 'All work is done or blocked');
+      this.emit('complete', this.epicScope ? 'All epic issues are done or blocked' : 'All work is done or blocked');
       return null;
     }
     return readyIssues[0];

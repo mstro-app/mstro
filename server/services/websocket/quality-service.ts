@@ -54,7 +54,7 @@ export interface ScanProgress {
   total: number;
 }
 
-type Ecosystem = 'node' | 'python' | 'rust' | 'go' | 'unknown';
+type Ecosystem = 'node' | 'python' | 'rust' | 'go' | 'swift' | 'kotlin' | 'unknown';
 
 interface ToolSpec {
   name: string;
@@ -86,6 +86,14 @@ const ECOSYSTEM_TOOLS: Record<Ecosystem, ToolSpec[]> = {
   go: [
     { name: 'golangci-lint', check: ['golangci-lint', '--version'], category: 'linter', installCmd: 'go install github.com/golangci-lint/golangci-lint/cmd/golangci-lint@latest' },
     { name: 'gofmt', check: ['gofmt', '-h'], category: 'formatter', installCmd: '(built-in with Go)' },
+  ],
+  swift: [
+    { name: 'swiftlint', check: ['swiftlint', '--version'], category: 'linter', installCmd: 'brew install swiftlint' },
+    { name: 'swiftformat', check: ['swiftformat', '--version'], category: 'formatter', installCmd: 'brew install swiftformat' },
+  ],
+  kotlin: [
+    { name: 'ktlint', check: ['ktlint', '--version'], category: 'linter', installCmd: 'brew install ktlint' },
+    { name: 'ktfmt', check: ['ktfmt', '--version'], category: 'formatter', installCmd: 'brew install ktfmt' },
   ],
   unknown: [],
 };
@@ -139,6 +147,8 @@ export function detectEcosystem(dirPath: string): Ecosystem[] {
     if (files.includes('pyproject.toml') || files.includes('setup.py') || files.includes('requirements.txt')) ecosystems.push('python');
     if (files.includes('Cargo.toml')) ecosystems.push('rust');
     if (files.includes('go.mod')) ecosystems.push('go');
+    if (files.includes('Package.swift') || files.some(f => f.endsWith('.xcodeproj') || f.endsWith('.xcworkspace'))) ecosystems.push('swift');
+    if (files.includes('build.gradle') || files.includes('build.gradle.kts')) ecosystems.push('kotlin');
   } catch {
     // Directory not readable
   }

@@ -2,14 +2,15 @@
 // Licensed under the MIT License. See LICENSE file for details.
 
 /**
- * Plan Executor — Runs the PPS execution loop.
+ * Plan Executor — Wave-based execution with Claude Code Agent Teams.
  *
- * Reads STATE.md from .pm/ (or legacy .plan/), picks the highest-priority
- * unblocked issue, spawns a coding agent for it, updates state on completion, and loops.
+ * Reads the dependency DAG from .pm/, picks ALL unblocked issues per wave,
+ * spawns a coordinator Claude session that uses Agent Teams to execute them
+ * in parallel, then reconciles state and repeats for newly-unblocked issues.
  */
 
 import { EventEmitter } from 'node:events';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { HeadlessRunner } from '../../cli/headless/index.js';
 import { resolveReadyToWork } from './dependency-resolver.js';
@@ -24,6 +25,8 @@ export interface ExecutionMetrics {
   issuesAttempted: number;
   totalDuration: number;
   currentIssueId: string | null;
+  /** IDs of issues being executed in the current wave */
+  currentWaveIds: string[];
 }
 
 export class PlanExecutor extends EventEmitter {
@@ -37,6 +40,7 @@ export class PlanExecutor extends EventEmitter {
     issuesAttempted: 0,
     totalDuration: 0,
     currentIssueId: null,
+    currentWaveIds: [],
   };
 
   constructor(workingDir: string) {
@@ -72,9 +76,16 @@ export class PlanExecutor extends EventEmitter {
       this.emit('statusChanged', this.status);
 
       while (!this.shouldStop && !this.shouldPause) {
-        const issue = this.pickNextIssue();
-        if (!issue) break;
-        await this.executeIssue(issue);
+        const readyIssues = this.pickReadyIssues();
+        if (readyIssues.length === 0) break;
+
+        if (readyIssues.length === 1) {
+          // Single issue: direct execution (no Agent Teams overhead)
+          await this.executeIssue(readyIssues[0]);
+        } else {
+          // Multiple unblocked issues: wave execution with Agent Teams
+          await this.executeWave(readyIssues);
+        }
       }
     } catch (error) {
       this.status = 'error';
@@ -108,30 +119,138 @@ export class PlanExecutor extends EventEmitter {
     return this.start();
   }
 
-  private pickNextIssue(): Issue | null {
-    const fullState = parsePlanDirectory(this.workingDir);
-    if (!fullState) {
-      this.emit('error', 'No .pm/ directory found');
-      return null;
+  // ── Wave execution (Agent Teams) ──────────────────────────────
+
+  private async executeWave(issues: Issue[]): Promise<void> {
+    const waveIds = issues.map(i => i.id);
+    this.metrics.currentWaveIds = waveIds;
+    this.metrics.issuesAttempted += issues.length;
+    this.emit('waveStarted', { issueIds: waveIds });
+
+    // Mark all wave issues as in_progress
+    for (const issue of issues) {
+      this.updateIssueFrontMatter(issue.path, 'in_progress');
     }
-    if (fullState.state.paused) {
-      this.emit('error', 'Project is paused');
-      return null;
+
+    const prompt = this.buildCoordinatorPrompt(issues);
+
+    try {
+      const runner = new HeadlessRunner({
+        workingDir: this.workingDir,
+        directPrompt: prompt,
+        stallKillMs: 3_600_000,  // 60 min — waves run longer
+        stallHardCapMs: 7_200_000, // 2 hr hard cap
+        outputCallback: (text: string) => {
+          this.emit('output', { issueId: `wave[${waveIds.join(',')}]`, text });
+        },
+      });
+
+      const result = await runner.run();
+
+      if (!result.completed || result.error) {
+        this.emit('waveError', {
+          issueIds: waveIds,
+          error: result.error || 'Wave did not complete successfully',
+        });
+      }
+
+      // Check which issues the agents actually completed by reading disk
+      this.reconcileWaveResults(issues);
+
+    } catch (error) {
+      this.emit('waveError', {
+        issueIds: waveIds,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      // Revert any issues that weren't completed
+      for (const issue of issues) {
+        const pmDir = resolvePmDir(this.workingDir);
+        if (!pmDir) continue;
+        const fullPath = join(pmDir, issue.path);
+        try {
+          const content = readFileSync(fullPath, 'utf-8');
+          if (content.match(/^status:\s*in_progress$/m)) {
+            this.updateIssueFrontMatter(issue.path, issue.status);
+          }
+        } catch { /* file may be gone */ }
+      }
     }
-    const readyIssues = resolveReadyToWork(fullState.issues, this.epicScope ?? undefined);
-    if (readyIssues.length === 0) {
-      this.emit('complete', this.epicScope ? 'All epic issues are done or blocked' : 'All work is done or blocked');
-      return null;
-    }
-    return readyIssues[0];
+
+    // Reconcile STATE.md after wave
+    reconcileState(this.workingDir);
+    this.emit('stateUpdated');
+    this.metrics.currentWaveIds = [];
   }
+
+  /**
+   * After a wave, check each issue's status on disk.
+   * The coordinator agent is instructed to mark issues as done via front matter,
+   * so we trust the disk state and update metrics accordingly.
+   */
+  private reconcileWaveResults(issues: Issue[]): void {
+    const pmDir = resolvePmDir(this.workingDir);
+    if (!pmDir) return;
+
+    for (const issue of issues) {
+      const fullPath = join(pmDir, issue.path);
+      try {
+        const content = readFileSync(fullPath, 'utf-8');
+        const statusMatch = content.match(/^status:\s*(\S+)/m);
+        const currentStatus = statusMatch?.[1] ?? 'unknown';
+
+        if (currentStatus === 'done') {
+          this.metrics.issuesCompleted++;
+          this.emit('issueCompleted', issue);
+        } else if (currentStatus === 'in_progress') {
+          // Agent didn't finish — check if output doc exists (partial completion)
+          const outputDoc = this.findOutputDoc(issue.id);
+          if (outputDoc) {
+            // Output was written but status not updated — mark done
+            this.updateIssueFrontMatter(issue.path, 'done');
+            this.metrics.issuesCompleted++;
+            this.emit('issueCompleted', issue);
+          } else {
+            // Genuinely incomplete — revert to prior status
+            this.updateIssueFrontMatter(issue.path, issue.status);
+            this.emit('issueError', {
+              issueId: issue.id,
+              error: 'Issue did not complete during wave execution',
+            });
+          }
+        }
+      } catch {
+        // File read error — treat as incomplete
+        this.emit('issueError', { issueId: issue.id, error: 'Could not read issue file after wave' });
+      }
+    }
+  }
+
+  /**
+   * Look for an output document matching an issue ID in .pm/docs/.
+   */
+  private findOutputDoc(issueId: string): string | null {
+    const pmDir = resolvePmDir(this.workingDir);
+    if (!pmDir) return null;
+    const docsDir = join(pmDir, 'docs');
+    if (!existsSync(docsDir)) return null;
+
+    try {
+      const files = readdirSync(docsDir);
+      const prefix = issueId.toLowerCase();
+      const match = files.find(f => f.toLowerCase().startsWith(prefix) && f.endsWith('.md'));
+      return match ? join(docsDir, match) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // ── Single issue execution (fallback for wave size 1) ─────────
 
   private async executeIssue(issue: Issue): Promise<void> {
     this.metrics.currentIssueId = issue.id;
     this.metrics.issuesAttempted++;
     this.emit('issueStarted', issue);
 
-    // Update issue status to in_progress
     this.updateIssueFrontMatter(issue.path, 'in_progress');
 
     const prompt = this.buildIssuePrompt(issue);
@@ -150,13 +269,11 @@ export class PlanExecutor extends EventEmitter {
       if (!result.completed || result.error) {
         this.emit('issueError', { issueId: issue.id, error: result.error || 'Issue did not complete successfully' });
       } else {
-        // Mark issue as done
         this.updateIssueFrontMatter(issue.path, 'done');
         this.metrics.issuesCompleted++;
         this.emit('issueCompleted', issue);
       }
 
-      // Reconcile STATE.md
       reconcileState(this.workingDir);
       this.emit('stateUpdated');
     } catch (error) {
@@ -164,14 +281,127 @@ export class PlanExecutor extends EventEmitter {
         issueId: issue.id,
         error: error instanceof Error ? error.message : String(error),
       });
-      // Revert issue status
       this.updateIssueFrontMatter(issue.path, issue.status);
     }
 
     this.metrics.currentIssueId = null;
   }
 
+  // ── Issue picking ─────────────────────────────────────────────
+
+  private pickReadyIssues(): Issue[] {
+    const fullState = parsePlanDirectory(this.workingDir);
+    if (!fullState) {
+      this.emit('error', 'No .pm/ directory found');
+      return [];
+    }
+    if (fullState.state.paused) {
+      this.emit('error', 'Project is paused');
+      return [];
+    }
+    const readyIssues = resolveReadyToWork(fullState.issues, this.epicScope ?? undefined);
+    if (readyIssues.length === 0) {
+      this.emit('complete', this.epicScope ? 'All epic issues are done or blocked' : 'All work is done or blocked');
+    }
+    return readyIssues;
+  }
+
+  // ── Prompt building ───────────────────────────────────────────
+
+  /**
+   * Build the coordinator prompt for a wave of parallel issues.
+   * Instructs the Claude session to use Agent tool for parallel execution.
+   */
+  private buildCoordinatorPrompt(issues: Issue[]): string {
+    const pmDir = resolvePmDir(this.workingDir);
+    const docsDir = pmDir ? join(pmDir, 'docs') : '.pm/docs';
+
+    // Collect existing output docs that issues may need as input
+    const existingDocs = this.listExistingDocs();
+
+    const issueBlocks = issues.map(issue => {
+      const criteria = issue.acceptanceCriteria
+        .map(c => `- [${c.checked ? 'x' : ' '}] ${c.text}`)
+        .join('\n');
+
+      const files = issue.filesToModify.length > 0
+        ? `\nFiles to modify:\n${issue.filesToModify.map(f => `- ${f}`).join('\n')}`
+        : '';
+
+      // Find predecessor output docs this issue should read
+      const predecessorDocs = issue.blockedBy
+        .map(bp => {
+          const blockerId = bp.replace(/^backlog\//, '').replace(/\.md$/, '');
+          return existingDocs.find(d => d.toLowerCase().includes(blockerId.toLowerCase()));
+        })
+        .filter(Boolean) as string[];
+
+      const predecessorSection = predecessorDocs.length > 0
+        ? `\nPredecessor outputs to read:\n${predecessorDocs.map(d => `- ${d}`).join('\n')}`
+        : '';
+
+      return `### ${issue.id}: ${issue.title}
+
+**Type**: ${issue.type} | **Priority**: ${issue.priority} | **Estimate**: ${issue.estimate ?? 'unestimated'}
+
+**Description**:
+${issue.description}
+
+**Acceptance Criteria**:
+${criteria || 'No specific criteria defined.'}
+
+**Technical Notes**:
+${issue.technicalNotes || 'None'}
+${files}${predecessorSection}
+
+**Output file**: ${docsDir}/${issue.id}-${this.slugify(issue.title)}.md`;
+    }).join('\n\n---\n\n');
+
+    return `You are a coordinator executing ${issues.length} issues in parallel using Agent Teams.
+
+## Project Directory
+Working directory: ${this.workingDir}
+Plan directory: ${pmDir || '.pm/'}
+
+## Issues to Execute in Parallel
+
+${issueBlocks}
+
+## Execution Protocol
+
+1. **Launch all ${issues.length} issues in parallel** using the Agent tool. Send a single message with ${issues.length} Agent tool calls — one per issue. Each agent should:
+   - Read the issue spec from the .pm/backlog/ file for full context
+   - Read any predecessor output docs listed above before starting work
+   - Execute the work described in the issue
+   - **CRITICAL: Write all output/results to the output file path specified above** using the Write tool. This file MUST exist on disk when the agent finishes — it is the handoff artifact for downstream issues.
+   - Update the issue's front matter status from \`in_progress\` to \`done\` via Edit tool
+
+2. **After all agents complete**, verify:
+   - Each output file exists in ${docsDir}/
+   - Each issue's status in .pm/backlog/ is \`done\`
+   - If any agent failed to write its output or mark done, do it yourself
+
+3. **Do NOT modify STATE.md** — the orchestrator handles state reconciliation.
+
+## Agent Prompt Template
+
+For each Agent tool call, use this structure:
+- Set \`description\` to the issue ID and short title
+- In the \`prompt\`, include the full issue description, acceptance criteria, predecessor docs to read, and the output file path
+
+## Critical Rules
+
+- Each agent MUST write its output to disk before finishing. Research that only exists in conversation context is LOST.
+- Each agent MUST update the issue front matter status to \`done\` when complete.
+- Keep agents focused — one issue per agent, no cross-issue work.
+- Do not modify files outside the issue's scope.`;
+  }
+
   private buildIssuePrompt(issue: Issue): string {
+    const pmDir = resolvePmDir(this.workingDir);
+    const docsDir = pmDir ? join(pmDir, 'docs') : '.pm/docs';
+    const existingDocs = this.listExistingDocs();
+
     const criteria = issue.acceptanceCriteria
       .map(c => `- [${c.checked ? 'x' : ' '}] ${c.text}`)
       .join('\n');
@@ -179,6 +409,20 @@ export class PlanExecutor extends EventEmitter {
     const files = issue.filesToModify.length > 0
       ? `\nFiles to modify:\n${issue.filesToModify.map(f => `- ${f}`).join('\n')}`
       : '';
+
+    // Find predecessor output docs
+    const predecessorDocs = issue.blockedBy
+      .map(bp => {
+        const blockerId = bp.replace(/^backlog\//, '').replace(/\.md$/, '');
+        return existingDocs.find(d => d.toLowerCase().includes(blockerId.toLowerCase()));
+      })
+      .filter(Boolean) as string[];
+
+    const predecessorSection = predecessorDocs.length > 0
+      ? `\n## Predecessor Outputs\nRead these files before starting — they contain work from completed upstream issues:\n${predecessorDocs.map(d => `- ${d}`).join('\n')}\n`
+      : '';
+
+    const outputFile = `${docsDir}/${issue.id}-${this.slugify(issue.title)}.md`;
 
     return `Work on this issue:
 
@@ -193,12 +437,50 @@ ${criteria || 'No specific criteria defined.'}
 ## Technical Notes
 ${issue.technicalNotes || 'None'}
 ${files}
+${predecessorSection}
+## Output Persistence
 
-Instructions:
+**CRITICAL**: Write all output, research findings, or implementation results to:
+\`${outputFile}\`
+
+This file is the handoff artifact for downstream issues that depend on this work.
+Do NOT leave results only in conversation — they MUST be written to disk.
+
+After writing the output file, update the issue front matter:
+- File: ${pmDir ? join(pmDir, issue.path) : issue.path}
+- Change \`status: in_progress\` to \`status: done\`
+
+## Instructions
 - Implement all acceptance criteria
-- Run tests after making changes
+- Run tests after making changes (if applicable)
 - Keep changes minimal and focused
-- Do not modify unrelated code`;
+- Do not modify unrelated code
+- Write output to the file path above before finishing`;
+  }
+
+  // ── Helpers ───────────────────────────────────────────────────
+
+  private listExistingDocs(): string[] {
+    const pmDir = resolvePmDir(this.workingDir);
+    if (!pmDir) return [];
+    const docsDir = join(pmDir, 'docs');
+    if (!existsSync(docsDir)) return [];
+
+    try {
+      return readdirSync(docsDir, { recursive: true })
+        .filter((f): f is string => typeof f === 'string' && f.endsWith('.md'))
+        .map(f => join(docsDir, f));
+    } catch {
+      return [];
+    }
+  }
+
+  private slugify(text: string): string {
+    return text
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 60);
   }
 
   private updateIssueFrontMatter(issuePath: string, newStatus: string): void {

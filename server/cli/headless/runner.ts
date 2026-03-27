@@ -69,6 +69,7 @@ export class HeadlessRunner {
       maxAutoRetries: config.maxAutoRetries ?? 2,
       onToolTimeout: config.onToolTimeout,
       sandboxed: config.sandboxed,
+      extraEnv: config.extraEnv,
     };
   }
 

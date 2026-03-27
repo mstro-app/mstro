@@ -13,7 +13,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { join } from 'node:path';
 import { AnalyticsEvents, trackEvent } from '../services/analytics.js';
 import { HeadlessRunner } from './headless/index.js';
-import { assessBestResult, assessContextLoss, type ContextLossContext } from './headless/stall-assessor.js';
+import { assessBestResult, assessContextLoss, assessPrematureCompletion, type ContextLossContext } from './headless/stall-assessor.js';
 import type { ExecutionCheckpoint } from './headless/types.js';
 
 export interface ImprovisationOptions {
@@ -503,6 +503,8 @@ export class ImprovisationSessionManager extends EventEmitter {
       if (this.shouldRetrySignalCrash(result, state, maxRetries, promptWithAttachments)) continue;
       if (this.shouldRetryContextLoss(result, state, useResume, nativeTimeouts, maxRetries, promptWithAttachments)) continue;
       if (this.applyToolTimeoutRetry(state, maxRetries, promptWithAttachments)) continue;
+      // Premature completion: model exited normally but task appears incomplete
+      if (await this.shouldRetryPrematureCompletion(result, state, maxRetries)) continue;
       break;
     }
     return result;
@@ -1013,6 +1015,110 @@ export class ImprovisationSessionManager extends EventEmitter {
     parts.push('4. Do NOT spawn Task subagents — do work inline to avoid further interruptions');
 
     return parts.join('\n');
+  }
+
+  /**
+   * Detect premature completion: Claude exited normally (exit code 0, end_turn) but the
+   * response indicates more work was planned. This happens when the model "context-fatigues"
+   * during long multi-step tasks and produces end_turn after completing a subset of the work.
+   *
+   * Two paths:
+   * - max_tokens: always retry (model was forcibly stopped mid-generation)
+   * - end_turn: Haiku assessment determines if the response looks incomplete
+   */
+  private async shouldRetryPrematureCompletion(
+    result: HeadlessRunResult,
+    state: RetryLoopState,
+    maxRetries: number,
+  ): Promise<boolean> {
+    if (!this.isPrematureCompletionCandidate(result, state, maxRetries)) {
+      return false;
+    }
+
+    const stopReason = result.stopReason!;
+    const isMaxTokens = stopReason === 'max_tokens';
+    const isIncomplete = isMaxTokens || await this.assessEndTurnCompletion(result);
+
+    if (!isIncomplete) return false;
+
+    this.applyPrematureCompletionRetry(result, state, maxRetries, stopReason, isMaxTokens);
+    return true;
+  }
+
+  /** Guard checks for premature completion — must pass all to proceed with assessment */
+  private isPrematureCompletionCandidate(
+    result: HeadlessRunResult,
+    state: RetryLoopState,
+    maxRetries: number,
+  ): boolean {
+    // Only trigger for clean exits with a known stop reason
+    if (!result.completed || result.signalName || state.retryNumber >= maxRetries) return false;
+    // Don't re-trigger if other recovery paths already handled this iteration
+    if (state.checkpointRef.value || state.contextLost) return false;
+    // Must have a session ID to resume, and a stop reason to classify
+    if (!result.claudeSessionId || !result.stopReason) return false;
+    // Only act on max_tokens or end_turn
+    return result.stopReason === 'max_tokens' || result.stopReason === 'end_turn';
+  }
+
+  /** Use Haiku to assess whether an end_turn response is genuinely complete */
+  private async assessEndTurnCompletion(result: HeadlessRunResult): Promise<boolean> {
+    if (!result.assistantResponse) return false;
+
+    const claudeCmd = process.env.CLAUDE_COMMAND || 'claude';
+    const verdict = await assessPrematureCompletion({
+      responseTail: result.assistantResponse.slice(-800),
+      successfulToolCalls: result.toolUseHistory?.filter(t => t.result !== undefined && !t.isError).length ?? 0,
+      hasThinking: !!result.thinkingOutput,
+      responseLength: result.assistantResponse.length,
+    }, claudeCmd, this.options.verbose);
+
+    if (this.options.verbose) {
+      console.log(`[PREMATURE-COMPLETION] Haiku verdict: ${verdict.isIncomplete ? 'INCOMPLETE' : 'COMPLETE'} — ${verdict.reason}`);
+    }
+    return verdict.isIncomplete;
+  }
+
+  /** Apply the retry: emit events, update state, set continuation prompt */
+  private applyPrematureCompletionRetry(
+    result: HeadlessRunResult,
+    state: RetryLoopState,
+    maxRetries: number,
+    stopReason: string,
+    isMaxTokens: boolean,
+  ): void {
+    state.retryNumber++;
+    const reason = isMaxTokens ? 'max_tokens hit' : 'incomplete end_turn (Haiku assessment)';
+
+    state.retryLog.push({
+      retryNumber: state.retryNumber,
+      path: 'PrematureCompletion',
+      reason,
+      timestamp: Date.now(),
+    });
+
+    this.emit('onAutoRetry', {
+      retryNumber: state.retryNumber,
+      maxRetries,
+      toolName: `PrematureCompletion(${stopReason})`,
+      completedCount: result.toolUseHistory?.length ?? 0,
+    });
+
+    trackEvent(AnalyticsEvents.IMPROVISE_AUTO_RETRY, {
+      retry_number: state.retryNumber,
+      hung_tool: `premature_completion:${stopReason}`,
+      completed_tools: result.toolUseHistory?.length ?? 0,
+      resume_attempted: true,
+    });
+
+    this.queueOutput(
+      `\n[[MSTRO_AUTO_CONTINUE]] Task incomplete (${reason}) — resuming session (retry ${state.retryNumber}/${maxRetries}).\n`
+    );
+    this.flushOutputQueue();
+
+    state.contextRecoverySessionId = result.claudeSessionId;
+    this.claudeSessionId = result.claudeSessionId;
+    state.currentPrompt = 'continue';
   }
 
   /** Select the best result across retries using Haiku assessment */

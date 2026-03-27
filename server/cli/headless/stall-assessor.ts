@@ -542,6 +542,83 @@ export async function assessApproval(
   }
 }
 
+// ========== Premature Completion Assessment ==========
+
+export interface PrematureCompletionContext {
+  /** The trailing portion of the assistant response (last ~800 chars) */
+  responseTail: string;
+  /** Total number of successful tool calls in this execution */
+  successfulToolCalls: number;
+  /** Whether extended thinking output was produced */
+  hasThinking: boolean;
+  /** Total response length */
+  responseLength: number;
+}
+
+export interface PrematureCompletionVerdict {
+  /** True if the task appears incomplete and should be auto-continued */
+  isIncomplete: boolean;
+  reason: string;
+}
+
+/**
+ * Assess whether a completed Claude execution ended prematurely.
+ * Called when stop_reason is 'end_turn' but the task may not be finished.
+ * Haiku determines if the trailing response text indicates planned-but-unexecuted work.
+ */
+export async function assessPrematureCompletion(
+  ctx: PrematureCompletionContext,
+  claudeCommand: string,
+  verbose: boolean,
+): Promise<PrematureCompletionVerdict> {
+  const prompt = [
+    'You are analyzing the FINAL output of a Claude Code agent that just exited normally.',
+    'Determine whether the agent finished its task or stopped prematurely mid-work.',
+    '',
+    'Session signals:',
+    `- ${ctx.successfulToolCalls} tool calls completed successfully`,
+    `- Response length: ${ctx.responseLength} characters`,
+    `- Extended thinking: ${ctx.hasThinking ? 'YES' : 'NO'}`,
+    '',
+    `Final response text (last ${ctx.responseTail.length} chars):`,
+    ctx.responseTail,
+    '',
+    'INCOMPLETE signals: "Now I\'ll...", "Let me fix...", "Next I\'ll...", "Moving on to...",',
+    '"I\'ll continue with...", announcing next steps that were never executed,',
+    'describing work that will happen next but no tool call followed.',
+    '',
+    'COMPLETE signals: summarizing what was done, confirming changes, reporting results,',
+    'asking the user a question, past-tense descriptions of completed work,',
+    '"all done", "changes applied", referencing finished state.',
+    '',
+    'Respond in EXACTLY this format (2 lines, no extra text):',
+    'VERDICT: COMPLETE or INCOMPLETE',
+    'REASON: <brief one-line explanation>',
+  ].join('\n');
+
+  try {
+    if (verbose) {
+      console.log(`[PREMATURE-ASSESS] Running Haiku assessment (${ctx.successfulToolCalls} tools, ${ctx.responseLength} chars)...`);
+    }
+
+    const raw = await spawnHaikuRaw(prompt, claudeCommand, verbose, 'PREMATURE-ASSESS');
+    const parsed = parseVerdictResponse(raw);
+    const isIncomplete = parsed.verdict.includes('INCOMPLETE');
+
+    if (verbose) {
+      console.log(`[PREMATURE-ASSESS] Verdict: ${isIncomplete ? 'INCOMPLETE' : 'COMPLETE'} — ${parsed.reason}`);
+    }
+
+    return { isIncomplete, reason: parsed.reason };
+  } catch (err) {
+    if (verbose) {
+      console.log(`[PREMATURE-ASSESS] Haiku assessment failed: ${err}`);
+    }
+    // On failure, don't retry — safer to let the user decide than to auto-continue incorrectly
+    return { isIncomplete: false, reason: `Assessment failed: ${err}` };
+  }
+}
+
 // ========== Best Result Comparison ==========
 
 export interface BestResultContext {

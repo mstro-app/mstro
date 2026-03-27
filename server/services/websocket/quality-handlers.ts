@@ -3,8 +3,20 @@
 
 import { join } from 'node:path';
 import type { HandlerContext } from './handler-context.js';
+import { QualityPersistence } from './quality-persistence.js';
 import { detectTools, installTools, runQualityScan } from './quality-service.js';
 import type { WebSocketMessage, WSContext } from './types.js';
+
+const persistenceCache = new Map<string, QualityPersistence>();
+
+function getPersistence(workingDir: string): QualityPersistence {
+  let persistence = persistenceCache.get(workingDir);
+  if (!persistence) {
+    persistence = new QualityPersistence(workingDir);
+    persistenceCache.set(workingDir, persistence);
+  }
+  return persistence;
+}
 
 export function handleQualityMessage(
   ctx: HandlerContext,
@@ -18,6 +30,8 @@ export function handleQualityMessage(
     qualityScan: () => handleScan(ctx, ws, msg, workingDir),
     qualityInstallTools: () => handleInstallTools(ctx, ws, msg, workingDir),
     qualityCodeReview: () => handleCodeReview(ctx, ws, msg, workingDir),
+    qualityLoadState: () => handleLoadState(ctx, ws, workingDir),
+    qualitySaveDirectories: () => handleSaveDirectories(ctx, ws, msg, workingDir),
   };
 
   const handler = handlers[msg.type];
@@ -38,6 +52,44 @@ function resolvePath(workingDir: string, dirPath?: string): string {
   if (!dirPath || dirPath === '.' || dirPath === './') return workingDir;
   if (dirPath.startsWith('/')) return dirPath;
   return join(workingDir, dirPath);
+}
+
+async function handleLoadState(
+  ctx: HandlerContext,
+  ws: WSContext,
+  workingDir: string,
+): Promise<void> {
+  try {
+    const persistence = getPersistence(workingDir);
+    const state = persistence.loadState();
+    ctx.send(ws, {
+      type: 'qualityStateLoaded',
+      data: state,
+    });
+  } catch (error) {
+    ctx.send(ws, {
+      type: 'qualityError',
+      data: { path: '.', error: error instanceof Error ? error.message : String(error) },
+    });
+  }
+}
+
+async function handleSaveDirectories(
+  ctx: HandlerContext,
+  ws: WSContext,
+  msg: WebSocketMessage,
+  workingDir: string,
+): Promise<void> {
+  try {
+    const persistence = getPersistence(workingDir);
+    const directories: Array<{ path: string; label: string }> = msg.data?.directories || [];
+    persistence.saveConfig(directories);
+  } catch (error) {
+    ctx.send(ws, {
+      type: 'qualityError',
+      data: { path: '.', error: error instanceof Error ? error.message : String(error) },
+    });
+  }
 }
 
 async function handleDetectTools(
@@ -81,6 +133,15 @@ async function handleScan(
       type: 'qualityScanResults',
       data: { path: reportPath, results },
     });
+
+    // Persist report and append to history
+    try {
+      const persistence = getPersistence(workingDir);
+      persistence.saveReport(reportPath, results);
+      persistence.appendHistory(results, reportPath);
+    } catch {
+      // Persistence failure should not break the scan flow
+    }
   } catch (error) {
     ctx.send(ws, {
       type: 'qualityError',

@@ -179,14 +179,27 @@ export async function installTools(
   const { tools } = await detectTools(dirPath);
   const toInstall = tools.filter((t) => !t.installed && (!toolNames || toolNames.includes(t.name)));
 
+  const failures: string[] = [];
   for (const tool of toInstall) {
     if (tool.installCommand.startsWith('(')) continue; // built-in, skip
     const parts = tool.installCommand.split(' ');
-    await runCommand(parts[0], parts.slice(1), dirPath);
+    const result = await runCommand(parts[0], parts.slice(1), dirPath);
+    if (result.exitCode !== 0) {
+      failures.push(`${tool.name}: ${result.stderr || `exited with code ${result.exitCode}`}`);
+    }
   }
 
   // Re-detect after install
-  return detectTools(dirPath);
+  const detected = await detectTools(dirPath);
+
+  if (failures.length > 0) {
+    const stillMissing = detected.tools.filter((t) => !t.installed).map((t) => t.name);
+    if (stillMissing.length > 0) {
+      throw new Error(`Failed to install: ${stillMissing.join(', ')}. ${failures.join('; ')}`);
+    }
+  }
+
+  return detected;
 }
 
 // ============================================================================

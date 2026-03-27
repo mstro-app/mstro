@@ -249,6 +249,7 @@ export interface WebSocketResponse {
     | 'qualityInstallProgress'
     | 'qualityInstallComplete'
     | 'qualityCodeReview'
+    | 'qualityCodeReviewProgress'
     | 'qualityPostSession'
     | 'qualityError'
     | 'qualityStateLoaded'

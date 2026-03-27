@@ -12,7 +12,7 @@ import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from '
 import { join, resolve } from 'node:path';
 import { handlePlanPrompt } from '../plan/composer.js';
 import { PlanExecutor } from '../plan/executor.js';
-import { getNextId, parsePmDirectory, parseSingleIssue, parseSingleMilestone, parseSingleSprint, pmDirExists } from '../plan/parser.js';
+import { getNextId, parsePlanDirectory, parseSingleIssue, parseSingleMilestone, parseSingleSprint, planDirExists, resolvePmDir } from '../plan/parser.js';
 import { PlanWatcher } from '../plan/watcher.js';
 import type { HandlerContext } from './handler-context.js';
 import type { WebSocketMessage, WSContext } from './types.js';
@@ -24,9 +24,10 @@ const executorCache = new Map<string, PlanExecutor>();
 // Helpers
 // ============================================================================
 
-/** Validate that a user-supplied path resolves within the .pm/ directory. */
-function resolvePmPath(workingDir: string, relativePath: string): string | null {
-  const pmDir = resolve(workingDir, '.pm');
+/** Validate that a user-supplied path resolves within the .pm/ (or legacy .plan/) directory. */
+function resolvePlanPath(workingDir: string, relativePath: string): string | null {
+  const pmDir = resolvePmDir(workingDir);
+  if (!pmDir) return null;
   const resolved = resolve(pmDir, relativePath);
   if (!resolved.startsWith(`${pmDir}/`) && resolved !== pmDir) return null;
   return resolved;
@@ -231,12 +232,12 @@ export function handlePlanMessage(
 // ============================================================================
 
 function handlePlanInit(ctx: HandlerContext, ws: WSContext, workingDir: string): void {
-  if (!pmDirExists(workingDir)) {
+  if (!planDirExists(workingDir)) {
     ctx.send(ws, { type: 'planNotFound', data: {} });
     return;
   }
 
-  const fullState = parsePmDirectory(workingDir);
+  const fullState = parsePlanDirectory(workingDir);
   if (!fullState) {
     ctx.send(ws, { type: 'planNotFound', data: {} });
     return;
@@ -249,7 +250,7 @@ function handlePlanInit(ctx: HandlerContext, ws: WSContext, workingDir: string):
 }
 
 function handleListIssues(ctx: HandlerContext, ws: WSContext, workingDir: string): void {
-  const fullState = parsePmDirectory(workingDir);
+  const fullState = parsePlanDirectory(workingDir);
   if (!fullState) {
     ctx.send(ws, { type: 'planNotFound', data: {} });
     return;
@@ -259,7 +260,7 @@ function handleListIssues(ctx: HandlerContext, ws: WSContext, workingDir: string
 
 function handleGetIssue(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, workingDir: string): void {
   const path = msg.data?.path;
-  if (!path || !resolvePmPath(workingDir, path)) {
+  if (!path || !resolvePlanPath(workingDir, path)) {
     ctx.send(ws, { type: 'planError', data: { error: 'Invalid issue path' } });
     return;
   }
@@ -273,7 +274,7 @@ function handleGetIssue(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessag
 
 function handleGetSprint(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, workingDir: string): void {
   const path = msg.data?.path;
-  if (!path || !resolvePmPath(workingDir, path)) {
+  if (!path || !resolvePlanPath(workingDir, path)) {
     ctx.send(ws, { type: 'planError', data: { error: 'Invalid sprint path' } });
     return;
   }
@@ -287,7 +288,7 @@ function handleGetSprint(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessa
 
 function handleGetMilestone(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, workingDir: string): void {
   const path = msg.data?.path;
-  if (!path || !resolvePmPath(workingDir, path)) {
+  if (!path || !resolvePlanPath(workingDir, path)) {
     ctx.send(ws, { type: 'planError', data: { error: 'Invalid milestone path' } });
     return;
   }
@@ -315,13 +316,13 @@ function handleCreateIssue(
     return;
   }
 
-  const pmDir = join(workingDir, '.pm');
+  const pmDir = resolvePmDir(workingDir) ?? join(workingDir, '.pm');
   const backlogDir = join(pmDir, 'backlog');
   if (!existsSync(backlogDir)) {
     mkdirSync(backlogDir, { recursive: true });
   }
 
-  const fullState = parsePmDirectory(workingDir);
+  const fullState = parsePlanDirectory(workingDir);
   const prefix = type === 'bug' ? 'BG' : type === 'epic' ? 'EP' : 'IS';
   const id = fullState ? getNextId(fullState.issues, prefix) : `${prefix}-001`;
 
@@ -345,7 +346,7 @@ function handleUpdateIssue(
     return;
   }
 
-  const fullPath = resolvePmPath(workingDir, path);
+  const fullPath = resolvePlanPath(workingDir, path);
   if (!fullPath || !existsSync(fullPath)) {
     ctx.send(ws, { type: 'planError', data: { error: `File not found: ${path}` } });
     return;
@@ -390,7 +391,7 @@ function handleDeleteIssue(
     return;
   }
 
-  const fullPath = resolvePmPath(workingDir, path);
+  const fullPath = resolvePlanPath(workingDir, path);
   if (!fullPath || !existsSync(fullPath)) {
     ctx.send(ws, { type: 'planError', data: { error: `File not found: ${path}` } });
     return;
@@ -407,17 +408,17 @@ function handleScaffold(
   if (denyIfViewOnly(ctx, ws, permission)) return;
 
   const name = msg.data?.name || 'My Project';
-  const pmDir = join(workingDir, '.pm');
+  const planDir = join(workingDir, '.pm');
 
   for (const dir of ['backlog', 'sprints', 'milestones', 'docs', 'docs/decisions']) {
-    mkdirSync(join(pmDir, dir), { recursive: true });
+    mkdirSync(join(planDir, dir), { recursive: true });
   }
 
-  writeFileSync(join(pmDir, 'project.md'), buildProjectMarkdown(name), 'utf-8');
-  writeFileSync(join(pmDir, 'STATE.md'), buildStateMarkdown(name), 'utf-8');
-  writeFileSync(join(pmDir, 'progress.md'), '# Progress Log\n', 'utf-8');
+  writeFileSync(join(planDir, 'project.md'), buildProjectMarkdown(name), 'utf-8');
+  writeFileSync(join(planDir, 'STATE.md'), buildStateMarkdown(name), 'utf-8');
+  writeFileSync(join(planDir, 'progress.md'), '# Progress Log\n', 'utf-8');
 
-  const fullState = parsePmDirectory(workingDir);
+  const fullState = parsePlanDirectory(workingDir);
   ctx.broadcastToAll({ type: 'planScaffolded', data: fullState });
 }
 
@@ -464,7 +465,7 @@ function wireExecutorEvents(executor: PlanExecutor, ctx: HandlerContext, working
 
   executor.on('issueCompleted', () => {
     ctx.broadcastToAll({ type: 'planExecutionMetrics', data: executor.getMetrics() });
-    const fullState = parsePmDirectory(workingDir);
+    const fullState = parsePlanDirectory(workingDir);
     if (fullState) {
       ctx.broadcastToAll({ type: 'planStateUpdated', data: fullState });
     }

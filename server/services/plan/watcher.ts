@@ -2,15 +2,14 @@
 // Licensed under the MIT License. See LICENSE file for details.
 
 /**
- * Plan Watcher — Watches .pm/ directory for changes and broadcasts updates.
+ * Plan Watcher — Watches .pm/ (or legacy .plan/) directory for changes and broadcasts updates.
  *
  * Uses fs.watch with debouncing to batch rapid changes.
  */
 
-import { existsSync, type FSWatcher, watch } from 'node:fs';
-import { join } from 'node:path';
+import { type FSWatcher, watch } from 'node:fs';
 import type { HandlerContext } from '../websocket/handler-context.js';
-import { parsePmDirectory } from './parser.js';
+import { parsePlanDirectory, resolvePmDir } from './parser.js';
 
 export class PlanWatcher {
   private watcher: FSWatcher | null = null;
@@ -27,11 +26,11 @@ export class PlanWatcher {
   start(): void {
     if (this.started) return;
 
-    const pmDir = join(this.workingDir, '.pm');
-    if (!existsSync(pmDir)) return;
+    const planDir = resolvePmDir(this.workingDir);
+    if (!planDir) return;
 
     try {
-      this.watcher = watch(pmDir, { recursive: true }, (_event, filename) => {
+      this.watcher = watch(planDir, { recursive: true }, (_event, filename) => {
         if (!filename || !filename.endsWith('.md')) return;
         this.debounce();
       });
@@ -63,7 +62,7 @@ export class PlanWatcher {
   private handleChange(): void {
     try {
       // Always do a full reparse — concurrent changes may affect multiple files
-      const fullState = parsePmDirectory(this.workingDir);
+      const fullState = parsePlanDirectory(this.workingDir);
       if (fullState) {
         this.ctx.broadcastToAll({ type: 'planStateUpdated', data: fullState });
       }

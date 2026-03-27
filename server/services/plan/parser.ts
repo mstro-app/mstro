@@ -2,7 +2,7 @@
 // Licensed under the MIT License. See LICENSE file for details.
 
 /**
- * PPS Parser — Parses .pm/ directory files into structured TypeScript objects.
+ * PPS Parser — Parses .pm/ (or legacy .plan/) directory files into structured TypeScript objects.
  *
  * Handles YAML front matter extraction and markdown body parsing.
  */
@@ -355,8 +355,17 @@ function parseMilestone(content: string, filePath: string): Milestone {
 // Directory Parser
 // ============================================================================
 
-export function pmDirExists(workingDir: string): boolean {
-  return existsSync(join(workingDir, '.pm'));
+/** Resolve the PM directory — prefers .pm/, falls back to legacy .plan/ */
+export function resolvePmDir(workingDir: string): string | null {
+  const pmDir = join(workingDir, '.pm');
+  if (existsSync(pmDir)) return pmDir;
+  const legacyDir = join(workingDir, '.plan');
+  if (existsSync(legacyDir)) return legacyDir;
+  return null;
+}
+
+export function planDirExists(workingDir: string): boolean {
+  return resolvePmDir(workingDir) !== null;
 }
 
 function readFileIfExists(path: string): string | null {
@@ -378,53 +387,59 @@ function readMdFilesInDir(dirPath: string): Array<{ name: string; content: strin
   } catch { return []; }
 }
 
-export function parsePmDirectory(workingDir: string): PlanFullState | null {
-  const pmDir = join(workingDir, '.pm');
-  if (!existsSync(pmDir)) return null;
+export function parsePlanDirectory(workingDir: string): PlanFullState | null {
+  const planDir = resolvePmDir(workingDir);
+  if (!planDir) return null;
 
   // Parse project.md
-  const projectContent = readFileIfExists(join(pmDir, 'project.md'));
+  const projectContent = readFileIfExists(join(planDir, 'project.md'));
   const project = projectContent
     ? parseProjectConfig(projectContent)
     : { name: '', id: '', created: '', status: 'active' as const, estimation: 'none' as const, idPrefixes: {}, workflows: [], labels: [], teams: [] };
 
   // Parse STATE.md
-  const stateContent = readFileIfExists(join(pmDir, 'STATE.md'));
+  const stateContent = readFileIfExists(join(planDir, 'STATE.md'));
   const state = stateContent
     ? parseProjectState(stateContent)
     : { project: '', currentSprint: null, activeMilestone: null, paused: false, lastSession: null, readyToWork: [], inProgress: [], blocked: [], recentlyCompleted: [], warnings: [] };
 
   // Parse backlog issues
-  const issueFiles = readMdFilesInDir(join(pmDir, 'backlog'));
+  const issueFiles = readMdFilesInDir(join(planDir, 'backlog'));
   const issues = issueFiles.map(f => parseIssue(f.content, `backlog/${f.name}`));
 
   // Parse sprints
-  const sprintFiles = readMdFilesInDir(join(pmDir, 'sprints'));
+  const sprintFiles = readMdFilesInDir(join(planDir, 'sprints'));
   const sprints = sprintFiles.map(f => parseSprint(f.content, `sprints/${f.name}`));
 
   // Parse milestones
-  const milestoneFiles = readMdFilesInDir(join(pmDir, 'milestones'));
+  const milestoneFiles = readMdFilesInDir(join(planDir, 'milestones'));
   const milestones = milestoneFiles.map(f => parseMilestone(f.content, `milestones/${f.name}`));
 
   return { project, state, issues, sprints, milestones };
 }
 
 export function parseSingleIssue(workingDir: string, issuePath: string): Issue | null {
-  const fullPath = join(workingDir, '.pm', issuePath);
+  const pmDir = resolvePmDir(workingDir);
+  if (!pmDir) return null;
+  const fullPath = join(pmDir, issuePath);
   const content = readFileIfExists(fullPath);
   if (!content) return null;
   return parseIssue(content, issuePath);
 }
 
 export function parseSingleSprint(workingDir: string, sprintPath: string): Sprint | null {
-  const fullPath = join(workingDir, '.pm', sprintPath);
+  const pmDir = resolvePmDir(workingDir);
+  if (!pmDir) return null;
+  const fullPath = join(pmDir, sprintPath);
   const content = readFileIfExists(fullPath);
   if (!content) return null;
   return parseSprint(content, sprintPath);
 }
 
 export function parseSingleMilestone(workingDir: string, milestonePath: string): Milestone | null {
-  const fullPath = join(workingDir, '.pm', milestonePath);
+  const pmDir = resolvePmDir(workingDir);
+  if (!pmDir) return null;
+  const fullPath = join(pmDir, milestonePath);
   const content = readFileIfExists(fullPath);
   if (!content) return null;
   return parseMilestone(content, milestonePath);

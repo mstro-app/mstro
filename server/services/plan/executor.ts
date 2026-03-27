@@ -4,8 +4,8 @@
 /**
  * Plan Executor — Runs the PPS execution loop.
  *
- * Reads STATE.md, picks the highest-priority unblocked issue,
- * spawns a coding agent for it, updates state on completion, and loops.
+ * Reads STATE.md from .pm/ (or legacy .plan/), picks the highest-priority
+ * unblocked issue, spawns a coding agent for it, updates state on completion, and loops.
  */
 
 import { EventEmitter } from 'node:events';
@@ -13,7 +13,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { HeadlessRunner } from '../../cli/headless/index.js';
 import { resolveReadyToWork } from './dependency-resolver.js';
-import { parsePmDirectory } from './parser.js';
+import { parsePlanDirectory, resolvePmDir } from './parser.js';
 import { reconcileState } from './state-reconciler.js';
 import type { Issue } from './types.js';
 
@@ -103,7 +103,7 @@ export class PlanExecutor extends EventEmitter {
   }
 
   private pickNextIssue(): Issue | null {
-    const fullState = parsePmDirectory(this.workingDir);
+    const fullState = parsePlanDirectory(this.workingDir);
     if (!fullState) {
       this.emit('error', 'No .pm/ directory found');
       return null;
@@ -196,7 +196,9 @@ Instructions:
   }
 
   private updateIssueFrontMatter(issuePath: string, newStatus: string): void {
-    const fullPath = join(this.workingDir, '.pm', issuePath);
+    const pmDir = resolvePmDir(this.workingDir);
+    if (!pmDir) return;
+    const fullPath = join(pmDir, issuePath);
     try {
       let content = readFileSync(fullPath, 'utf-8');
       content = content.replace(/^(status:\s*).+$/m, `$1${newStatus}`);

@@ -5,15 +5,16 @@
  * Plan Composer — Handles natural language prompts for PPS creation/editing.
  *
  * When a planPrompt message arrives, this builds a context-enriched prompt
- * and spawns a scoped HeadlessRunner session to execute it.
+ * against the .pm/ (or legacy .plan/) directory and spawns a scoped
+ * HeadlessRunner session to execute it.
  */
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { HeadlessRunner } from '../../cli/headless/index.js';
-import { getNextId, parsePmDirectory } from './parser.js';
 import type { HandlerContext } from '../websocket/handler-context.js';
 import type { WSContext } from '../websocket/types.js';
+import { getNextId, parsePlanDirectory, resolvePmDir } from './parser.js';
 
 function readFileOrEmpty(path: string): string {
   try {
@@ -28,12 +29,12 @@ export async function handlePlanPrompt(
   userPrompt: string,
   workingDir: string,
 ): Promise<void> {
-  const pmDir = join(workingDir, '.pm');
+  const pmDir = resolvePmDir(workingDir) ?? join(workingDir, '.pm');
   const stateContent = readFileOrEmpty(join(pmDir, 'STATE.md'));
   const projectContent = readFileOrEmpty(join(pmDir, 'project.md'));
 
   // Compute next available IDs
-  const fullState = parsePmDirectory(workingDir);
+  const fullState = parsePlanDirectory(workingDir);
   let idInfo = '';
   if (fullState) {
     const nextIS = getNextId(fullState.issues, 'IS');
@@ -42,7 +43,7 @@ export async function handlePlanPrompt(
     idInfo = `Next available IDs: ${nextIS}, ${nextBG}, ${nextEP}`;
   }
 
-  const enrichedPrompt = `You are managing a project plan in the .pm/ directory format (Project Plan Spec).
+  const enrichedPrompt = `You are managing a project in the .pm/ directory format (Project Plan Spec).
 The project's current state is:
 
 <state>
@@ -88,7 +89,7 @@ User request: ${userPrompt}`;
     });
 
     // Re-parse and broadcast updated state
-    const updatedState = parsePmDirectory(workingDir);
+    const updatedState = parsePlanDirectory(workingDir);
     if (updatedState) {
       ctx.broadcastToAll({ type: 'planStateUpdated', data: updatedState });
     }

@@ -11,7 +11,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { resolveReadyToWork } from './dependency-resolver.js';
-import { parsePmDirectory } from './parser.js';
+import { parsePlanDirectory, resolvePmDir } from './parser.js';
 import type { Issue } from './types.js';
 
 interface CategorizedIssues {
@@ -108,11 +108,12 @@ function buildStateMarkdown(
 }
 
 export function reconcileState(workingDir: string): void {
-  const pmDir = join(workingDir, '.pm');
+  const pmDir = resolvePmDir(workingDir);
+  if (!pmDir) return;
   const statePath = join(pmDir, 'STATE.md');
   if (!existsSync(statePath)) return;
 
-  const fullState = parsePmDirectory(workingDir);
+  const fullState = parsePlanDirectory(workingDir);
   if (!fullState) return;
 
   const { issues, project } = fullState;

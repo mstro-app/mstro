@@ -17,6 +17,7 @@
  */
 
 import { type ChildProcess, spawn } from 'node:child_process';
+import { hlog } from './headless-logger.js';
 
 export interface StallContext {
   /** The original user prompt being executed */
@@ -137,7 +138,7 @@ export async function assessStall(
   const quick = quickHeuristic(ctx, toolWatchdogActive);
   if (quick) {
     if (verbose) {
-      console.log(`[STALL-ASSESS] Heuristic verdict: ${quick.reason}`);
+      hlog(`[STALL-ASSESS] Heuristic verdict: ${quick.reason}`);
     }
     return quick;
   }
@@ -145,12 +146,12 @@ export async function assessStall(
   // Layer 2: Haiku assessment
   try {
     if (verbose) {
-      console.log('[STALL-ASSESS] Running Haiku assessment...');
+      hlog('[STALL-ASSESS] Running Haiku assessment...');
     }
     return await runHaikuAssessment(ctx, claudeCommand, verbose);
   } catch (err) {
     if (verbose) {
-      console.log(`[STALL-ASSESS] Haiku assessment failed: ${err}`);
+      hlog(`[STALL-ASSESS] Haiku assessment failed: ${err}`);
     }
     // If Haiku fails (timeout, auth issue, etc.), extend cautiously
     return {
@@ -220,13 +221,13 @@ export async function assessToolTimeout(
 
   try {
     if (verbose) {
-      console.log(`[TOOL-ASSESS] Running Haiku assessment for ${toolName} (${elapsedSec}s elapsed)...`);
+      hlog(`[TOOL-ASSESS] Running Haiku assessment for ${toolName} (${elapsedSec}s elapsed)...`);
     }
 
     return await spawnHaikuVerdict(prompt, claudeCommand, verbose, 'TOOL-ASSESS');
   } catch (err) {
     if (verbose) {
-      console.log(`[TOOL-ASSESS] Haiku assessment failed: ${err}`);
+      hlog(`[TOOL-ASSESS] Haiku assessment failed: ${err}`);
     }
     // On failure, default to kill (the tool has already exceeded its timeout)
     return {
@@ -295,7 +296,7 @@ export async function assessContextLoss(
 
   try {
     if (verbose) {
-      console.log(`[CONTEXT-ASSESS] Running Haiku assessment (${ctx.effectiveTimeouts} timeouts, ${ctx.successfulToolCalls} successes, ${ctx.thinkingOutputLength} thinking chars)...`);
+      hlog(`[CONTEXT-ASSESS] Running Haiku assessment (${ctx.effectiveTimeouts} timeouts, ${ctx.successfulToolCalls} successes, ${ctx.thinkingOutputLength} thinking chars)...`);
     }
 
     const raw = await spawnHaikuRaw(prompt, claudeCommand, verbose, 'CONTEXT-ASSESS');
@@ -303,13 +304,13 @@ export async function assessContextLoss(
     const contextLost = parsed.verdict === 'STALLED';
 
     if (verbose) {
-      console.log(`[CONTEXT-ASSESS] Verdict: ${contextLost ? 'LOST' : 'CONTINUED'} — ${parsed.reason}`);
+      hlog(`[CONTEXT-ASSESS] Verdict: ${contextLost ? 'LOST' : 'CONTINUED'} — ${parsed.reason}`);
     }
 
     return { contextLost, reason: parsed.reason };
   } catch (err) {
     if (verbose) {
-      console.log(`[CONTEXT-ASSESS] Haiku assessment failed: ${err}`);
+      hlog(`[CONTEXT-ASSESS] Haiku assessment failed: ${err}`);
     }
     // On failure, assume context was lost (safer to retry than to show a confused response)
     return {
@@ -419,7 +420,7 @@ function spawnHaikuRaw(
 
     proc.stderr!.on('data', (data) => {
       if (verbose) {
-        console.log(`[${label}] haiku stderr: ${data.toString().trim()}`);
+        hlog(`[${label}] haiku stderr: ${data.toString().trim()}`);
       }
     });
 
@@ -434,7 +435,7 @@ function spawnHaikuRaw(
       }
 
       if (verbose) {
-        console.log(`[${label}] Haiku response: ${stdout.trim()}`);
+        hlog(`[${label}] Haiku response: ${stdout.trim()}`);
       }
 
       resolve(stdout.trim());
@@ -521,7 +522,7 @@ export async function assessApproval(
 
   try {
     if (verbose) {
-      console.log('[APPROVAL-ASSESS] Running Haiku assessment...');
+      hlog('[APPROVAL-ASSESS] Running Haiku assessment...');
     }
 
     const raw = await spawnHaikuRaw(prompt, claudeCommand, verbose, 'APPROVAL-ASSESS');
@@ -529,13 +530,13 @@ export async function assessApproval(
     const isApproval = parsed.verdict.includes('APPROVAL');
 
     if (verbose) {
-      console.log(`[APPROVAL-ASSESS] Verdict: ${isApproval ? 'APPROVAL' : 'NEW_TASK'} — ${parsed.reason}`);
+      hlog(`[APPROVAL-ASSESS] Verdict: ${isApproval ? 'APPROVAL' : 'NEW_TASK'} — ${parsed.reason}`);
     }
 
     return { isApproval, reason: parsed.reason };
   } catch (err) {
     if (verbose) {
-      console.log(`[APPROVAL-ASSESS] Haiku assessment failed: ${err}`);
+      hlog(`[APPROVAL-ASSESS] Haiku assessment failed: ${err}`);
     }
     // On failure, assume not an approval (safer to treat as new task)
     return { isApproval: false, reason: `Assessment failed: ${err}` };
@@ -598,7 +599,7 @@ export async function assessPrematureCompletion(
 
   try {
     if (verbose) {
-      console.log(`[PREMATURE-ASSESS] Running Haiku assessment (${ctx.successfulToolCalls} tools, ${ctx.responseLength} chars)...`);
+      hlog(`[PREMATURE-ASSESS] Running Haiku assessment (${ctx.successfulToolCalls} tools, ${ctx.responseLength} chars)...`);
     }
 
     const raw = await spawnHaikuRaw(prompt, claudeCommand, verbose, 'PREMATURE-ASSESS');
@@ -606,13 +607,13 @@ export async function assessPrematureCompletion(
     const isIncomplete = parsed.verdict.includes('INCOMPLETE');
 
     if (verbose) {
-      console.log(`[PREMATURE-ASSESS] Verdict: ${isIncomplete ? 'INCOMPLETE' : 'COMPLETE'} — ${parsed.reason}`);
+      hlog(`[PREMATURE-ASSESS] Verdict: ${isIncomplete ? 'INCOMPLETE' : 'COMPLETE'} — ${parsed.reason}`);
     }
 
     return { isIncomplete, reason: parsed.reason };
   } catch (err) {
     if (verbose) {
-      console.log(`[PREMATURE-ASSESS] Haiku assessment failed: ${err}`);
+      hlog(`[PREMATURE-ASSESS] Haiku assessment failed: ${err}`);
     }
     // On failure, don't retry — safer to let the user decide than to auto-continue incorrectly
     return { isIncomplete: false, reason: `Assessment failed: ${err}` };
@@ -679,7 +680,7 @@ export async function assessBestResult(
 
   try {
     if (verbose) {
-      console.log('[BEST-RESULT] Running Haiku assessment...');
+      hlog('[BEST-RESULT] Running Haiku assessment...');
     }
 
     const raw = await spawnHaikuRaw(prompt, claudeCommand, verbose, 'BEST-RESULT');
@@ -687,13 +688,13 @@ export async function assessBestResult(
     const winner: 'A' | 'B' = parsed.verdict.includes('B') ? 'B' : 'A';
 
     if (verbose) {
-      console.log(`[BEST-RESULT] Verdict: ${winner} — ${parsed.reason}`);
+      hlog(`[BEST-RESULT] Verdict: ${winner} — ${parsed.reason}`);
     }
 
     return { winner, reason: parsed.reason };
   } catch (err) {
     if (verbose) {
-      console.log(`[BEST-RESULT] Haiku assessment failed: ${err}`);
+      hlog(`[BEST-RESULT] Haiku assessment failed: ${err}`);
     }
     // On failure, prefer A (the previously-tracked best result)
     return { winner: 'A', reason: `Assessment failed: ${err}` };
@@ -748,7 +749,7 @@ export async function classifyError(
 
   try {
     if (verbose) {
-      console.log('[ERROR-CLASSIFY] Running Haiku assessment...');
+      hlog('[ERROR-CLASSIFY] Running Haiku assessment...');
     }
 
     const raw = await spawnHaikuRaw(prompt, claudeCommand, verbose, 'ERROR-CLASSIFY');
@@ -768,13 +769,13 @@ export async function classifyError(
     if (category === 'UNKNOWN' || !message) return null;
 
     if (verbose) {
-      console.log(`[ERROR-CLASSIFY] Verdict: ${category} — ${message}`);
+      hlog(`[ERROR-CLASSIFY] Verdict: ${category} — ${message}`);
     }
 
     return { errorCode: category, message };
   } catch (err) {
     if (verbose) {
-      console.log(`[ERROR-CLASSIFY] Haiku assessment failed: ${err}`);
+      hlog(`[ERROR-CLASSIFY] Haiku assessment failed: ${err}`);
     }
     return null;
   }

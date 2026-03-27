@@ -9,6 +9,7 @@
 
 import { type ChildProcess, spawn } from 'node:child_process';
 import { sanitizeEnvForSandbox } from '../../services/sandbox-utils.js';
+import { herror, hlog } from './headless-logger.js';
 import { generateMcpConfig } from './mcp-config.js';
 import { detectErrorInStderr, } from './output-utils.js';
 import { buildMultimodalMessage } from './prompt-utils.js';
@@ -115,7 +116,7 @@ async function runStallAssessment(
         );
       }
       if (config.verbose) {
-        console.log(`[STALL] Extended by ${Math.round(verdict.extensionMs / 60_000)} min: ${verdict.reason}`);
+        hlog(`[STALL] Extended by ${Math.round(verdict.extensionMs / 60_000)} min: ${verdict.reason}`);
       }
       return { extensionsGranted: newExtensions, currentKillDeadline: now + verdict.extensionMs };
     }
@@ -123,11 +124,11 @@ async function runStallAssessment(
       `\n[[MSTRO_STALL_CONFIRMED]] Assessment: process likely stalled. ${verdict.reason}.\n`
     );
     if (config.verbose) {
-      console.log(`[STALL] Assessment says stalled: ${verdict.reason}`);
+      hlog(`[STALL] Assessment says stalled: ${verdict.reason}`);
     }
   } catch (err) {
     if (config.verbose) {
-      console.log(`[STALL] Assessment error: ${err}`);
+      hlog(`[STALL] Assessment error: ${err}`);
     }
   }
   return null;
@@ -738,7 +739,7 @@ function writeImageAttachmentsToStdin(
 ): void {
   claudeProcess.stdin!.on('error', (err) => {
     if (config.verbose) {
-      console.error('[STDIN] Write error:', err.message);
+      herror('[STDIN] Write error:', err.message);
     }
     config.outputCallback?.(`\n[[MSTRO_ERROR:STDIN_WRITE_FAILED]] Failed to send image data to Claude: ${err.message}\n`);
   });
@@ -1007,7 +1008,7 @@ function setupToolTracking(
 /** Log messages when verbose mode is enabled. Extracted to reduce cognitive complexity. */
 function verboseLog(verbose: boolean | undefined, ...msgs: string[]): void {
   if (verbose) {
-    for (const msg of msgs) console.log(msg);
+    for (const msg of msgs) hlog(msg);
   }
 }
 

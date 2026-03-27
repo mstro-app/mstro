@@ -1,0 +1,78 @@
+// Copyright (c) 2025-present Mstro, Inc. All rights reserved.
+// Licensed under the MIT License. See LICENSE file for details.
+
+/**
+ * Headless Logger
+ *
+ * Provides AsyncLocalStorage-based logging redirection for headless execution.
+ * When background operations (code review, PM compose/execute) run, their
+ * console output is redirected to log files under ~/.mstro/logs/ instead of
+ * polluting the terminal where the mstro CLI was started.
+ */
+
+import { AsyncLocalStorage } from 'node:async_hooks';
+import type { WriteStream } from 'node:fs';
+import { createWriteStream, mkdirSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
+interface LogTarget {
+  log: (...args: unknown[]) => void;
+  error: (...args: unknown[]) => void;
+}
+
+const logContext = new AsyncLocalStorage<LogTarget>();
+
+function formatArgs(args: unknown[]): string {
+  return args.map(a => (typeof a === 'string' ? a : String(a))).join(' ');
+}
+
+/** Log a message. Writes to file when inside runWithFileLogger, otherwise to console. */
+export function hlog(...args: unknown[]): void {
+  const target = logContext.getStore();
+  if (target) {
+    target.log(...args);
+  } else {
+    console.log(...args);
+  }
+}
+
+/** Log an error. Writes to file when inside runWithFileLogger, otherwise to console. */
+export function herror(...args: unknown[]): void {
+  const target = logContext.getStore();
+  if (target) {
+    target.error(...args);
+  } else {
+    console.error(...args);
+  }
+}
+
+const LOG_DIR = join(homedir(), '.mstro', 'logs', 'headless');
+
+/**
+ * Run an async function with all hlog/herror output redirected to a log file.
+ * The log file is created at ~/.mstro/logs/headless/{label}-{timestamp}.log.
+ */
+export async function runWithFileLogger<T>(label: string, fn: () => Promise<T>): Promise<T> {
+  mkdirSync(LOG_DIR, { recursive: true });
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const logPath = join(LOG_DIR, `${label}-${timestamp}.log`);
+  const stream: WriteStream = createWriteStream(logPath, { flags: 'a' });
+
+  const target: LogTarget = {
+    log: (...args: unknown[]) => {
+      stream.write(`[${new Date().toISOString()}] ${formatArgs(args)}\n`);
+    },
+    error: (...args: unknown[]) => {
+      stream.write(`[${new Date().toISOString()}] ERROR: ${formatArgs(args)}\n`);
+    },
+  };
+
+  return logContext.run(target, async () => {
+    try {
+      return await fn();
+    } finally {
+      stream.end();
+    }
+  });
+}

@@ -12,6 +12,7 @@ import { EventEmitter } from 'node:events';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { AnalyticsEvents, trackEvent } from '../services/analytics.js';
+import { herror, hlog } from './headless/headless-logger.js';
 import { HeadlessRunner } from './headless/index.js';
 import { assessBestResult, assessContextLoss, assessPrematureCompletion, type ContextLossContext } from './headless/stall-assessor.js';
 import type { ExecutionCheckpoint } from './headless/types.js';
@@ -302,7 +303,7 @@ export class ImprovisationSessionManager extends EventEmitter {
         writeFileSync(filePath, Buffer.from(attachment.content, 'base64'));
         paths.push(filePath);
       } catch (err) {
-        console.error(`Failed to persist attachment ${attachment.fileName}:`, err);
+        herror(`Failed to persist attachment ${attachment.fileName}:`, err);
       }
     }
 
@@ -524,7 +525,7 @@ export class ImprovisationSessionManager extends EventEmitter {
         try {
           attachment.content = readFileSync(attachment.filePath).toString('base64');
         } catch (err) {
-          console.error(`Failed to read pre-uploaded image ${attachment.filePath}:`, err);
+          herror(`Failed to read pre-uploaded image ${attachment.filePath}:`, err);
           attachment.isImage = false;
         }
       }
@@ -664,17 +665,17 @@ export class ImprovisationSessionManager extends EventEmitter {
     }
     if (!result.assistantResponse || result.assistantResponse.trim().length === 0) {
       state.contextLost = true;
-      if (this.options.verbose) console.log('[CONTEXT-RECOVERY] Resume context loss: null/empty response');
+      if (this.options.verbose) hlog('[CONTEXT-RECOVERY] Resume context loss: null/empty response');
     } else if (result.resumeBufferedOutput !== undefined) {
       state.contextLost = true;
-      if (this.options.verbose) console.log('[CONTEXT-RECOVERY] Resume context loss: buffer never flushed (no thinking/tools)');
+      if (this.options.verbose) hlog('[CONTEXT-RECOVERY] Resume context loss: buffer never flushed (no thinking/tools)');
     } else if (
       (!result.toolUseHistory || result.toolUseHistory.length === 0) &&
       !result.thinkingOutput &&
       result.assistantResponse.length < 500
     ) {
       state.contextLost = true;
-      if (this.options.verbose) console.log('[CONTEXT-RECOVERY] Resume context loss: no tools, no thinking, short response');
+      if (this.options.verbose) hlog('[CONTEXT-RECOVERY] Resume context loss: no tools, no thinking, short response');
     }
   }
 
@@ -718,7 +719,7 @@ export class ImprovisationSessionManager extends EventEmitter {
     const verdict = await assessContextLoss(contextLossCtx, claudeCmd, this.options.verbose);
     state.contextLost = verdict.contextLost;
     if (this.options.verbose) {
-      console.log(`[CONTEXT-RECOVERY] Haiku verdict: ${state.contextLost ? 'LOST' : 'OK'} — ${verdict.reason}`);
+      hlog(`[CONTEXT-RECOVERY] Haiku verdict: ${state.contextLost ? 'LOST' : 'OK'} — ${verdict.reason}`);
     }
   }
 
@@ -1074,7 +1075,7 @@ export class ImprovisationSessionManager extends EventEmitter {
     }, claudeCmd, this.options.verbose);
 
     if (this.options.verbose) {
-      console.log(`[PREMATURE-COMPLETION] Haiku verdict: ${verdict.isIncomplete ? 'INCOMPLETE' : 'COMPLETE'} — ${verdict.reason}`);
+      hlog(`[PREMATURE-COMPLETION] Haiku verdict: ${verdict.isIncomplete ? 'INCOMPLETE' : 'COMPLETE'} — ${verdict.reason}`);
     }
     return verdict.isIncomplete;
   }
@@ -1153,10 +1154,10 @@ export class ImprovisationSessionManager extends EventEmitter {
       }, claudeCmd, this.options.verbose);
 
       if (verdict.winner === 'A') {
-        if (this.options.verbose) console.log(`[BEST-RESULT] Haiku picked earlier attempt: ${verdict.reason}`);
+        if (this.options.verbose) hlog(`[BEST-RESULT] Haiku picked earlier attempt: ${verdict.reason}`);
         return this.mergeResultSessionId(state.bestResult, result.claudeSessionId);
       }
-      if (this.options.verbose) console.log(`[BEST-RESULT] Haiku picked final attempt: ${verdict.reason}`);
+      if (this.options.verbose) hlog(`[BEST-RESULT] Haiku picked final attempt: ${verdict.reason}`);
       return result;
     } catch {
       return this.fallbackBestResult(state.bestResult, result);
@@ -1167,7 +1168,7 @@ export class ImprovisationSessionManager extends EventEmitter {
   private fallbackBestResult(bestResult: HeadlessRunResult, result: HeadlessRunResult): HeadlessRunResult {
     if (scoreRunResult(bestResult) > scoreRunResult(result)) {
       if (this.options.verbose) {
-        console.log(`[BEST-RESULT] Haiku unavailable, numeric fallback: earlier attempt (score ${scoreRunResult(bestResult)} vs ${scoreRunResult(result)})`);
+        hlog(`[BEST-RESULT] Haiku unavailable, numeric fallback: earlier attempt (score ${scoreRunResult(bestResult)} vs ${scoreRunResult(result)})`);
       }
       return this.mergeResultSessionId(bestResult, result.claudeSessionId);
     }
@@ -1603,7 +1604,7 @@ export class ImprovisationSessionManager extends EventEmitter {
         const data = readFileSync(this.historyPath, 'utf-8');
         return JSON.parse(data);
       } catch (error) {
-        console.error('Failed to load history:', error);
+        herror('Failed to load history:', error);
       }
     }
 

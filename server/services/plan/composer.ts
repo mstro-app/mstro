@@ -11,6 +11,7 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { runWithFileLogger } from '../../cli/headless/headless-logger.js';
 import { HeadlessRunner, type ToolUseEvent } from '../../cli/headless/index.js';
 import type { HandlerContext } from '../websocket/handler-context.js';
 import type { WSContext } from '../websocket/types.js';
@@ -113,6 +114,16 @@ Follow these rules:
 - Use the next available ID for new entities
 - Respond briefly describing what you did
 
+Issue scoping rules (critical for execution quality):
+- Each issue is executed by a single AI agent with its own context window
+- Issues estimated at 1-3 story points execute well (focused, single concern)
+- Issues at 5 story points are viable if scoped to one subsystem
+- Issues at 8+ story points MUST be decomposed into smaller sub-issues
+- Issues at 13+ story points MUST become an epic with child issues
+- Each issue should touch one logical concern (one component, one service, one data flow)
+- If an issue requires work across multiple subsystems, split it into one issue per subsystem with blocked_by edges between them
+- Research/investigation issues should be separate from implementation issues
+
 Epic creation rules (when user asks for a feature with sub-tasks or an epic):
 - Create an EP-*.md file in .pm/backlog/ with type: epic and a children: [] field in front matter
 - Create individual IS-*.md (or BG-*.md) files for each child issue
@@ -158,7 +169,7 @@ User request: ${userPrompt}`;
       data: { message: 'Claude is planning your project...' },
     });
 
-    const result = await runner.run();
+    const result = await runWithFileLogger('pm-compose', () => runner.run());
 
     ctx.broadcastToAll({
       type: 'planPromptProgress',

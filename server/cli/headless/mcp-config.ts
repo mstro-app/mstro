@@ -8,6 +8,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { MCP_SERVER_PATH, MSTRO_ROOT } from '../../utils/paths.js';
+import { herror, hlog } from './headless-logger.js';
 
 /**
  * Load user's MCP servers from ~/.claude.json (global + project-level)
@@ -37,10 +38,10 @@ function loadUserMcpServers(workingDir: string, verbose: boolean): Record<string
     }
 
     if (verbose) {
-      console.log(`[${new Date().toISOString()}] Loaded ${Object.keys(servers).length} user MCP servers from ~/.claude.json`);
+      hlog(`[${new Date().toISOString()}] Loaded ${Object.keys(servers).length} user MCP servers from ~/.claude.json`);
     }
   } catch (parseError: unknown) {
-    console.error(`[${new Date().toISOString()}] Failed to parse ~/.claude.json: ${parseError instanceof Error ? parseError.message : String(parseError)}`);
+    herror(`[${new Date().toISOString()}] Failed to parse ~/.claude.json: ${parseError instanceof Error ? parseError.message : String(parseError)}`);
   }
 
   return servers;
@@ -53,7 +54,7 @@ function loadUserMcpServers(workingDir: string, verbose: boolean): Record<string
 export function generateMcpConfig(workingDir: string, verbose: boolean = false): string | null {
   try {
     if (!existsSync(MCP_SERVER_PATH)) {
-      console.error(`[${new Date().toISOString()}] MCP server not found at ${MCP_SERVER_PATH}`);
+      herror(`[${new Date().toISOString()}] MCP server not found at ${MCP_SERVER_PATH}`);
       return null;
     }
 
@@ -76,12 +77,12 @@ export function generateMcpConfig(workingDir: string, verbose: boolean = false):
     writeFileSync(configPath, JSON.stringify({ mcpServers }, null, 2));
 
     if (verbose) {
-      console.log(`[${new Date().toISOString()}] Generated MCP config at ${configPath} (${Object.keys(mcpServers).length} servers)`);
+      hlog(`[${new Date().toISOString()}] Generated MCP config at ${configPath} (${Object.keys(mcpServers).length} servers)`);
     }
 
     return configPath;
   } catch (error: unknown) {
-    console.error(`[${new Date().toISOString()}] Failed to generate MCP config: ${error instanceof Error ? error.message : String(error)}`);
+    herror(`[${new Date().toISOString()}] Failed to generate MCP config: ${error instanceof Error ? error.message : String(error)}`);
     return null;
   }
 }

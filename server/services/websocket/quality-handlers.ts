@@ -2,6 +2,7 @@
 // Licensed under the MIT License. See LICENSE file for details.
 
 import { join } from 'node:path';
+import { runWithFileLogger } from '../../cli/headless/headless-logger.js';
 import { HeadlessRunner } from '../../cli/headless/index.js';
 import type { ToolUseEvent } from '../../cli/headless/types.js';
 import type { HandlerContext } from './handler-context.js';
@@ -374,7 +375,7 @@ async function handleCodeReview(
       data: { path: reportPath, message: 'Claude is analyzing your codebase...' },
     });
 
-    const result = await runner.run();
+    const result = await runWithFileLogger('code-review', () => runner.run());
 
     ctx.send(ws, {
       type: 'qualityCodeReviewProgress',
@@ -528,7 +529,7 @@ async function handleFixIssues(
       })(),
     });
 
-    await runner.run();
+    await runWithFileLogger('code-review-fix', () => runner.run());
 
     ctx.send(ws, {
       type: 'qualityFixProgress',

@@ -227,6 +227,7 @@ export class WebSocketImproviseHandler implements HandlerContext {
       case 'qualityScan':
       case 'qualityInstallTools':
       case 'qualityCodeReview':
+      case 'qualityFixIssues':
       case 'qualityLoadState':
       case 'qualitySaveDirectories':
         return handleQualityMessage(this, ws, msg, tabId, workingDir);

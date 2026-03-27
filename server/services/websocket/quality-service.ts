@@ -75,9 +75,9 @@ const ECOSYSTEM_TOOLS: Record<Ecosystem, ToolSpec[]> = {
     { name: 'typescript', check: ['npx', 'tsc', '--version'], category: 'general', installCmd: 'npm install -D typescript' },
   ],
   python: [
-    { name: 'ruff', check: ['ruff', '--version'], category: 'linter', installCmd: 'pip install ruff' },
-    { name: 'black', check: ['black', '--version'], category: 'formatter', installCmd: 'pip install black' },
-    { name: 'radon', check: ['radon', '--version'], category: 'complexity', installCmd: 'pip install radon' },
+    { name: 'ruff', check: ['ruff', '--version'], category: 'linter', installCmd: 'uv tool install ruff || pip install ruff' },
+    { name: 'black', check: ['black', '--version'], category: 'formatter', installCmd: 'uv tool install black || pip install black' },
+    { name: 'radon', check: ['radon', '--version'], category: 'complexity', installCmd: 'uv tool install radon || pip install radon' },
   ],
   rust: [
     { name: 'clippy', check: ['cargo', 'clippy', '--version'], category: 'linter', installCmd: 'rustup component add clippy' },
@@ -112,6 +112,20 @@ const IGNORE_DIRS = new Set([
 const FILE_LENGTH_THRESHOLD = 300;
 const FUNCTION_LENGTH_THRESHOLD = 50;
 const TOTAL_STEPS = 7;
+
+function hasInstalledToolInCategory(
+  installedSet: Set<string>,
+  ecosystems: Ecosystem[],
+  category: QualityTool['category'],
+): boolean {
+  for (const eco of ecosystems) {
+    const specs = ECOSYSTEM_TOOLS[eco] || [];
+    for (const spec of specs) {
+      if (spec.category === category && installedSet.has(spec.name)) return true;
+    }
+  }
+  return false;
+}
 
 // ============================================================================
 // Ecosystem Detection
@@ -182,10 +196,16 @@ export async function installTools(
   const failures: string[] = [];
   for (const tool of toInstall) {
     if (tool.installCommand.startsWith('(')) continue; // built-in, skip
-    const parts = tool.installCommand.split(' ');
-    const result = await runCommand(parts[0], parts.slice(1), dirPath);
-    if (result.exitCode !== 0) {
-      failures.push(`${tool.name}: ${result.stderr || `exited with code ${result.exitCode}`}`);
+    // Support chained commands with || (try first, fallback to second)
+    const commands = tool.installCommand.split(' || ');
+    let installed = false;
+    for (const cmd of commands) {
+      const parts = cmd.trim().split(' ');
+      const result = await runCommand(parts[0], parts.slice(1), dirPath);
+      if (result.exitCode === 0) { installed = true; break; }
+    }
+    if (!installed) {
+      failures.push(`${tool.name}: all install methods failed`);
     }
   }
 
@@ -384,7 +404,7 @@ async function lintNode(dirPath: string, acc: LintAccumulator): Promise<void> {
 
 async function lintPython(dirPath: string, acc: LintAccumulator): Promise<void> {
   const result = await runCommand('ruff', ['check', '--output-format=json', '.'], dirPath);
-  if (result.exitCode > 1) return;
+  if (result.exitCode !== 0 && !result.stdout.trim().startsWith('[')) return;
 
   acc.ran = true;
   try {
@@ -836,8 +856,12 @@ export type ProgressCallback = (progress: ScanProgress) => void;
 export async function runQualityScan(
   dirPath: string,
   onProgress?: ProgressCallback,
+  installedToolNames?: string[],
 ): Promise<QualityResults> {
   const ecosystems = detectEcosystem(dirPath);
+
+  // Build set of installed tools for gating analyses
+  const installedSet = installedToolNames ? new Set(installedToolNames) : null;
 
   const progress = (step: string, current: number) => {
     onProgress?.({ step, current, total: TOTAL_STEPS });
@@ -847,13 +871,19 @@ export async function runQualityScan(
   progress('Collecting source files', 1);
   const files = collectSourceFiles(dirPath, dirPath);
 
-  // Step 2: Run linting
+  // Step 2: Run linting (only if a linter is installed)
   progress('Running linters', 2);
-  const lintResult = await analyzeLinting(dirPath, ecosystems, files);
+  const hasLinter = !installedSet || hasInstalledToolInCategory(installedSet, ecosystems, 'linter');
+  const lintResult = hasLinter
+    ? await analyzeLinting(dirPath, ecosystems, files)
+    : { score: 0, findings: [], available: false, issueCount: 0 };
 
-  // Step 3: Check formatting
+  // Step 3: Check formatting (only if a formatter is installed)
   progress('Checking formatting', 3);
-  const fmtResult = await analyzeFormatting(dirPath, ecosystems, files);
+  const hasFormatter = !installedSet || hasInstalledToolInCategory(installedSet, ecosystems, 'formatter');
+  const fmtResult = hasFormatter
+    ? await analyzeFormatting(dirPath, ecosystems, files)
+    : { score: 0, available: false, issueCount: 0 };
 
   // Step 4: Analyze complexity
   progress('Analyzing complexity', 4);

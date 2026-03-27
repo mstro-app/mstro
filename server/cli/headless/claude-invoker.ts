@@ -1035,12 +1035,17 @@ function spawnAndRegister(
     `[PERF] Command: ${config.claudeCommand} ${args.join(' ')}`,
   );
 
+  const baseEnv = config.sandboxed
+    ? sanitizeEnvForSandbox(process.env, config.workingDir)
+    : { ...process.env };
+  const spawnEnv = config.extraEnv
+    ? { ...baseEnv, ...config.extraEnv }
+    : baseEnv;
+
   const claudeProcess = spawn(config.claudeCommand, args, {
     cwd: config.workingDir,
     detached: true,
-    env: config.sandboxed
-      ? sanitizeEnvForSandbox(process.env, config.workingDir)
-      : { ...process.env },
+    env: spawnEnv,
     stdio: [hasImageAttachments ? 'pipe' : 'ignore', 'pipe', 'pipe']
   });
 

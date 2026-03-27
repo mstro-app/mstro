@@ -121,6 +121,8 @@ export interface HeadlessConfig {
   onToolTimeout?: (checkpoint: ExecutionCheckpoint) => void;
   /** When true, spawn Claude with sanitized env (strips secrets, HOME=workingDir) */
   sandboxed?: boolean;
+  /** Extra environment variables to merge into the spawned Claude process env */
+  extraEnv?: Record<string, string>;
 }
 
 export interface SessionState {
@@ -207,7 +209,7 @@ export interface ExecutionResult {
 }
 
 /** Resolved config with all defaults applied */
-export type ResolvedHeadlessConfig = Omit<Required<HeadlessConfig>, 'outputCallback' | 'thinkingCallback' | 'toolUseCallback' | 'tokenUsageCallback' | 'continueSession' | 'claudeSessionId' | 'imageAttachments' | 'model' | 'toolTimeoutProfiles' | 'onToolTimeout' | 'sandboxed'> & {
+export type ResolvedHeadlessConfig = Omit<Required<HeadlessConfig>, 'outputCallback' | 'thinkingCallback' | 'toolUseCallback' | 'tokenUsageCallback' | 'continueSession' | 'claudeSessionId' | 'imageAttachments' | 'model' | 'toolTimeoutProfiles' | 'onToolTimeout' | 'sandboxed' | 'extraEnv'> & {
   outputCallback?: (text: string) => void;
   thinkingCallback?: (text: string) => void;
   toolUseCallback?: (event: ToolUseEvent) => void;
@@ -219,4 +221,7 @@ export type ResolvedHeadlessConfig = Omit<Required<HeadlessConfig>, 'outputCallb
   toolTimeoutProfiles?: Record<string, Partial<ToolTimeoutProfile>>;
   onToolTimeout?: (checkpoint: ExecutionCheckpoint) => void;
   sandboxed?: boolean;
+  extraEnv?: Record<string, string>;
 };
+
+

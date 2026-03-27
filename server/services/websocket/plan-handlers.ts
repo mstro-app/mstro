@@ -476,6 +476,24 @@ function wireExecutorEvents(executor: PlanExecutor, ctx: HandlerContext, working
     ctx.broadcastToAll({ type: 'planExecutionError', data });
   });
 
+  executor.on('waveStarted', (data: { issueIds: string[] }) => {
+    ctx.broadcastToAll({
+      type: 'planExecutionProgress',
+      data: { status: 'wave', issueIds: data.issueIds },
+    });
+  });
+
+  executor.on('waveError', (data: { issueIds: string[]; error: string }) => {
+    ctx.broadcastToAll({ type: 'planExecutionError', data });
+  });
+
+  executor.on('stateUpdated', () => {
+    const fullState = parsePlanDirectory(workingDir);
+    if (fullState) {
+      ctx.broadcastToAll({ type: 'planStateUpdated', data: fullState });
+    }
+  });
+
   executor.on('complete', (reason: string) => {
     ctx.broadcastToAll({ type: 'planExecutionComplete', data: { reason, metrics: executor.getMetrics() } });
   });

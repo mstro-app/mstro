@@ -81,8 +81,10 @@ function dfs(
  * - It's not an epic
  * - Its status is backlog or todo (not started, done, or cancelled)
  * - All its blocked_by items are done or cancelled
+ *
+ * If epicScope is provided, only returns issues belonging to that epic.
  */
-export function resolveReadyToWork(issues: Issue[]): Issue[] {
+export function resolveReadyToWork(issues: Issue[], epicScope?: string): Issue[] {
   const issueByPath = new Map<string, Issue>();
   for (const issue of issues) {
     issueByPath.set(issue.path, issue);
@@ -93,10 +95,26 @@ export function resolveReadyToWork(issues: Issue[]): Issue[] {
 
   const priorityOrder: Record<string, number> = { P0: 0, P1: 1, P2: 2, P3: 3 };
 
+  // Build set of child paths for epic scoping
+  let epicChildPaths: Set<string> | null = null;
+  if (epicScope) {
+    const epic = issueByPath.get(epicScope);
+    if (epic) {
+      epicChildPaths = new Set(epic.children);
+      // Also include issues that reference this epic via their epic field
+      for (const issue of issues) {
+        if (issue.epic === epicScope) epicChildPaths.add(issue.path);
+      }
+    }
+  }
+
   return issues
     .filter(issue => {
       if (issue.type === 'epic') return false;
       if (!readyStatuses.has(issue.status)) return false;
+
+      // If scoped to an epic, only include that epic's children
+      if (epicChildPaths && !epicChildPaths.has(issue.path)) return false;
 
       // Check all blockers are resolved
       if (issue.blockedBy.length > 0) {

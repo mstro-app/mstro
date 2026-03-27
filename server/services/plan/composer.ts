@@ -83,6 +83,15 @@ export async function handlePlanPrompt(
     idInfo = `Next available IDs: ${nextIS}, ${nextBG}, ${nextEP}`;
   }
 
+  // Read existing epic files to provide context
+  let epicContext = '';
+  if (fullState) {
+    const existingEpics = fullState.issues.filter((i: { type: string }) => i.type === 'epic');
+    if (existingEpics.length > 0) {
+      epicContext = `\nExisting epics:\n${existingEpics.map((e: { id: string; title: string; path: string; children: string[] }) => `- ${e.id}: ${e.title} (${e.path}, children: ${e.children.length})`).join('\n')}\n`;
+    }
+  }
+
   const enrichedPrompt = `You are managing a project in the .pm/ directory format (Project Plan Spec).
 The project's current state is:
 
@@ -95,6 +104,7 @@ ${projectContent || 'No project.md yet'}
 </project>
 
 ${idInfo}
+${epicContext}
 
 Follow these rules:
 - When creating .pm/ files, use YAML front matter + markdown body
@@ -102,6 +112,15 @@ Follow these rules:
 - After any state change, update STATE.md to reflect the new status
 - Use the next available ID for new entities
 - Respond briefly describing what you did
+
+Epic creation rules (when user asks for a feature with sub-tasks or an epic):
+- Create an EP-*.md file in .pm/backlog/ with type: epic and a children: [] field in front matter
+- Create individual IS-*.md (or BG-*.md) files for each child issue
+- Each child issue must have epic: backlog/EP-XXX.md in its front matter
+- The epic's children field must list all child paths: [backlog/IS-001.md, backlog/IS-002.md, ...]
+- Set blocked_by between child issues where there are natural dependencies
+- Give each child issue clear acceptance criteria and files to modify when possible
+- Set appropriate priorities (P0-P3) based on the issue's importance within the epic
 
 User request: ${userPrompt}`;
 

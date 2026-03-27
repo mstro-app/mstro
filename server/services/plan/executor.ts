@@ -10,9 +10,11 @@
  */
 
 import { EventEmitter } from 'node:events';
-import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { runWithFileLogger } from '../../cli/headless/headless-logger.js';
 import { HeadlessRunner } from '../../cli/headless/index.js';
+import { generateMcpConfig } from '../../cli/headless/mcp-config.js';
 import { resolveReadyToWork } from './dependency-resolver.js';
 import { parsePlanDirectory, resolvePmDir } from './parser.js';
 import { reconcileState } from './state-reconciler.js';
@@ -79,13 +81,10 @@ export class PlanExecutor extends EventEmitter {
         const readyIssues = this.pickReadyIssues();
         if (readyIssues.length === 0) break;
 
-        if (readyIssues.length === 1) {
-          // Single issue: direct execution (no Agent Teams overhead)
-          await this.executeIssue(readyIssues[0]);
-        } else {
-          // Multiple unblocked issues: wave execution with Agent Teams
-          await this.executeWave(readyIssues);
-        }
+        // Always use wave execution with Agent Teams — even for single issues.
+        // Each teammate runs as a separate process with its own context window,
+        // bouncer coverage via .mcp.json + PreToolUse hook, and disk persistence.
+        await this.executeWave(readyIssues);
       }
     } catch (error) {
       this.status = 'error';
@@ -127,6 +126,9 @@ export class PlanExecutor extends EventEmitter {
     this.metrics.issuesAttempted += issues.length;
     this.emit('waveStarted', { issueIds: waveIds });
 
+    // Install bouncer .mcp.json so Agent Teams sub-agents discover it
+    this.installBouncerForSubagents();
+
     // Mark all wave issues as in_progress
     for (const issue of issues) {
       this.updateIssueFrontMatter(issue.path, 'in_progress');
@@ -140,12 +142,15 @@ export class PlanExecutor extends EventEmitter {
         directPrompt: prompt,
         stallKillMs: 3_600_000,  // 60 min — waves run longer
         stallHardCapMs: 7_200_000, // 2 hr hard cap
+        extraEnv: {
+          CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
+        },
         outputCallback: (text: string) => {
           this.emit('output', { issueId: `wave[${waveIds.join(',')}]`, text });
         },
       });
 
-      const result = await runner.run();
+      const result = await runWithFileLogger('pm-execute-wave', () => runner.run());
 
       if (!result.completed || result.error) {
         this.emit('waveError', {
@@ -162,19 +167,11 @@ export class PlanExecutor extends EventEmitter {
         issueIds: waveIds,
         error: error instanceof Error ? error.message : String(error),
       });
-      // Revert any issues that weren't completed
-      for (const issue of issues) {
-        const pmDir = resolvePmDir(this.workingDir);
-        if (!pmDir) continue;
-        const fullPath = join(pmDir, issue.path);
-        try {
-          const content = readFileSync(fullPath, 'utf-8');
-          if (content.match(/^status:\s*in_progress$/m)) {
-            this.updateIssueFrontMatter(issue.path, issue.status);
-          }
-        } catch { /* file may be gone */ }
-      }
+      this.revertIncompleteIssues(issues);
     }
+
+    // Clean up bouncer .mcp.json
+    this.uninstallBouncerForSubagents();
 
     // Reconcile STATE.md after wave
     reconcileState(this.workingDir);
@@ -244,49 +241,6 @@ export class PlanExecutor extends EventEmitter {
     }
   }
 
-  // ── Single issue execution (fallback for wave size 1) ─────────
-
-  private async executeIssue(issue: Issue): Promise<void> {
-    this.metrics.currentIssueId = issue.id;
-    this.metrics.issuesAttempted++;
-    this.emit('issueStarted', issue);
-
-    this.updateIssueFrontMatter(issue.path, 'in_progress');
-
-    const prompt = this.buildIssuePrompt(issue);
-
-    try {
-      const runner = new HeadlessRunner({
-        workingDir: this.workingDir,
-        directPrompt: prompt,
-        outputCallback: (text: string) => {
-          this.emit('output', { issueId: issue.id, text });
-        },
-      });
-
-      const result = await runner.run();
-
-      if (!result.completed || result.error) {
-        this.emit('issueError', { issueId: issue.id, error: result.error || 'Issue did not complete successfully' });
-      } else {
-        this.updateIssueFrontMatter(issue.path, 'done');
-        this.metrics.issuesCompleted++;
-        this.emit('issueCompleted', issue);
-      }
-
-      reconcileState(this.workingDir);
-      this.emit('stateUpdated');
-    } catch (error) {
-      this.emit('issueError', {
-        issueId: issue.id,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      this.updateIssueFrontMatter(issue.path, issue.status);
-    }
-
-    this.metrics.currentIssueId = null;
-  }
-
   // ── Issue picking ─────────────────────────────────────────────
 
   private pickReadyIssues(): Issue[] {
@@ -309,8 +263,9 @@ export class PlanExecutor extends EventEmitter {
   // ── Prompt building ───────────────────────────────────────────
 
   /**
-   * Build the coordinator prompt for a wave of parallel issues.
-   * Instructs the Claude session to use Agent tool for parallel execution.
+   * Build the team lead prompt for a wave of issues.
+   * Uses Agent Teams (TeamCreate/SendMessage) for true parallel execution
+   * as separate processes — each teammate gets its own context window.
    */
   private buildCoordinatorPrompt(issues: Issue[]): string {
     const pmDir = resolvePmDir(this.workingDir);
@@ -357,105 +312,161 @@ ${files}${predecessorSection}
 **Output file**: ${docsDir}/${issue.id}-${this.slugify(issue.title)}.md`;
     }).join('\n\n---\n\n');
 
-    return `You are a coordinator executing ${issues.length} issues in parallel using Agent Teams.
+    const teammateNames = issues.map(i => i.id.toLowerCase()).join(', ');
+
+    return `You are the team lead coordinating ${issues.length} issue${issues.length > 1 ? 's' : ''} using Agent Teams.
 
 ## Project Directory
 Working directory: ${this.workingDir}
 Plan directory: ${pmDir || '.pm/'}
 
-## Issues to Execute in Parallel
+## Issues to Execute
 
 ${issueBlocks}
 
-## Execution Protocol
+## Execution Protocol — Agent Teams
 
-1. **Launch all ${issues.length} issues in parallel** using the Agent tool. Send a single message with ${issues.length} Agent tool calls — one per issue. Each agent should:
-   - Read the issue spec from the .pm/backlog/ file for full context
-   - Read any predecessor output docs listed above before starting work
-   - Execute the work described in the issue
-   - **CRITICAL: Write all output/results to the output file path specified above** using the Write tool. This file MUST exist on disk when the agent finishes — it is the handoff artifact for downstream issues.
-   - Update the issue's front matter status from \`in_progress\` to \`done\` via Edit tool
+You have access to TeamCreate, SendMessage, and TeamDelete tools. Use them.
 
-2. **After all agents complete**, verify:
-   - Each output file exists in ${docsDir}/
-   - Each issue's status in .pm/backlog/ is \`done\`
-   - If any agent failed to write its output or mark done, do it yourself
+### Step 1: Create teammates
 
-3. **Do NOT modify STATE.md** — the orchestrator handles state reconciliation.
+${issues.map(issue => {
+      const predecessorDocs = issue.blockedBy
+        .map(bp => {
+          const blockerId = bp.replace(/^backlog\//, '').replace(/\.md$/, '');
+          return existingDocs.find(d => d.toLowerCase().includes(blockerId.toLowerCase()));
+        })
+        .filter(Boolean) as string[];
 
-## Agent Prompt Template
+      const predInstr = predecessorDocs.length > 0
+        ? `Read these predecessor output docs before starting: ${predecessorDocs.join(', ')}. `
+        : '';
 
-For each Agent tool call, use this structure:
-- Set \`description\` to the issue ID and short title
-- In the \`prompt\`, include the full issue description, acceptance criteria, predecessor docs to read, and the output file path
+      const outputFile = `${docsDir}/${issue.id}-${this.slugify(issue.title)}.md`;
+
+      return `Use **TeamCreate** with name \`${issue.id.toLowerCase()}\`:
+> ${predInstr}Work on issue ${issue.id}: ${issue.title}.
+> Read the full spec at ${pmDir ? join(pmDir, issue.path) : issue.path}.
+> Execute all acceptance criteria.
+> CRITICAL: Write ALL output/results to ${outputFile} — this is the handoff artifact for downstream issues.
+> After writing output, update the issue front matter: change \`status: in_progress\` to \`status: done\`.
+> Do not modify STATE.md. Do not work on anything outside this issue's scope.`;
+    }).join('\n\n')}
+
+### Step 2: Monitor completion
+
+After creating all teammates, poll for completion:
+1. Use **SendMessage** to each teammate (${teammateNames}) asking for status
+2. A teammate is done when its output file exists on disk AND the issue status is \`done\`
+3. If a teammate reports completion, verify by reading the output file yourself
+4. If a teammate is struggling, provide guidance via SendMessage
+
+### Step 3: Verify and clean up
+
+Once all teammates report done:
+1. Verify each output file exists in ${docsDir}/
+2. Verify each issue's front matter status is \`done\`
+3. If any teammate failed to write output or update status, do it yourself
+4. Use **TeamDelete** to clean up all teammates
+5. Do NOT modify STATE.md — the orchestrator handles that
 
 ## Critical Rules
 
-- Each agent MUST write its output to disk before finishing. Research that only exists in conversation context is LOST.
-- Each agent MUST update the issue front matter status to \`done\` when complete.
-- Keep agents focused — one issue per agent, no cross-issue work.
-- Do not modify files outside the issue's scope.`;
+- Use TeamCreate, NOT the Agent tool. Teammates are separate processes with full context windows.
+- Each teammate MUST write its output to disk. Research only in conversation is LOST.
+- Each teammate MUST update the issue front matter status to \`done\`.
+- One issue per teammate — no cross-issue work.
+- Do not exit until ALL teammates have completed and output files are verified.`;
   }
 
-  private buildIssuePrompt(issue: Issue): string {
+  /**
+   * Revert issues that stayed in_progress after a failed wave.
+   */
+  private revertIncompleteIssues(issues: Issue[]): void {
     const pmDir = resolvePmDir(this.workingDir);
-    const docsDir = pmDir ? join(pmDir, 'docs') : '.pm/docs';
-    const existingDocs = this.listExistingDocs();
+    if (!pmDir) return;
+    for (const issue of issues) {
+      const fullPath = join(pmDir, issue.path);
+      try {
+        const content = readFileSync(fullPath, 'utf-8');
+        if (content.match(/^status:\s*in_progress$/m)) {
+          this.updateIssueFrontMatter(issue.path, issue.status);
+        }
+      } catch { /* file may be gone */ }
+    }
+  }
 
-    const criteria = issue.acceptanceCriteria
-      .map(c => `- [${c.checked ? 'x' : ' '}] ${c.text}`)
-      .join('\n');
+  // ── Bouncer propagation for sub-agents ─────────────────────
 
-    const files = issue.filesToModify.length > 0
-      ? `\nFiles to modify:\n${issue.filesToModify.map(f => `- ${f}`).join('\n')}`
-      : '';
+  /** Saved content of any pre-existing .mcp.json so we can restore it */
+  private savedMcpJson: string | null = null;
+  private mcpJsonInstalled = false;
 
-    // Find predecessor output docs
-    const predecessorDocs = issue.blockedBy
-      .map(bp => {
-        const blockerId = bp.replace(/^backlog\//, '').replace(/\.md$/, '');
-        return existingDocs.find(d => d.toLowerCase().includes(blockerId.toLowerCase()));
-      })
-      .filter(Boolean) as string[];
+  /**
+   * Write .mcp.json in the working directory so Agent Teams teammates
+   * (separate processes) auto-discover the bouncer MCP server.
+   * This is essential — teammates don't inherit --mcp-config or
+   * --permission-prompt-tool from the team lead. .mcp.json project-level
+   * discovery + global PreToolUse hooks are the two bouncer paths for teammates.
+   *
+   * Also generates ~/.mstro/mcp-config.json for the team lead (--mcp-config).
+   */
+  private installBouncerForSubagents(): void {
+    const mcpJsonPath = join(this.workingDir, '.mcp.json');
 
-    const predecessorSection = predecessorDocs.length > 0
-      ? `\n## Predecessor Outputs\nRead these files before starting — they contain work from completed upstream issues:\n${predecessorDocs.map(d => `- ${d}`).join('\n')}\n`
-      : '';
+    // Generate the standard MCP config (for parent --mcp-config)
+    generateMcpConfig(this.workingDir);
 
-    const outputFile = `${docsDir}/${issue.id}-${this.slugify(issue.title)}.md`;
+    // Read the generated config and write it as .mcp.json for sub-agent discovery
+    try {
+      const generatedPath = generateMcpConfig(this.workingDir);
+      if (!generatedPath) return;
 
-    return `Work on this issue:
+      const mcpConfig = readFileSync(generatedPath, 'utf-8');
 
-# ${issue.id}: ${issue.title}
+      // Save any existing .mcp.json
+      if (existsSync(mcpJsonPath)) {
+        this.savedMcpJson = readFileSync(mcpJsonPath, 'utf-8');
 
-## Description
-${issue.description}
+        // Merge: add bouncer to existing config
+        const existing = JSON.parse(this.savedMcpJson);
+        const generated = JSON.parse(mcpConfig);
+        existing.mcpServers = {
+          ...existing.mcpServers,
+          'mstro-bouncer': generated.mcpServers['mstro-bouncer'],
+        };
+        writeFileSync(mcpJsonPath, JSON.stringify(existing, null, 2));
+      } else {
+        writeFileSync(mcpJsonPath, mcpConfig);
+      }
 
-## Acceptance Criteria
-${criteria || 'No specific criteria defined.'}
+      this.mcpJsonInstalled = true;
+    } catch {
+      // Non-fatal: parent has MCP via --mcp-config, teammates fall back to PreToolUse hooks
+    }
+  }
 
-## Technical Notes
-${issue.technicalNotes || 'None'}
-${files}
-${predecessorSection}
-## Output Persistence
+  /**
+   * Restore or remove .mcp.json after execution.
+   */
+  private uninstallBouncerForSubagents(): void {
+    if (!this.mcpJsonInstalled) return;
+    const mcpJsonPath = join(this.workingDir, '.mcp.json');
 
-**CRITICAL**: Write all output, research findings, or implementation results to:
-\`${outputFile}\`
+    try {
+      if (this.savedMcpJson !== null) {
+        // Restore the original
+        writeFileSync(mcpJsonPath, this.savedMcpJson);
+      } else {
+        // We created it — remove it
+        unlinkSync(mcpJsonPath);
+      }
+    } catch {
+      // Best effort cleanup
+    }
 
-This file is the handoff artifact for downstream issues that depend on this work.
-Do NOT leave results only in conversation — they MUST be written to disk.
-
-After writing the output file, update the issue front matter:
-- File: ${pmDir ? join(pmDir, issue.path) : issue.path}
-- Change \`status: in_progress\` to \`status: done\`
-
-## Instructions
-- Implement all acceptance criteria
-- Run tests after making changes (if applicable)
-- Keep changes minimal and focused
-- Do not modify unrelated code
-- Write output to the file path above before finishing`;
+    this.savedMcpJson = null;
+    this.mcpJsonInstalled = false;
   }
 
   // ── Helpers ───────────────────────────────────────────────────

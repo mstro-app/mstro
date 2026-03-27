@@ -3,6 +3,7 @@
 
 import { join } from 'node:path';
 import { HeadlessRunner } from '../../cli/headless/index.js';
+import type { ToolUseEvent } from '../../cli/headless/types.js';
 import type { HandlerContext } from './handler-context.js';
 import { QualityPersistence } from './quality-persistence.js';
 import { detectTools, installTools, runQualityScan } from './quality-service.js';
@@ -281,6 +282,39 @@ function parseCodeReviewResponse(response: string): { findings: CodeReviewFindin
   }
 }
 
+const TOOL_START_MESSAGES: Record<string, string> = {
+  Glob: 'Discovering project files...',
+  Read: 'Reading source files...',
+  Grep: 'Searching codebase...',
+  Bash: 'Running analysis command...',
+};
+
+function getToolCompleteMessage(event: ToolUseEvent): string | null {
+  const input = event.completeInput;
+  if (!input) return null;
+  if (event.toolName === 'Read' && input.file_path) {
+    return `Reviewed ${String(input.file_path).split('/').slice(-2).join('/')}`;
+  }
+  if (event.toolName === 'Grep' && input.pattern) {
+    return `Searched for "${String(input.pattern).slice(0, 40)}"`;
+  }
+  return null;
+}
+
+function createCodeReviewProgressTracker() {
+  const seenToolStarts = new Set<string>();
+
+  return (event: ToolUseEvent): string | null => {
+    if (event.type === 'tool_start' && event.toolName) {
+      if (seenToolStarts.has(event.toolName)) return null;
+      seenToolStarts.add(event.toolName);
+      return TOOL_START_MESSAGES[event.toolName] ?? null;
+    }
+    if (event.type === 'tool_complete') return getToolCompleteMessage(event);
+    return null;
+  };
+}
+
 async function handleCodeReview(
   ctx: HandlerContext,
   ws: WSContext,
@@ -300,15 +334,43 @@ async function handleCodeReview(
 
   activeReviews.add(dirPath);
   try {
+    // Send initial progress
+    ctx.send(ws, {
+      type: 'qualityCodeReviewProgress',
+      data: { path: reportPath, message: 'Starting AI code review...' },
+    });
+
     const runner = new HeadlessRunner({
       workingDir: dirPath,
       directPrompt: CODE_REVIEW_PROMPT,
       stallWarningMs: 120_000,
       stallKillMs: 600_000,
       stallHardCapMs: 900_000,
+      toolUseCallback: (() => {
+        const getProgressMessage = createCodeReviewProgressTracker();
+        return (event: ToolUseEvent) => {
+          const message = getProgressMessage(event);
+          if (message) {
+            ctx.send(ws, {
+              type: 'qualityCodeReviewProgress',
+              data: { path: reportPath, message },
+            });
+          }
+        };
+      })(),
+    });
+
+    ctx.send(ws, {
+      type: 'qualityCodeReviewProgress',
+      data: { path: reportPath, message: 'Claude is analyzing your codebase...' },
     });
 
     const result = await runner.run();
+
+    ctx.send(ws, {
+      type: 'qualityCodeReviewProgress',
+      data: { path: reportPath, message: 'Generating review report...' },
+    });
 
     const responseText = result.assistantResponse || '';
     const { findings, summary } = parseCodeReviewResponse(responseText);
@@ -317,6 +379,14 @@ async function handleCodeReview(
       type: 'qualityCodeReview',
       data: { path: reportPath, findings, summary },
     });
+
+    // Persist code review results
+    try {
+      const persistence = getPersistence(workingDir);
+      persistence.saveCodeReview(reportPath, findings as unknown as Record<string, unknown>[], summary);
+    } catch {
+      // Persistence failure should not break the review flow
+    }
   } catch (error) {
     ctx.send(ws, {
       type: 'qualityError',

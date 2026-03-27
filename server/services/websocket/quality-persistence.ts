@@ -208,12 +208,35 @@ export class QualityPersistence {
     writeJson(this.historyPath, { entries: history });
   }
 
+  // ---- Code Review (persisted per directory) ----
+
+  loadCodeReview(dirPath: string): { findings: Record<string, unknown>[]; summary: string; timestamp: string } | null {
+    const slug = slugify(dirPath);
+    const reviewPath = join(this.reportsDir, `${slug}-review.json`);
+    return readJson<{ findings: Record<string, unknown>[]; summary: string; timestamp: string } | null>(reviewPath, null);
+  }
+
+  saveCodeReview(dirPath: string, findings: Record<string, unknown>[], summary: string): void {
+    const slug = slugify(dirPath);
+    const reviewPath = join(this.reportsDir, `${slug}-review.json`);
+    writeJson(reviewPath, { findings, summary, timestamp: new Date().toISOString() });
+  }
+
   // ---- Full state load ----
 
   loadState(): QualityPersistedState {
     const directories = this.loadConfig();
     const reports = this.loadAllReports(directories);
     const history = this.loadHistory();
+
+    // Merge persisted code reviews into reports
+    for (const dir of directories) {
+      const review = this.loadCodeReview(dir.path);
+      if (review && reports[dir.path]) {
+        reports[dir.path] = { ...reports[dir.path], codeReview: review.findings as unknown as QualityResults['codeReview'] };
+      }
+    }
+
     return { directories, reports, history };
   }
 }

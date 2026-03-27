@@ -10,7 +10,7 @@
  */
 
 import { EventEmitter } from 'node:events';
-import { existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { runWithFileLogger } from '../../cli/headless/headless-logger.js';
 import { HeadlessRunner } from '../../cli/headless/index.js';
@@ -126,7 +126,10 @@ export class PlanExecutor extends EventEmitter {
     this.metrics.issuesAttempted += issues.length;
     this.emit('waveStarted', { issueIds: waveIds });
 
-    // Install bouncer .mcp.json so Agent Teams sub-agents discover it
+    // Pre-approve tools so teammates don't hit interactive permission prompts
+    this.installTeammatePermissions();
+
+    // Install bouncer .mcp.json so Agent Teams teammates discover it
     this.installBouncerForSubagents();
 
     // Mark all wave issues as in_progress
@@ -170,8 +173,9 @@ export class PlanExecutor extends EventEmitter {
       this.revertIncompleteIssues(issues);
     }
 
-    // Clean up bouncer .mcp.json
+    // Clean up temporary configs
     this.uninstallBouncerForSubagents();
+    this.uninstallTeammatePermissions();
 
     // Reconcile STATE.md after wave
     reconcileState(this.workingDir);
@@ -313,24 +317,9 @@ ${files}${predecessorSection}
     }).join('\n\n---\n\n');
 
     const teammateNames = issues.map(i => i.id.toLowerCase()).join(', ');
+    const teamName = `pm-wave-${Date.now()}`;
 
-    return `You are the team lead coordinating ${issues.length} issue${issues.length > 1 ? 's' : ''} using Agent Teams.
-
-## Project Directory
-Working directory: ${this.workingDir}
-Plan directory: ${pmDir || '.pm/'}
-
-## Issues to Execute
-
-${issueBlocks}
-
-## Execution Protocol — Agent Teams
-
-You have access to TeamCreate, SendMessage, and TeamDelete tools. Use them.
-
-### Step 1: Create teammates
-
-${issues.map(issue => {
+    const teammateSpawns = issues.map(issue => {
       const predecessorDocs = issue.blockedBy
         .map(bp => {
           const blockerId = bp.replace(/^backlog\//, '').replace(/\.md$/, '');
@@ -344,35 +333,57 @@ ${issues.map(issue => {
 
       const outputFile = `${docsDir}/${issue.id}-${this.slugify(issue.title)}.md`;
 
-      return `Use **TeamCreate** with name \`${issue.id.toLowerCase()}\`:
+      return `Spawn teammate **${issue.id.toLowerCase()}** using the **Agent** tool with \`team_name: "${teamName}"\` and \`name: "${issue.id.toLowerCase()}"\`:
 > ${predInstr}Work on issue ${issue.id}: ${issue.title}.
 > Read the full spec at ${pmDir ? join(pmDir, issue.path) : issue.path}.
 > Execute all acceptance criteria.
 > CRITICAL: Write ALL output/results to ${outputFile} — this is the handoff artifact for downstream issues.
 > After writing output, update the issue front matter: change \`status: in_progress\` to \`status: done\`.
 > Do not modify STATE.md. Do not work on anything outside this issue's scope.`;
-    }).join('\n\n')}
+    }).join('\n\n');
 
-### Step 2: Monitor completion
+    return `You are the team lead coordinating ${issues.length} issue${issues.length > 1 ? 's' : ''} using Agent Teams.
 
-After creating all teammates, poll for completion:
+## Project Directory
+Working directory: ${this.workingDir}
+Plan directory: ${pmDir || '.pm/'}
+
+## Issues to Execute
+
+${issueBlocks}
+
+## Execution Protocol — Agent Teams
+
+### Step 1: Create the team
+
+Use **TeamCreate** to create a team named \`${teamName}\`.
+
+### Step 2: Spawn teammates
+
+Spawn all ${issues.length} teammates in parallel using the **Agent** tool with \`team_name\` and \`name\` parameters. Send a single message with ${issues.length} Agent tool calls.
+
+${teammateSpawns}
+
+### Step 3: Monitor completion
+
+After spawning all teammates, poll for completion:
 1. Use **SendMessage** to each teammate (${teammateNames}) asking for status
 2. A teammate is done when its output file exists on disk AND the issue status is \`done\`
 3. If a teammate reports completion, verify by reading the output file yourself
 4. If a teammate is struggling, provide guidance via SendMessage
 
-### Step 3: Verify and clean up
+### Step 4: Verify and clean up
 
 Once all teammates report done:
 1. Verify each output file exists in ${docsDir}/
 2. Verify each issue's front matter status is \`done\`
 3. If any teammate failed to write output or update status, do it yourself
-4. Use **TeamDelete** to clean up all teammates
+4. Use **TeamDelete** to clean up the team \`${teamName}\`
 5. Do NOT modify STATE.md — the orchestrator handles that
 
 ## Critical Rules
 
-- Use TeamCreate, NOT the Agent tool. Teammates are separate processes with full context windows.
+- Create ONE team with TeamCreate, then spawn teammates with Agent(team_name="${teamName}", name="...").
 - Each teammate MUST write its output to disk. Research only in conversation is LOST.
 - Each teammate MUST update the issue front matter status to \`done\`.
 - One issue per teammate — no cross-issue work.
@@ -394,6 +405,90 @@ Once all teammates report done:
         }
       } catch { /* file may be gone */ }
     }
+  }
+
+  // ── Teammate permissions ─────────────────────────────────────
+
+  /** Saved content of any pre-existing .claude/settings.json so we can restore it */
+  private savedClaudeSettings: string | null = null;
+  private claudeSettingsInstalled = false;
+
+  /**
+   * Pre-approve tools in project .claude/settings.json so Agent Teams
+   * teammates can work without interactive permission prompts.
+   * Teammates are separate processes that inherit the lead's permission
+   * settings. Without pre-approved tools, they hit interactive prompts
+   * that can't be answered in headless/background mode (known bug #25254).
+   */
+  private installTeammatePermissions(): void {
+    const claudeDir = join(this.workingDir, '.claude');
+    const settingsPath = join(claudeDir, 'settings.json');
+
+    if (!existsSync(claudeDir)) {
+      mkdirSync(claudeDir, { recursive: true });
+    }
+
+    // Tools that teammates may need during execution
+    const requiredPermissions = [
+      'Bash',
+      'Read',
+      'Edit',
+      'Write',
+      'Glob',
+      'Grep',
+      'WebFetch',
+      'WebSearch',
+      'Agent',
+    ];
+
+    try {
+      // Save existing settings
+      if (existsSync(settingsPath)) {
+        this.savedClaudeSettings = readFileSync(settingsPath, 'utf-8');
+        const existing = JSON.parse(this.savedClaudeSettings);
+
+        // Merge permissions into existing settings
+        if (!existing.permissions) existing.permissions = {};
+        if (!existing.permissions.allow) existing.permissions.allow = [];
+
+        for (const tool of requiredPermissions) {
+          if (!existing.permissions.allow.includes(tool)) {
+            existing.permissions.allow.push(tool);
+          }
+        }
+
+        writeFileSync(settingsPath, JSON.stringify(existing, null, 2));
+      } else {
+        this.savedClaudeSettings = null;
+        writeFileSync(settingsPath, JSON.stringify({
+          permissions: { allow: requiredPermissions },
+        }, null, 2));
+      }
+      this.claudeSettingsInstalled = true;
+    } catch {
+      // Non-fatal — teammates may hit permission prompts
+    }
+  }
+
+  /**
+   * Restore original .claude/settings.json after wave execution.
+   */
+  private uninstallTeammatePermissions(): void {
+    if (!this.claudeSettingsInstalled) return;
+    const settingsPath = join(this.workingDir, '.claude', 'settings.json');
+
+    try {
+      if (this.savedClaudeSettings !== null) {
+        writeFileSync(settingsPath, this.savedClaudeSettings);
+      } else {
+        unlinkSync(settingsPath);
+      }
+    } catch {
+      // Best effort
+    }
+
+    this.savedClaudeSettings = null;
+    this.claudeSettingsInstalled = false;
   }
 
   // ── Bouncer propagation for sub-agents ─────────────────────

@@ -19,6 +19,7 @@ import { handleFileExplorerMessage, handleFileMessage } from './file-explorer-ha
 import { FileUploadHandler } from './file-upload-handler.js';
 import { handleGitMessage } from './git-handlers.js';
 import type { HandlerContext, UsageReporter } from './handler-context.js';
+import { handleQualityMessage } from './quality-handlers.js';
 import { handleHistoryMessage, handleSessionMessage, initializeTab, resumeHistoricalSession } from './session-handlers.js';
 import { SessionRegistry } from './session-registry.js';
 import { generateNotificationSummary, handleGetSettings, handleUpdateSettings } from './settings-handlers.js';
@@ -220,6 +221,12 @@ export class WebSocketImproviseHandler implements HandlerContext {
         return handleRemoveTab(this, ws, tabId, workingDir);
       case 'markTabViewed':
         return handleMarkTabViewed(this, ws, tabId, workingDir);
+      // Quality messages
+      case 'qualityDetectTools':
+      case 'qualityScan':
+      case 'qualityInstallTools':
+      case 'qualityCodeReview':
+        return handleQualityMessage(this, ws, msg, tabId, workingDir);
       // Settings messages
       case 'getSettings':
         return handleGetSettings(this, ws);
@@ -291,6 +298,4 @@ export class WebSocketImproviseHandler implements HandlerContext {
     this.sessions.delete(sessionId);
   }
 
-  cleanupStaleSessions(): void {
-  }
 }

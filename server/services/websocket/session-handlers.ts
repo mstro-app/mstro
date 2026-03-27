@@ -6,8 +6,28 @@ import { join } from 'node:path';
 import { type FileAttachment, ImprovisationSessionManager } from '../../cli/improvisation-session-manager.js';
 import { getModel } from '../settings.js';
 import type { HandlerContext } from './handler-context.js';
+import { runQualityScan } from './quality-service.js';
 import type { SessionRegistry } from './session-registry.js';
 import type { WebSocketMessage, WSContext } from './types.js';
+
+const WRITE_TOOL_NAMES = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
+
+function movementHadWrites(movement: Record<string, unknown>): boolean {
+  const history = movement.toolUseHistory as Array<{ toolName: string; result?: string; isError?: boolean }> | undefined;
+  if (!history) return false;
+  return history.some((t) => WRITE_TOOL_NAMES.has(t.toolName) && t.result !== undefined && !t.isError);
+}
+
+function triggerPostSessionQualityScan(ctx: HandlerContext, workingDir: string): void {
+  runQualityScan(workingDir).then((results) => {
+    ctx.broadcastToAll({
+      type: 'qualityPostSession',
+      data: { path: '.', results },
+    });
+  }).catch(() => {
+    // Quality scan failure should not affect session flow
+  });
+}
 
 /** Convert tool history entries into OutputLine-compatible lines */
 function convertToolHistoryToLines(tools: Array<{ toolName: string; toolInput?: Record<string, unknown>; result?: string; isError?: boolean }>, ts: number): Array<Record<string, unknown>> {
@@ -103,6 +123,12 @@ export function setupSessionListeners(ctx: HandlerContext, session: Improvisatio
         sessionId: session.getSessionInfo().sessionId,
         movementId: `${movement.sequenceNumber}`
       });
+    }
+
+    // Post-session quality gate: if the session wrote/edited files, re-scan
+    if (movementHadWrites(movement)) {
+      const scanDir = ctx.gitDirectories.get(tabId) || session.getSessionInfo().workingDir;
+      triggerPostSessionQualityScan(ctx, scanDir);
     }
   });
 

@@ -107,6 +107,11 @@ export interface WebSocketMessage {
     // Settings message types
     | 'getSettings'
     | 'updateSettings'
+    // Quality message types
+    | 'qualityDetectTools'
+    | 'qualityScan'
+    | 'qualityInstallTools'
+    | 'qualityCodeReview'
     // File upload message types (chunked remote uploads)
     | 'fileUploadStart'
     | 'fileUploadChunk'
@@ -219,6 +224,15 @@ export interface WebSocketResponse {
     // Settings response types
     | 'settings'
     | 'settingsUpdated'
+    // Quality response types
+    | 'qualityToolsDetected'
+    | 'qualityScanProgress'
+    | 'qualityScanResults'
+    | 'qualityInstallProgress'
+    | 'qualityInstallComplete'
+    | 'qualityCodeReview'
+    | 'qualityPostSession'
+    | 'qualityError'
     // File upload response types
     | 'fileUploadAck'
     | 'fileUploadReady'

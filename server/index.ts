@@ -447,10 +447,6 @@ async function startServer() {
     process.exit(0)
   })
 
-  // Periodic cleanup
-  setInterval(() => {
-    wsHandler.cleanupStaleSessions()
-  }, 5 * 60 * 1000) // Every 5 minutes
 }
 
 startServer()

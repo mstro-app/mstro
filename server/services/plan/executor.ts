@@ -268,8 +268,9 @@ export class PlanExecutor extends EventEmitter {
 
   /**
    * Build the team lead prompt for a wave of issues.
-   * Uses Agent Teams (TeamCreate/SendMessage) for true parallel execution
-   * as separate processes — each teammate gets its own context window.
+   * Uses Agent Teams for true parallel execution as separate processes —
+   * each teammate gets its own context window and sends idle notifications
+   * when done. The team is created implicitly by the first Agent(team_name=...) call.
    */
   private buildCoordinatorPrompt(issues: Issue[]): string {
     const pmDir = resolvePmDir(this.workingDir);
@@ -316,7 +317,6 @@ ${files}${predecessorSection}
 **Output file**: ${docsDir}/${issue.id}-${this.slugify(issue.title)}.md`;
     }).join('\n\n---\n\n');
 
-    const teammateNames = issues.map(i => i.id.toLowerCase()).join(', ');
     const teamName = `pm-wave-${Date.now()}`;
 
     const teammateSpawns = issues.map(issue => {
@@ -354,40 +354,41 @@ ${issueBlocks}
 
 ## Execution Protocol — Agent Teams
 
-### Step 1: Create the team
+### Step 1: Spawn teammates
 
-Use **TeamCreate** to create a team named \`${teamName}\`.
-
-### Step 2: Spawn teammates
-
-Spawn all ${issues.length} teammates in parallel using the **Agent** tool with \`team_name\` and \`name\` parameters. Send a single message with ${issues.length} Agent tool calls.
+Spawn all ${issues.length} teammates in parallel by sending a single message with ${issues.length} **Agent** tool calls. Each call must include \`team_name: "${teamName}"\` and a unique \`name\`. Do NOT call "TeamCreate" — it does not exist. The team is created automatically when you spawn the first teammate with \`team_name\`.
 
 ${teammateSpawns}
 
-### Step 3: Monitor completion
+### Step 2: Wait for ALL teammates to complete
 
-After spawning all teammates, poll for completion:
-1. Use **SendMessage** to each teammate (${teammateNames}) asking for status
-2. A teammate is done when its output file exists on disk AND the issue status is \`done\`
-3. If a teammate reports completion, verify by reading the output file yourself
-4. If a teammate is struggling, provide guidance via SendMessage
+CRITICAL: After spawning, you MUST remain active and wait for every single teammate to finish. Each teammate automatically sends you an **idle notification** when they complete their work.
 
-### Step 4: Verify and clean up
+Track completion against this checklist — ALL must report idle before you proceed:
+${issues.map(i => `- [ ] ${i.id.toLowerCase()}`).join('\n')}
 
-Once all teammates report done:
-1. Verify each output file exists in ${docsDir}/
+While waiting:
+- As each teammate goes idle, verify their output file exists on disk using the **Read** tool
+- If a teammate has not gone idle after 15 minutes, use **SendMessage** to check on them
+- Do NOT proceed to Step 3 until you have received idle notifications from ALL ${issues.length} teammates
+
+WARNING: The #1 failure mode is exiting before all teammates finish. If you exit early, all teammate processes are killed and their work is permanently lost. When in doubt, keep waiting. Err on the side of waiting too long rather than exiting too early.
+
+### Step 3: Verify outputs
+
+Once every teammate has gone idle:
+1. Verify each output file exists in ${docsDir}/ using **Read** or **Glob**
 2. Verify each issue's front matter status is \`done\`
 3. If any teammate failed to write output or update status, do it yourself
-4. Use **TeamDelete** to clean up the team \`${teamName}\`
-5. Do NOT modify STATE.md — the orchestrator handles that
+4. Do NOT modify STATE.md — the orchestrator handles that
 
 ## Critical Rules
 
-- Create ONE team with TeamCreate, then spawn teammates with Agent(team_name="${teamName}", name="...").
-- Each teammate MUST write its output to disk. Research only in conversation is LOST.
+- DO NOT use "TeamCreate" or "TeamDelete" — these are not real tools. The team is created implicitly when you spawn the first teammate with \`team_name\`, and cleaned up automatically when all teammates exit.
+- You MUST wait for idle notifications from ALL ${issues.length} teammates before exiting. Exiting early kills all teammate processes and permanently loses their work.
+- Each teammate MUST write its output to disk — research only in conversation is LOST.
 - Each teammate MUST update the issue front matter status to \`done\`.
-- One issue per teammate — no cross-issue work.
-- Do not exit until ALL teammates have completed and output files are verified.`;
+- One issue per teammate — no cross-issue work.`;
   }
 
   /**

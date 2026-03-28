@@ -1089,7 +1089,7 @@ export class ImprovisationSessionManager extends EventEmitter {
     isMaxTokens: boolean,
   ): void {
     state.retryNumber++;
-    const reason = isMaxTokens ? 'max_tokens hit' : 'incomplete end_turn (Haiku assessment)';
+    const reason = isMaxTokens ? 'Output limit reached' : 'Task appears unfinished (AI assessment)';
 
     state.retryLog.push({
       retryNumber: state.retryNumber,
@@ -1113,7 +1113,7 @@ export class ImprovisationSessionManager extends EventEmitter {
     });
 
     this.queueOutput(
-      `\n[[MSTRO_AUTO_CONTINUE]] Task incomplete (${reason}) — resuming session (retry ${state.retryNumber}/${maxRetries}).\n`
+      `\n[[MSTRO_AUTO_CONTINUE]] ${reason} — resuming session (retry ${state.retryNumber}/${maxRetries}).\n`
     );
     this.flushOutputQueue();
 

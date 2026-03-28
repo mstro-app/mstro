@@ -105,10 +105,11 @@ async function runStallAssessment(
       const pendingNames = stallCtx.pendingToolNames ?? new Set<string>();
 
       // Emit a progress message instead of a scary stall warning.
-      // Task subagents get a friendlier message since long silence is expected.
-      if (pendingNames.has('Task')) {
+      // Task subagents and Agent Teams leads get friendlier messages since long silence is expected.
+      const isAgentTeamsLead = verdict.reason.includes('Agent Teams lead');
+      if (pendingNames.has('Task') || isAgentTeamsLead) {
         config.outputCallback?.(
-          `\n[[MSTRO_STALL_EXTENDED]] Task subagent still running (${elapsedMin} min elapsed). ${verdict.reason}.\n`
+          `\n[[MSTRO_STALL_EXTENDED]] ${isAgentTeamsLead ? 'Teammates still working' : 'Task subagent still running'} (${elapsedMin} min elapsed). ${verdict.reason}.\n`
         );
       } else {
         config.outputCallback?.(

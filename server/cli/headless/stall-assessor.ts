@@ -49,6 +49,34 @@ export interface StallVerdict {
   reason: string;
 }
 
+/** Check if Task/Agent subagents are currently pending (producing expected silence) */
+function hasSubagentPending(pendingNames: Set<string>, lastToolName: string | undefined, hasPendingTools: boolean): boolean {
+  return pendingNames.has('Task') || pendingNames.has('Agent')
+    || ((lastToolName === 'Task' || lastToolName === 'Agent') && hasPendingTools);
+}
+
+/**
+ * Check if an Agent Teams lead is idle-waiting for teammate notifications.
+ * After spawning teammates (Agent tool calls complete), the lead has no pending
+ * tools but is legitimately waiting for teammate idle events.
+ */
+function checkAgentTeamsWaiting(ctx: StallContext, hasPendingTools: boolean): StallVerdict | null {
+  if (
+    !hasPendingTools &&
+    ctx.totalToolCalls > 0 &&
+    ctx.originalPrompt.includes('team_name') &&
+    (ctx.lastToolName === 'Agent' || ctx.lastToolName === 'SendMessage'
+      || ctx.lastToolName === 'TaskList' || ctx.lastToolName === 'Read')
+  ) {
+    return {
+      action: 'extend',
+      extensionMs: 30 * 60_000,
+      reason: 'Agent Teams lead waiting for teammate idle notifications — extending 30 min',
+    };
+  }
+  return null;
+}
+
 /**
  * Fast heuristic for known long-running patterns.
  * Returns a verdict immediately if the pattern is recognized, null otherwise.
@@ -87,11 +115,7 @@ function quickHeuristic(ctx: StallContext, toolWatchdogActive = false): StallVer
 
   // Task/subagent launches are known to produce long silence periods.
   // The parent Claude process emits nothing while waiting for subagent results.
-  // Check pendingToolNames (reliable) first, fall back to lastToolName (legacy).
-  // Claude Code renamed Task → Agent; check both for backward compatibility
-  const hasTaskPending = pendingNames.has('Task') || pendingNames.has('Agent')
-    || ((ctx.lastToolName === 'Task' || ctx.lastToolName === 'Agent') && hasPendingTools);
-  if (hasTaskPending) {
+  if (hasSubagentPending(pendingNames, ctx.lastToolName, hasPendingTools)) {
     const extensionMin = Math.min(30, 10 + ctx.pendingToolCount * 5);
     return {
       action: 'extend',
@@ -99,6 +123,10 @@ function quickHeuristic(ctx: StallContext, toolWatchdogActive = false): StallVer
       reason: `${ctx.pendingToolCount} Task subagent(s) still executing — extending ${extensionMin} min`,
     };
   }
+
+  // Agent Teams lead waiting for teammate idle notifications (extracted for complexity)
+  const agentTeamsVerdict = checkAgentTeamsWaiting(ctx, hasPendingTools);
+  if (agentTeamsVerdict) return agentTeamsVerdict;
 
   // Multiple parallel tool calls (e.g., parallel Bash, parallel Read/Grep)
   if (ctx.pendingToolCount >= 3) {

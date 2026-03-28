@@ -7,7 +7,7 @@
  * Handles YAML front matter extraction and markdown body parsing.
  */
 
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type {
   AcceptanceCriterion,
@@ -33,53 +33,43 @@ interface ParsedFile {
   body: string;
 }
 
+function stripQuotes(v: string): string {
+  if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+    return v.slice(1, -1);
+  }
+  return v;
+}
+
+function parseYamlValue(v: string): unknown {
+  if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+    return v.slice(1, -1);
+  }
+  if (v.startsWith('[') && v.endsWith(']')) {
+    return v.slice(1, -1).split(',').map(s => stripQuotes(s.trim())).filter(Boolean);
+  }
+  if (v === 'true') return true;
+  if (v === 'false') return false;
+  if (v === 'null' || v === '~' || v === '') return null;
+  if (/^-?\d+(\.\d+)?$/.test(v)) return Number(v);
+  return v;
+}
+
 function parseFrontMatter(content: string): ParsedFile {
   const match = content.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
   if (!match) {
     return { frontMatter: {}, body: content };
   }
-  const yamlStr = match[1];
-  const body = match[2];
   const frontMatter: Record<string, unknown> = {};
 
-  for (const line of yamlStr.split('\n')) {
+  for (const line of match[1].split('\n')) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('#')) continue;
-
     const colonIdx = trimmed.indexOf(':');
     if (colonIdx === -1) continue;
-
-    const key = trimmed.slice(0, colonIdx).trim();
-    let value: unknown = trimmed.slice(colonIdx + 1).trim();
-
-    // Parse YAML values
-    if (typeof value === 'string') {
-      const v = value as string;
-      // Remove surrounding quotes
-      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
-        value = v.slice(1, -1);
-      }
-      // Inline array: [a, b, c]
-      else if (v.startsWith('[') && v.endsWith(']')) {
-        value = v.slice(1, -1).split(',').map(s => {
-          const t = s.trim();
-          return (t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))
-            ? t.slice(1, -1) : t;
-        }).filter(Boolean);
-      }
-      // Boolean
-      else if (v === 'true') value = true;
-      else if (v === 'false') value = false;
-      // Null
-      else if (v === 'null' || v === '~' || v === '') value = null;
-      // Number
-      else if (/^-?\d+(\.\d+)?$/.test(v)) value = Number(v);
-    }
-
-    frontMatter[key] = value;
+    frontMatter[trimmed.slice(0, colonIdx).trim()] = parseYamlValue(trimmed.slice(colonIdx + 1).trim());
   }
 
-  return { frontMatter, body };
+  return { frontMatter, body: match[2] };
 }
 
 // ============================================================================
@@ -179,33 +169,35 @@ function parseCompletedSummaries(content: string): IssueSummary[] {
 // Entity Parsers
 // ============================================================================
 
+function parseWorkflows(section: string | undefined): WorkflowStatus[] {
+  if (!section) return [];
+  const workflows: WorkflowStatus[] = [];
+  for (const line of section.split('\n')) {
+    const match = line.match(/\|\s*(\w+)\s*\|\s*(\w+)\s*\|\s*(.+?)\s*\|/);
+    if (match && match[1] !== 'Status') {
+      workflows.push({
+        status: match[1],
+        category: match[2] as WorkflowStatus['category'],
+        description: match[3].trim(),
+      });
+    }
+  }
+  return workflows;
+}
+
+function parseTeams(section: string | undefined): Team[] {
+  if (!section) return [];
+  const teams: Team[] = [];
+  for (const line of section.split('\n')) {
+    const match = line.match(/^[-*]\s+(\w+)(?:\s*[—–-]\s*(.+))?$/);
+    if (match) teams.push({ name: match[1], description: match[2]?.trim() });
+  }
+  return teams;
+}
+
 function parseProjectConfig(content: string): ProjectConfig {
   const { frontMatter, body } = parseFrontMatter(content);
   const sections = extractSections(body);
-
-  const workflows: WorkflowStatus[] = [];
-  const workflowSection = sections.get('Workflows');
-  if (workflowSection) {
-    for (const line of workflowSection.split('\n')) {
-      const match = line.match(/\|\s*(\w+)\s*\|\s*(\w+)\s*\|\s*(.+?)\s*\|/);
-      if (match && match[1] !== 'Status') {
-        workflows.push({
-          status: match[1],
-          category: match[2] as WorkflowStatus['category'],
-          description: match[3].trim(),
-        });
-      }
-    }
-  }
-
-  const teams: Team[] = [];
-  const teamsSection = sections.get('Teams');
-  if (teamsSection) {
-    for (const line of teamsSection.split('\n')) {
-      const match = line.match(/^[-*]\s+(\w+)(?:\s*[—–-]\s*(.+))?$/);
-      if (match) teams.push({ name: match[1], description: match[2]?.trim() });
-    }
-  }
 
   const idPrefixes: Record<string, string> = {};
   const rawPrefixes = frontMatter.id_prefixes;
@@ -220,9 +212,9 @@ function parseProjectConfig(content: string): ProjectConfig {
     status: (frontMatter.status as ProjectConfig['status']) || 'active',
     estimation: (frontMatter.estimation as ProjectConfig['estimation']) || 'none',
     idPrefixes,
-    workflows,
+    workflows: parseWorkflows(sections.get('Workflows')),
     labels: (Array.isArray(frontMatter.labels) ? frontMatter.labels : []) as string[],
-    teams,
+    teams: parseTeams(sections.get('Teams')),
   };
 }
 
@@ -244,35 +236,38 @@ function parseProjectState(content: string): ProjectState {
   };
 }
 
+function toStringArray(val: unknown): string[] {
+  return Array.isArray(val) ? val.map(String) : [];
+}
+
+function optionalString(val: unknown): string | null {
+  return (val as string) || null;
+}
+
 function parseIssue(content: string, filePath: string): Issue {
-  const { frontMatter, body } = parseFrontMatter(content);
+  const { frontMatter: fm, body } = parseFrontMatter(content);
   const sections = extractSections(body);
 
-  const toStringArray = (val: unknown): string[] => {
-    if (Array.isArray(val)) return val.map(String);
-    return [];
-  };
-
   return {
-    id: String(frontMatter.id || ''),
-    title: String(frontMatter.title || ''),
-    type: (frontMatter.type as Issue['type']) || 'issue',
-    status: String(frontMatter.status || 'backlog'),
-    priority: String(frontMatter.priority || 'P2'),
-    estimate: frontMatter.estimate != null ? frontMatter.estimate as number | string : null,
-    labels: toStringArray(frontMatter.labels),
-    epic: (frontMatter.epic as string) || null,
-    sprint: (frontMatter.sprint as string) || null,
-    milestone: (frontMatter.milestone as string) || null,
-    assigned: (frontMatter.assigned as string) || null,
-    created: String(frontMatter.created || ''),
-    updated: (frontMatter.updated as string) || null,
-    due: (frontMatter.due as string) || null,
-    blockedBy: toStringArray(frontMatter.blocked_by),
-    blocks: toStringArray(frontMatter.blocks),
-    relatesTo: toStringArray(frontMatter.relates_to),
-    children: toStringArray(frontMatter.children),
-    progress: (frontMatter.progress as string) || null,
+    id: String(fm.id || ''),
+    title: String(fm.title || ''),
+    type: (fm.type as Issue['type']) || 'issue',
+    status: String(fm.status || 'backlog'),
+    priority: String(fm.priority || 'P2'),
+    estimate: fm.estimate != null ? fm.estimate as number | string : null,
+    labels: toStringArray(fm.labels),
+    epic: optionalString(fm.epic),
+    sprint: optionalString(fm.sprint),
+    milestone: optionalString(fm.milestone),
+    assigned: optionalString(fm.assigned),
+    created: String(fm.created || ''),
+    updated: optionalString(fm.updated),
+    due: optionalString(fm.due),
+    blockedBy: toStringArray(fm.blocked_by),
+    blocks: toStringArray(fm.blocks),
+    relatesTo: toStringArray(fm.relates_to),
+    children: toStringArray(fm.children),
+    progress: optionalString(fm.progress),
     description: sections.get('Description') || '',
     acceptanceCriteria: parseCheckboxes(sections.get('Acceptance Criteria') || ''),
     technicalNotes: sections.get('Technical Notes') || null,
@@ -283,38 +278,43 @@ function parseIssue(content: string, filePath: string): Issue {
   };
 }
 
-function parseSprint(content: string, filePath: string): Sprint {
-  const { frontMatter, body } = parseFrontMatter(content);
-  const sections = extractSections(body);
-
+function parseSprintIssues(section: string | undefined): SprintIssueSummary[] {
+  if (!section) return [];
   const issues: SprintIssueSummary[] = [];
-  const issueSection = sections.get('Issues');
-  if (issueSection) {
-    for (const line of issueSection.split('\n')) {
-      const match = line.match(/\|\s*\[([^\]]+)\]\(([^)]+)\)\s*\|\s*(.+?)\s*\|\s*(\S+)\s*\|\s*(\S+)\s*\|/);
-      if (match) {
-        issues.push({
-          id: match[1],
-          path: match[2],
-          title: match[3].trim(),
-          points: /^\d+$/.test(match[4]) ? Number(match[4]) : match[4],
-          status: match[5],
-        });
-      }
+  for (const line of section.split('\n')) {
+    const match = line.match(/\|\s*\[([^\]]+)\]\(([^)]+)\)\s*\|\s*(.+?)\s*\|\s*(\S+)\s*\|\s*(\S+)\s*\|/);
+    if (match) {
+      issues.push({
+        id: match[1],
+        path: match[2],
+        title: match[3].trim(),
+        points: /^\d+$/.test(match[4]) ? Number(match[4]) : match[4],
+        status: match[5],
+      });
     }
   }
+  return issues;
+}
+
+function optionalNumber(val: unknown): number | null {
+  return val != null ? Number(val) : null;
+}
+
+function parseSprint(content: string, filePath: string): Sprint {
+  const { frontMatter: fm, body } = parseFrontMatter(content);
+  const sections = extractSections(body);
 
   return {
-    id: String(frontMatter.id || ''),
-    title: String(frontMatter.title || ''),
-    status: (frontMatter.status as Sprint['status']) || 'planned',
-    start: String(frontMatter.start || ''),
-    end: String(frontMatter.end || ''),
-    goal: String(frontMatter.goal || sections.get('Goal') || ''),
-    capacity: frontMatter.capacity != null ? Number(frontMatter.capacity) : null,
-    committed: frontMatter.committed != null ? Number(frontMatter.committed) : null,
-    completed: frontMatter.completed != null ? Number(frontMatter.completed) : null,
-    issues,
+    id: String(fm.id || ''),
+    title: String(fm.title || ''),
+    status: (fm.status as Sprint['status']) || 'planned',
+    start: String(fm.start || ''),
+    end: String(fm.end || ''),
+    goal: String(fm.goal || sections.get('Goal') || ''),
+    capacity: optionalNumber(fm.capacity),
+    committed: optionalNumber(fm.committed),
+    completed: optionalNumber(fm.completed),
+    issues: parseSprintIssues(sections.get('Issues')),
     path: filePath,
   };
 }

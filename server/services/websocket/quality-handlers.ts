@@ -10,6 +10,33 @@ import { QualityPersistence } from './quality-persistence.js';
 import { detectTools, installTools, runQualityScan } from './quality-service.js';
 import type { WebSocketMessage, WSContext } from './types.js';
 
+const TOOL_MESSAGES: Record<string, string> = {
+  Read: 'Reading files to understand issues...',
+  Edit: 'Applying fixes...',
+  Write: 'Writing fixes...',
+  Grep: 'Searching for related code...',
+  Bash: 'Running verification...',
+};
+
+function createToolProgressCallback(ctx: HandlerContext, ws: WSContext, reportPath: string) {
+  const seenTools = new Set<string>();
+  return (event: ToolUseEvent) => {
+    if (event.type === 'tool_start' && event.toolName && !seenTools.has(event.toolName)) {
+      seenTools.add(event.toolName);
+      const message = TOOL_MESSAGES[event.toolName];
+      if (message) {
+        ctx.send(ws, { type: 'qualityFixProgress', data: { path: reportPath, message } });
+      }
+    }
+    if (event.type === 'tool_complete' && event.toolName === 'Edit' && event.completeInput?.file_path) {
+      ctx.send(ws, {
+        type: 'qualityFixProgress',
+        data: { path: reportPath, message: `Fixed ${String(event.completeInput.file_path).split('/').slice(-2).join('/')}` },
+      });
+    }
+  };
+}
+
 const persistenceCache = new Map<string, QualityPersistence>();
 const activeReviews = new Set<string>();
 
@@ -498,35 +525,7 @@ async function handleFixIssues(
       stallWarningMs: 120_000,
       stallKillMs: 600_000,
       stallHardCapMs: 900_000,
-      toolUseCallback: (() => {
-        const seenTools = new Set<string>();
-        return (event: ToolUseEvent) => {
-          if (event.type === 'tool_start' && event.toolName) {
-            if (seenTools.has(event.toolName)) return;
-            seenTools.add(event.toolName);
-            const messages: Record<string, string> = {
-              Read: 'Reading files to understand issues...',
-              Edit: 'Applying fixes...',
-              Write: 'Writing fixes...',
-              Grep: 'Searching for related code...',
-              Bash: 'Running verification...',
-            };
-            const message = messages[event.toolName];
-            if (message) {
-              ctx.send(ws, {
-                type: 'qualityFixProgress',
-                data: { path: reportPath, message },
-              });
-            }
-          }
-          if (event.type === 'tool_complete' && event.toolName === 'Edit' && event.completeInput?.file_path) {
-            ctx.send(ws, {
-              type: 'qualityFixProgress',
-              data: { path: reportPath, message: `Fixed ${String(event.completeInput.file_path).split('/').slice(-2).join('/')}` },
-            });
-          }
-        };
-      })(),
+      toolUseCallback: createToolProgressCallback(ctx, ws, reportPath),
     });
 
     await runWithFileLogger('code-review-fix', () => runner.run());

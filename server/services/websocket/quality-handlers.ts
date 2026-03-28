@@ -7,7 +7,7 @@ import { HeadlessRunner } from '../../cli/headless/index.js';
 import type { ToolUseEvent } from '../../cli/headless/types.js';
 import type { HandlerContext } from './handler-context.js';
 import { QualityPersistence } from './quality-persistence.js';
-import { detectTools, installTools, runQualityScan } from './quality-service.js';
+import { detectTools, installTools, recomputeWithAiReview, runQualityScan } from './quality-service.js';
 import type { WebSocketMessage, WSContext } from './types.js';
 
 const TOOL_MESSAGES: Record<string, string> = {
@@ -412,18 +412,26 @@ async function handleCodeReview(
     const responseText = result.assistantResponse || '';
     const { findings, summary } = parseCodeReviewResponse(responseText);
 
-    ctx.send(ws, {
-      type: 'qualityCodeReview',
-      data: { path: reportPath, findings, summary },
-    });
-
-    // Persist code review results
+    // Recompute overall score with AI review findings included
+    let updatedResults: import('./quality-service.js').QualityResults | null = null;
     try {
       const persistence = getPersistence(workingDir);
+      const existingReport = persistence.loadReport(reportPath);
+      if (existingReport) {
+        updatedResults = recomputeWithAiReview(existingReport, findings);
+        updatedResults = { ...updatedResults, codeReview: findings as unknown as typeof updatedResults.codeReview };
+        persistence.saveReport(reportPath, updatedResults);
+        persistence.appendHistory(updatedResults, reportPath);
+      }
       persistence.saveCodeReview(reportPath, findings as unknown as Record<string, unknown>[], summary);
     } catch {
       // Persistence failure should not break the review flow
     }
+
+    ctx.send(ws, {
+      type: 'qualityCodeReview',
+      data: { path: reportPath, findings, summary, results: updatedResults },
+    });
   } catch (error) {
     ctx.send(ws, {
       type: 'qualityError',

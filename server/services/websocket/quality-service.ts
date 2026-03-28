@@ -156,6 +156,29 @@ export function detectEcosystem(dirPath: string): Ecosystem[] {
   return ecosystems;
 }
 
+/** Detect the Node.js package manager from lockfiles */
+function detectNodePackageManager(dirPath: string): 'npm' | 'yarn' | 'pnpm' | 'bun' {
+  try {
+    const files = readdirSync(dirPath);
+    if (files.includes('bun.lockb') || files.includes('bun.lock')) return 'bun';
+    if (files.includes('pnpm-lock.yaml')) return 'pnpm';
+    if (files.includes('yarn.lock')) return 'yarn';
+  } catch {
+    // Directory not readable
+  }
+  return 'npm';
+}
+
+/** Build the install command for a Node.js dev dependency */
+function nodeInstallCmd(pm: 'npm' | 'yarn' | 'pnpm' | 'bun', pkg: string): string {
+  switch (pm) {
+    case 'yarn': return `yarn add -D ${pkg}`;
+    case 'pnpm': return `pnpm add -D ${pkg}`;
+    case 'bun': return `bun add -d ${pkg}`;
+    default: return `npm install -D ${pkg}`;
+  }
+}
+
 // ============================================================================
 // Tool Detection
 // ============================================================================
@@ -175,15 +198,20 @@ async function checkToolInstalled(check: string[], cwd: string): Promise<boolean
 export async function detectTools(dirPath: string): Promise<{ tools: QualityTool[]; ecosystem: string[] }> {
   const ecosystems = detectEcosystem(dirPath);
   const tools: QualityTool[] = [];
+  const nodePm = ecosystems.includes('node') ? detectNodePackageManager(dirPath) : 'npm';
 
   for (const eco of ecosystems) {
     const specs = ECOSYSTEM_TOOLS[eco] || [];
     for (const spec of specs) {
       const installed = await checkToolInstalled(spec.check, dirPath);
+      // For node tools, resolve install command using the project's package manager
+      const installCommand = eco === 'node'
+        ? nodeInstallCmd(nodePm, spec.installCmd.replace(/^npm install -D /, ''))
+        : spec.installCmd;
       tools.push({
         name: spec.name,
         installed,
-        installCommand: spec.installCmd,
+        installCommand,
         category: spec.category,
       });
     }
@@ -222,11 +250,13 @@ export async function installTools(
   // Re-detect after install
   const detected = await detectTools(dirPath);
 
-  if (failures.length > 0) {
-    const stillMissing = detected.tools.filter((t) => !t.installed).map((t) => t.name);
-    if (stillMissing.length > 0) {
-      throw new Error(`Failed to install: ${stillMissing.join(', ')}. ${failures.join('; ')}`);
-    }
+  // Check if any requested tools are still missing after install
+  const requestedNames = new Set(toolNames ?? toInstall.map((t) => t.name));
+  const stillMissing = detected.tools.filter((t) => !t.installed && requestedNames.has(t.name)).map((t) => t.name);
+
+  if (stillMissing.length > 0) {
+    const detail = failures.length > 0 ? ` ${failures.join('; ')}` : '';
+    throw new Error(`Failed to install: ${stillMissing.join(', ')}.${detail}`);
   }
 
   return detected;
@@ -832,15 +862,46 @@ interface CategoryWeights {
   complexity: number;
   fileLength: number;
   functionLength: number;
+  aiReview: number;
 }
 
 const DEFAULT_WEIGHTS: CategoryWeights = {
-  linting: 0.30,
-  formatting: 0.15,
-  complexity: 0.25,
-  fileLength: 0.15,
-  functionLength: 0.15,
+  linting: 0.25,
+  formatting: 0.10,
+  complexity: 0.20,
+  fileLength: 0.12,
+  functionLength: 0.13,
+  aiReview: 0.20,
 };
+
+// ============================================================================
+// AI Code Review Score
+// ============================================================================
+
+const SEVERITY_PENALTY: Record<string, number> = {
+  critical: 10.0,
+  high: 5.0,
+  medium: 2.0,
+  low: 0.5,
+};
+
+/** Exponential decay constant — higher = harsher scoring */
+const AI_REVIEW_DECAY = 0.10;
+
+export function computeAiReviewScore(
+  findings: Array<{ severity: string }>,
+  totalLines: number,
+): number {
+  if (findings.length === 0) return 100;
+
+  const effectiveKloc = Math.max(totalLines / 1000, 1.0);
+  const totalPenalty = findings.reduce(
+    (sum, f) => sum + (SEVERITY_PENALTY[f.severity] ?? 2.0),
+    0,
+  );
+  const penaltyDensity = totalPenalty / effectiveKloc;
+  return Math.round(100 * Math.exp(-AI_REVIEW_DECAY * penaltyDensity));
+}
 
 function computeOverallScore(categories: CategoryScore[]): number {
   const available = categories.filter((c) => c.available);
@@ -951,6 +1012,14 @@ export async function runQualityScan(
       available: true,
       issueCount: funcLengthResult.issueCount,
     },
+    {
+      name: 'AI Review',
+      score: 0,
+      weight: DEFAULT_WEIGHTS.aiReview,
+      effectiveWeight: DEFAULT_WEIGHTS.aiReview,
+      available: false,
+      issueCount: 0,
+    },
   ];
 
   const overall = computeOverallScore(categories);
@@ -971,5 +1040,48 @@ export async function runQualityScan(
     totalLines: files.reduce((sum, f) => sum + f.lines, 0),
     timestamp: new Date().toISOString(),
     ecosystem: ecosystems,
+  };
+}
+
+// ============================================================================
+// Recompute with AI Review
+// ============================================================================
+
+/**
+ * Recompute the overall score after AI code review findings become available.
+ * Returns a new QualityResults with the AI Review category enabled and score updated.
+ */
+export function recomputeWithAiReview(
+  results: QualityResults,
+  aiFindings: Array<{ severity: string }>,
+): QualityResults {
+  const aiScore = computeAiReviewScore(aiFindings, results.totalLines);
+
+  // Update or add the AI Review category
+  const categories = results.categories.map((cat) => ({ ...cat }));
+  const aiCatIndex = categories.findIndex((c) => c.name === 'AI Review');
+  const aiCategory: CategoryScore = {
+    name: 'AI Review',
+    score: aiScore,
+    weight: DEFAULT_WEIGHTS.aiReview,
+    effectiveWeight: DEFAULT_WEIGHTS.aiReview,
+    available: true,
+    issueCount: aiFindings.length,
+  };
+
+  if (aiCatIndex >= 0) {
+    categories[aiCatIndex] = aiCategory;
+  } else {
+    categories.push(aiCategory);
+  }
+
+  const overall = computeOverallScore(categories);
+
+  return {
+    ...results,
+    overall,
+    grade: computeGrade(overall),
+    categories,
+    codeReview: results.codeReview,
   };
 }

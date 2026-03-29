@@ -54,6 +54,18 @@ function parseYamlValue(v: string): unknown {
   return v;
 }
 
+/** Consume indented YAML list items starting after the current index. Returns [items, newIndex]. */
+function consumeIndentedList(lines: string[], startIdx: number): [string[], number] {
+  const items: string[] = [];
+  let i = startIdx;
+  while (i + 1 < lines.length && /^\s+-\s/.test(lines[i + 1])) {
+    i++;
+    const item = lines[i].trim().replace(/^-\s+/, '');
+    items.push(stripQuotes(item));
+  }
+  return [items, i];
+}
+
 function parseFrontMatter(content: string): ParsedFile {
   const match = content.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
   if (!match) {
@@ -71,14 +83,9 @@ function parseFrontMatter(content: string): ParsedFile {
     const key = trimmed.slice(0, colonIdx).trim();
     const rawValue = trimmed.slice(colonIdx + 1).trim();
 
-    // Handle multi-line indented YAML lists (key:\n  - item1\n  - item2)
     if (!rawValue) {
-      const items: string[] = [];
-      while (i + 1 < lines.length && /^\s+-\s/.test(lines[i + 1])) {
-        i++;
-        const item = lines[i].trim().replace(/^-\s+/, '');
-        items.push(stripQuotes(item));
-      }
+      const [items, newIdx] = consumeIndentedList(lines, i);
+      i = newIdx;
       frontMatter[key] = items.length > 0 ? items : null;
     } else {
       frontMatter[key] = parseYamlValue(rawValue);

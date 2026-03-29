@@ -22,6 +22,9 @@ import type { Issue } from './types.js';
 
 export type ExecutionStatus = 'idle' | 'starting' | 'executing' | 'paused' | 'stopping' | 'complete' | 'error';
 
+/** Max teammates per wave. Agent Teams docs recommend 3-5; beyond 5-6 returns diminish. */
+const MAX_WAVE_SIZE = 5;
+
 export interface ExecutionMetrics {
   issuesCompleted: number;
   issuesAttempted: number;
@@ -73,23 +76,34 @@ export class PlanExecutor extends EventEmitter {
 
     const startTime = Date.now();
 
-    try {
-      this.status = 'executing';
-      this.emit('statusChanged', this.status);
+    this.status = 'executing';
+    this.emit('statusChanged', this.status);
 
-      while (!this.shouldStop && !this.shouldPause) {
-        const readyIssues = this.pickReadyIssues();
-        if (readyIssues.length === 0) break;
+    let consecutiveZeroCompletions = 0;
 
-        // Always use wave execution with Agent Teams — even for single issues.
-        // Each teammate runs as a separate process with its own context window,
-        // bouncer coverage via .mcp.json + PreToolUse hook, and disk persistence.
-        await this.executeWave(readyIssues);
+    while (!this.shouldStop && !this.shouldPause) {
+      const readyIssues = this.pickReadyIssues();
+      if (readyIssues.length === 0) break;
+
+      // Cap wave size per Agent Teams best practices (3-5 teammates optimal).
+      // Remaining issues will be picked up in subsequent waves.
+      const waveIssues = readyIssues.slice(0, MAX_WAVE_SIZE);
+
+      const completedCount = await this.executeWave(waveIssues);
+
+      if (completedCount > 0) {
+        consecutiveZeroCompletions = 0;
+      } else {
+        consecutiveZeroCompletions++;
+        // Stop after 3 consecutive waves with zero completions to avoid
+        // retrying the same failing issues indefinitely.
+        if (consecutiveZeroCompletions >= 3) {
+          this.metrics.totalDuration = Date.now() - startTime;
+          this.status = 'error';
+          this.emit('statusChanged', this.status);
+          return;
+        }
       }
-    } catch (error) {
-      this.status = 'error';
-      this.emit('error', error instanceof Error ? error.message : String(error));
-      return;
     }
 
     this.metrics.totalDuration = Date.now() - startTime;
@@ -120,9 +134,10 @@ export class PlanExecutor extends EventEmitter {
 
   // ── Wave execution (Agent Teams) ──────────────────────────────
 
-  private async executeWave(issues: Issue[]): Promise<void> {
+  private async executeWave(issues: Issue[]): Promise<number> {
     const waveStart = Date.now();
     const waveIds = issues.map(i => i.id);
+    const waveLabel = `wave[${waveIds.join(',')}]`;
     this.metrics.currentWaveIds = waveIds;
     this.metrics.issuesAttempted += issues.length;
     this.emit('waveStarted', { issueIds: waveIds });
@@ -147,17 +162,22 @@ export class PlanExecutor extends EventEmitter {
 
     const prompt = this.buildCoordinatorPrompt(issues);
 
+    let completedCount = 0;
+
     try {
       const runner = new HeadlessRunner({
         workingDir: this.workingDir,
         directPrompt: prompt,
-        stallKillMs: 3_600_000,  // 60 min — waves run longer
-        stallHardCapMs: 7_200_000, // 2 hr hard cap
+        stallWarningMs: 1_800_000,   // 30 min — Agent Teams leads are silent while teammates work
+        stallKillMs: 3_600_000,      // 60 min — waves run longer
+        stallHardCapMs: 7_200_000,   // 2 hr hard cap
+        stallMaxExtensions: 10,      // Agent Teams waves need many extensions
+        verbose: process.env.MSTRO_VERBOSE === '1',
         extraEnv: {
           CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
         },
         outputCallback: (text: string) => {
-          this.emit('output', { issueId: `wave[${waveIds.join(',')}]`, text });
+          this.emit('output', { issueId: waveLabel, text });
         },
       });
 
@@ -171,7 +191,7 @@ export class PlanExecutor extends EventEmitter {
       }
 
       // Check which issues the agents actually completed by reading disk
-      this.reconcileWaveResults(issues);
+      completedCount = this.reconcileWaveResults(issues);
 
     } catch (error) {
       this.emit('waveError', {
@@ -185,17 +205,44 @@ export class PlanExecutor extends EventEmitter {
       this.uninstallTeammatePermissions();
     }
 
-    // Reconcile STATE.md and sprint statuses after wave
-    reconcileState(this.workingDir);
-    this.emit('stateUpdated');
-
-    // Copy confirmed-done outputs to user-specified output_file paths
-    this.publishOutputs(issues);
-
-    // Append progress log entry
-    this.appendProgressEntry(issues, waveStart);
-
+    this.finalizeWave(issues, waveStart, waveLabel);
     this.metrics.currentWaveIds = [];
+    return completedCount;
+  }
+
+  /**
+   * Post-wave operations wrapped individually so a failure in one
+   * (e.g. reconcileState hitting a concurrent write from PlanWatcher)
+   * doesn't prevent the others or kill the while loop in start().
+   */
+  private finalizeWave(issues: Issue[], waveStart: number, waveLabel: string): void {
+    try {
+      reconcileState(this.workingDir);
+      this.emit('stateUpdated');
+    } catch (err) {
+      this.emit('output', {
+        issueId: waveLabel,
+        text: `Warning: state reconciliation failed: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+
+    try {
+      this.publishOutputs(issues);
+    } catch (err) {
+      this.emit('output', {
+        issueId: waveLabel,
+        text: `Warning: output publishing failed: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+
+    try {
+      this.appendProgressEntry(issues, waveStart);
+    } catch (err) {
+      this.emit('output', {
+        issueId: waveLabel,
+        text: `Warning: progress log update failed: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
   }
 
   /**
@@ -204,9 +251,11 @@ export class PlanExecutor extends EventEmitter {
    * Output doc existence is NOT used as a proxy — code-focused issues
    * (bug fixes, refactors) don't produce docs but are still valid completions.
    */
-  private reconcileWaveResults(issues: Issue[]): void {
+  private reconcileWaveResults(issues: Issue[]): number {
     const pmDir = resolvePmDir(this.workingDir);
-    if (!pmDir) return;
+    if (!pmDir) return 0;
+
+    let completed = 0;
 
     for (const issue of issues) {
       const fullPath = join(pmDir, issue.path);
@@ -217,6 +266,7 @@ export class PlanExecutor extends EventEmitter {
 
         if (currentStatus === 'done') {
           this.metrics.issuesCompleted++;
+          completed++;
           this.emit('issueCompleted', issue);
         } else {
           // Not done — revert to prior status
@@ -230,6 +280,8 @@ export class PlanExecutor extends EventEmitter {
         this.emit('issueError', { issueId: issue.id, error: 'Could not read issue file after wave' });
       }
     }
+
+    return completed;
   }
 
   // ── Issue picking ─────────────────────────────────────────────
@@ -320,13 +372,17 @@ ${files}${predecessorSection}
 
       const outputFile = this.resolveOutputPath(issue);
 
+      const fileOwnership = issue.filesToModify.length > 0
+        ? `\n> FILE OWNERSHIP: You may ONLY modify these files: ${issue.filesToModify.join(', ')}. Do not touch files owned by other teammates.`
+        : '';
+
       return `Spawn teammate **${issue.id.toLowerCase()}** using the **Agent** tool with \`team_name: "${teamName}"\` and \`name: "${issue.id.toLowerCase()}"\`:
 > ${predInstr}Work on issue ${issue.id}: ${issue.title}.
 > Read the full spec at ${pmDir ? join(pmDir, issue.path) : issue.path}.
 > Execute all acceptance criteria.
 > CRITICAL: Write ALL output/results to ${outputFile} — this is the handoff artifact for downstream issues.
 > After writing output, update the issue front matter: change \`status: in_progress\` to \`status: done\`.
-> Do not modify STATE.md. Do not work on anything outside this issue's scope.`;
+> Do not modify STATE.md. Do not work on anything outside this issue's scope.${fileOwnership}`;
     }).join('\n\n');
 
     return `You are the team lead coordinating ${issues.length} issue${issues.length > 1 ? 's' : ''} using Agent Teams.
@@ -354,28 +410,39 @@ CRITICAL: After spawning, you MUST remain active and wait for every single teamm
 Track completion against this checklist — ALL must report idle before you proceed:
 ${issues.map(i => `- [ ] ${i.id.toLowerCase()}`).join('\n')}
 
+**Exact teammate names for SendMessage** (use these EXACTLY — messages to wrong names are silently lost):
+${issues.map(i => `- \`${i.id.toLowerCase()}\``).join('\n')}
+
 While waiting:
 - As each teammate goes idle, verify their output file exists on disk using the **Read** tool
-- If a teammate has not gone idle after 15 minutes, use **SendMessage** to check on them
-- Do NOT proceed to Step 3 until you have received idle notifications from ALL ${issues.length} teammates
+- If a teammate has not gone idle after 15 minutes, send them a message using **SendMessage** with \`recipient: "{exact name from list above}"\` to check on their progress
+- If a teammate does not respond within 5 more minutes after your SendMessage, assume they stalled: check their output file and issue status on disk. If the output exists and status is done, mark them complete. If not, update the issue status yourself based on whatever partial work exists on disk, then proceed.
+- Do NOT proceed to Step 3 until all ${issues.length} teammates have either gone idle or been confirmed stalled and handled
 
 WARNING: The #1 failure mode is exiting before all teammates finish. If you exit early, all teammate processes are killed and their work is permanently lost. When in doubt, keep waiting. Err on the side of waiting too long rather than exiting too early.
 
 ### Step 3: Verify outputs
 
-Once every teammate has gone idle:
+Once every teammate has gone idle or been handled:
 1. Verify each output file exists in ${outDir}/ using **Read** or **Glob**
 2. Verify each issue's front matter status is \`done\`
 3. If any teammate failed to write output or update status, do it yourself
 4. Do NOT modify STATE.md — the orchestrator handles that
 
+### Step 4: Clean up
+
+After all outputs are verified, tell the team to shut down:
+- Use **SendMessage** to send each remaining active teammate a shutdown message
+- Then exit — the orchestrator will handle the next wave
+
 ## Critical Rules
 
-- The team is created implicitly when you spawn the first teammate with \`team_name\`, and cleaned up automatically when all teammates exit. Your only job is to spawn teammates, wait, and verify.
+- The team is created implicitly when you spawn the first teammate with \`team_name\`, and cleaned up when all teammates exit or the lead exits.
 - You MUST wait for idle notifications from ALL ${issues.length} teammates before exiting. Exiting early kills all teammate processes and permanently loses their work.
 - Each teammate MUST write its output to disk — research only in conversation is LOST.
 - Each teammate MUST update the issue front matter status to \`done\`.
-- One issue per teammate — no cross-issue work.`;
+- One issue per teammate — no cross-issue work.
+- NEVER send a SendMessage to a teammate name that is not in the exact list above — misaddressed messages are silently dropped.`;
   }
 
   /**
@@ -591,39 +658,42 @@ Once every teammate has gone idle:
     if (!pmDir) return;
 
     for (const issue of issues) {
-      if (!issue.outputFile) continue;
+      this.publishSingleOutput(issue, pmDir);
+    }
+  }
 
-      // Only publish for confirmed-done issues
-      try {
-        const content = readFileSync(join(pmDir, issue.path), 'utf-8');
-        if (!content.match(/^status:\s*done$/m)) continue;
-      } catch { continue; }
+  /** Copy a single confirmed-done output to the user-specified output_file path. */
+  private publishSingleOutput(issue: Issue, pmDir: string): void {
+    if (!issue.outputFile) return;
 
-      const srcPath = this.resolveOutputPath(issue);
-      if (!existsSync(srcPath)) continue;
+    // Only publish for confirmed-done issues
+    try {
+      const content = readFileSync(join(pmDir, issue.path), 'utf-8');
+      if (!content.match(/^status:\s*done$/m)) return;
+    } catch { return; }
 
-      // Guard against path traversal — output_file must resolve within workingDir
-      const destPath = resolve(this.workingDir, issue.outputFile);
-      if (!destPath.startsWith(this.workingDir + '/') && destPath !== this.workingDir) {
-        this.emit('output', {
-          issueId: issue.id,
-          text: `Warning: output_file "${issue.outputFile}" escapes project directory — skipping`,
-        });
-        continue;
-      }
+    const srcPath = this.resolveOutputPath(issue);
+    if (!existsSync(srcPath)) return;
 
-      try {
-        // Ensure destination directory exists
-        const destDir = join(destPath, '..');
-        if (!existsSync(destDir)) mkdirSync(destDir, { recursive: true });
-        copyFileSync(srcPath, destPath);
-      } catch {
-        // Non-fatal — canonical artifact is safe in .pm/out/
-        this.emit('output', {
-          issueId: issue.id,
-          text: `Warning: could not copy output to ${issue.outputFile}`,
-        });
-      }
+    // Guard against path traversal — output_file must resolve within workingDir
+    const destPath = resolve(this.workingDir, issue.outputFile);
+    if (!destPath.startsWith(`${this.workingDir}/`) && destPath !== this.workingDir) {
+      this.emit('output', {
+        issueId: issue.id,
+        text: `Warning: output_file "${issue.outputFile}" escapes project directory — skipping`,
+      });
+      return;
+    }
+
+    try {
+      const destDir = join(destPath, '..');
+      if (!existsSync(destDir)) mkdirSync(destDir, { recursive: true });
+      copyFileSync(srcPath, destPath);
+    } catch {
+      this.emit('output', {
+        issueId: issue.id,
+        text: `Warning: could not copy output to ${issue.outputFile}`,
+      });
     }
   }
 
@@ -692,7 +762,7 @@ Once every teammate has gone idle:
 
     try {
       const existing = readFileSync(progressPath, 'utf-8');
-      writeFileSync(progressPath, existing.trimEnd() + '\n' + lines.join('\n'), 'utf-8');
+      writeFileSync(progressPath, `${existing.trimEnd()}\n${lines.join('\n')}`, 'utf-8');
     } catch {
       // Non-fatal
     }

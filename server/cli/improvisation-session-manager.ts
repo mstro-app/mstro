@@ -1113,7 +1113,7 @@ export class ImprovisationSessionManager extends EventEmitter {
     });
 
     this.queueOutput(
-      `\n[[MSTRO_AUTO_CONTINUE]] ${reason} — resuming session (retry ${state.retryNumber}/${maxRetries}).\n`
+      `\n${reason} — resuming session (retry ${state.retryNumber}/${maxRetries}).\n`
     );
     this.flushOutputQueue();
 

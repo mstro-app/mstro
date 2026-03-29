@@ -715,6 +715,10 @@ function buildClaudeArgs(
     args.push('--continue');
   }
 
+  if (config.disallowedTools && config.disallowedTools.length > 0) {
+    args.push('--disallowedTools', config.disallowedTools.join(','));
+  }
+
   if (mcpConfigPath) {
     args.push('--mcp-config', mcpConfigPath);
     args.push('--permission-prompt-tool', 'mcp__mstro-bouncer__approval_prompt');

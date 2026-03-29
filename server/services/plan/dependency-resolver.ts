@@ -84,7 +84,7 @@ function dfs(
  *
  * If epicScope is provided, only returns issues belonging to that epic.
  */
-export function resolveReadyToWork(issues: Issue[], epicScope?: string): Issue[] {
+export function resolveReadyToWork(issues: Issue[], epicScope?: string, sprintScope?: string): Issue[] {
   const issueByPath = new Map<string, Issue>();
   for (const issue of issues) {
     issueByPath.set(issue.path, issue);
@@ -115,6 +115,9 @@ export function resolveReadyToWork(issues: Issue[], epicScope?: string): Issue[]
 
       // If scoped to an epic, only include that epic's children
       if (epicChildPaths && !epicChildPaths.has(issue.path)) return false;
+
+      // If scoped to a sprint, only include issues assigned to that sprint
+      if (sprintScope && issue.sprint !== sprintScope) return false;
 
       // Check all blockers are resolved
       if (issue.blockedBy.length > 0) {

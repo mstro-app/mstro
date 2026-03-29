@@ -247,6 +247,20 @@ export class WebSocketImproviseHandler implements HandlerContext {
       case 'planPause':
       case 'planStop':
       case 'planResume':
+      // Board lifecycle messages
+      case 'planCreateBoard':
+      case 'planUpdateBoard':
+      case 'planArchiveBoard':
+      case 'planGetBoard':
+      case 'planGetBoardState':
+      case 'planReorderBoards':
+      case 'planSetActiveBoard':
+      case 'planGetBoardArtifacts':
+      // Sprint lifecycle messages (legacy)
+      case 'planCreateSprint':
+      case 'planActivateSprint':
+      case 'planCompleteSprint':
+      case 'planGetSprintArtifacts':
         return handlePlanMessage(this, ws, msg, tabId, workingDir, permission);
       // Settings messages
       case 'getSettings':

@@ -4,19 +4,29 @@
 /**
  * Plan Executor — Wave-based execution with Claude Code Agent Teams.
  *
- * Reads the dependency DAG from .pm/, picks ALL unblocked issues per wave,
- * spawns a coordinator Claude session that uses Agent Teams to execute them
- * in parallel, then reconciles state and repeats for newly-unblocked issues.
+ * Orchestrates the execution loop: picks ready issues, executes waves,
+ * runs AI review gate, reconciles state, and repeats.
+ *
+ * Implementation is split across focused modules:
+ * - config-installer.ts  — teammate permissions + bouncer MCP install/uninstall
+ * - prompt-builder.ts    — Agent Teams coordinator prompt construction
+ * - output-manager.ts    — output path resolution, listing, publishing
+ * - review-gate.ts       — AI-powered quality gate (review, parse, persist)
+ * - front-matter.ts      — YAML front matter field editing utility
  */
 
 import { EventEmitter } from 'node:events';
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { runWithFileLogger } from '../../cli/headless/headless-logger.js';
 import { HeadlessRunner } from '../../cli/headless/index.js';
-import { generateMcpConfig } from '../../cli/headless/mcp-config.js';
+import { ConfigInstaller } from './config-installer.js';
 import { resolveReadyToWork } from './dependency-resolver.js';
-import { parsePlanDirectory, resolvePmDir } from './parser.js';
+import { replaceFrontMatterField, setFrontMatterField } from './front-matter.js';
+import { listExistingDocs, publishOutputs, resolveOutputPath } from './output-manager.js';
+import { parseBoardDirectory, parsePlanDirectory, resolvePmDir } from './parser.js';
+import { buildCoordinatorPrompt } from './prompt-builder.js';
+import { appendReviewFeedback, getReviewAttemptCount, MAX_REVIEW_ATTEMPTS, persistReviewResult, reviewIssue } from './review-gate.js';
 import { reconcileState } from './state-reconciler.js';
 import type { Issue } from './types.js';
 
@@ -24,6 +34,15 @@ export type ExecutionStatus = 'idle' | 'starting' | 'executing' | 'paused' | 'st
 
 /** Max teammates per wave. Agent Teams docs recommend 3-5; beyond 5-6 returns diminish. */
 const MAX_WAVE_SIZE = 5;
+
+/** Stop after this many consecutive waves with zero completions. */
+const MAX_CONSECUTIVE_EMPTY_WAVES = 3;
+
+/** Wave execution stall timeouts (ms) */
+const WAVE_STALL_WARNING_MS = 1_800_000;   // 30 min — Agent Teams leads are silent while teammates work
+const WAVE_STALL_KILL_MS = 3_600_000;      // 60 min — waves run longer
+const WAVE_STALL_HARD_CAP_MS = 7_200_000;  // 2 hr hard cap
+const WAVE_STALL_MAX_EXTENSIONS = 10;
 
 export interface ExecutionMetrics {
   issuesCompleted: number;
@@ -40,6 +59,11 @@ export class PlanExecutor extends EventEmitter {
   private shouldStop = false;
   private shouldPause = false;
   private epicScope: string | null = null;
+  /** Board directory path (e.g. /path/.pm/boards/BOARD-001). Used for outputs, reviews, progress. */
+  private boardDir: string | null = null;
+  /** Board ID being executed (e.g. "BOARD-001") */
+  private boardId: string | null = null;
+  private configInstaller: ConfigInstaller;
   private metrics: ExecutionMetrics = {
     issuesCompleted: 0,
     issuesAttempted: 0,
@@ -51,18 +75,20 @@ export class PlanExecutor extends EventEmitter {
   constructor(workingDir: string) {
     super();
     this.workingDir = workingDir;
+    this.configInstaller = new ConfigInstaller(workingDir);
   }
 
-  getStatus(): ExecutionStatus {
-    return this.status;
-  }
-
-  getMetrics(): ExecutionMetrics {
-    return { ...this.metrics };
-  }
+  getStatus(): ExecutionStatus { return this.status; }
+  getMetrics(): ExecutionMetrics { return { ...this.metrics }; }
 
   async startEpic(epicPath: string): Promise<void> {
     this.epicScope = epicPath;
+    return this.start();
+  }
+
+  /** Start execution, optionally scoped to a specific board. */
+  async startBoard(boardId: string): Promise<void> {
+    this.boardId = boardId;
     return this.start();
   }
 
@@ -75,9 +101,10 @@ export class PlanExecutor extends EventEmitter {
     this.emit('statusChanged', this.status);
 
     const startTime = Date.now();
-
     this.status = 'executing';
     this.emit('statusChanged', this.status);
+
+    this.boardDir = this.resolveBoardDir();
 
     let consecutiveZeroCompletions = 0;
 
@@ -85,19 +112,14 @@ export class PlanExecutor extends EventEmitter {
       const readyIssues = this.pickReadyIssues();
       if (readyIssues.length === 0) break;
 
-      // Cap wave size per Agent Teams best practices (3-5 teammates optimal).
-      // Remaining issues will be picked up in subsequent waves.
       const waveIssues = readyIssues.slice(0, MAX_WAVE_SIZE);
-
       const completedCount = await this.executeWave(waveIssues);
 
       if (completedCount > 0) {
         consecutiveZeroCompletions = 0;
       } else {
         consecutiveZeroCompletions++;
-        // Stop after 3 consecutive waves with zero completions to avoid
-        // retrying the same failing issues indefinitely.
-        if (consecutiveZeroCompletions >= 3) {
+        if (consecutiveZeroCompletions >= MAX_CONSECUTIVE_EMPTY_WAVES) {
           this.metrics.totalDuration = Date.now() - startTime;
           this.status = 'error';
           this.emit('statusChanged', this.status);
@@ -118,13 +140,8 @@ export class PlanExecutor extends EventEmitter {
     this.emit('statusChanged', this.status);
   }
 
-  pause(): void {
-    this.shouldPause = true;
-  }
-
-  stop(): void {
-    this.shouldStop = true;
-  }
+  pause(): void { this.shouldPause = true; }
+  stop(): void { this.shouldStop = true; }
 
   resume(): Promise<void> {
     if (this.status !== 'paused') return Promise.resolve();
@@ -132,7 +149,7 @@ export class PlanExecutor extends EventEmitter {
     return this.start();
   }
 
-  // ── Wave execution (Agent Teams) ──────────────────────────────
+  // ── Wave execution ───────────────────────────────────────────
 
   private async executeWave(issues: Issue[]): Promise<number> {
     const waveStart = Date.now();
@@ -142,25 +159,23 @@ export class PlanExecutor extends EventEmitter {
     this.metrics.issuesAttempted += issues.length;
     this.emit('waveStarted', { issueIds: waveIds });
 
-    // Ensure .pm/out/ exists for execution output
-    const pmDir = resolvePmDir(this.workingDir);
-    if (pmDir) {
-      const outDir = join(pmDir, 'out');
-      if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
-    }
+    this.ensureOutputDirs();
+    this.configInstaller.installTeammatePermissions();
+    this.configInstaller.installBouncerForSubagents();
 
-    // Pre-approve tools so teammates don't hit interactive permission prompts
-    this.installTeammatePermissions();
-
-    // Install bouncer .mcp.json so Agent Teams teammates discover it
-    this.installBouncerForSubagents();
-
-    // Mark all wave issues as in_progress
     for (const issue of issues) {
       this.updateIssueFrontMatter(issue.path, 'in_progress');
     }
 
-    const prompt = this.buildCoordinatorPrompt(issues);
+    const existingDocs = listExistingDocs(this.workingDir, this.boardDir);
+    const pmDir = resolvePmDir(this.workingDir);
+    const prompt = buildCoordinatorPrompt({
+      issues,
+      workingDir: this.workingDir,
+      pmDir,
+      existingDocs,
+      resolveOutputPath: (issue) => resolveOutputPath(issue, this.workingDir, this.boardDir),
+    });
 
     let completedCount = 0;
 
@@ -168,14 +183,13 @@ export class PlanExecutor extends EventEmitter {
       const runner = new HeadlessRunner({
         workingDir: this.workingDir,
         directPrompt: prompt,
-        stallWarningMs: 1_800_000,   // 30 min — Agent Teams leads are silent while teammates work
-        stallKillMs: 3_600_000,      // 60 min — waves run longer
-        stallHardCapMs: 7_200_000,   // 2 hr hard cap
-        stallMaxExtensions: 10,      // Agent Teams waves need many extensions
+        stallWarningMs: WAVE_STALL_WARNING_MS,
+        stallKillMs: WAVE_STALL_KILL_MS,
+        stallHardCapMs: WAVE_STALL_HARD_CAP_MS,
+        stallMaxExtensions: WAVE_STALL_MAX_EXTENSIONS,
         verbose: process.env.MSTRO_VERBOSE === '1',
-        extraEnv: {
-          CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
-        },
+        disallowedTools: ['TeamCreate', 'TeamDelete', 'TaskCreate', 'TaskUpdate', 'TaskList'],
+        extraEnv: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1' },
         outputCallback: (text: string) => {
           this.emit('output', { issueId: waveLabel, text });
         },
@@ -190,9 +204,7 @@ export class PlanExecutor extends EventEmitter {
         });
       }
 
-      // Check which issues the agents actually completed by reading disk
-      completedCount = this.reconcileWaveResults(issues);
-
+      completedCount = await this.reconcileWaveResults(issues);
     } catch (error) {
       this.emit('waveError', {
         issueIds: waveIds,
@@ -200,9 +212,8 @@ export class PlanExecutor extends EventEmitter {
       });
       this.revertIncompleteIssues(issues);
     } finally {
-      // Clean up temporary configs — must run even if wave throws
-      this.uninstallBouncerForSubagents();
-      this.uninstallTeammatePermissions();
+      this.configInstaller.uninstallBouncerForSubagents();
+      this.configInstaller.uninstallTeammatePermissions();
     }
 
     this.finalizeWave(issues, waveStart, waveLabel);
@@ -212,12 +223,11 @@ export class PlanExecutor extends EventEmitter {
 
   /**
    * Post-wave operations wrapped individually so a failure in one
-   * (e.g. reconcileState hitting a concurrent write from PlanWatcher)
    * doesn't prevent the others or kill the while loop in start().
    */
   private finalizeWave(issues: Issue[], waveStart: number, waveLabel: string): void {
     try {
-      reconcileState(this.workingDir);
+      reconcileState(this.workingDir, this.boardId ?? undefined);
       this.emit('stateUpdated');
     } catch (err) {
       this.emit('output', {
@@ -227,7 +237,9 @@ export class PlanExecutor extends EventEmitter {
     }
 
     try {
-      this.publishOutputs(issues);
+      publishOutputs(issues, this.workingDir, this.boardDir, {
+        onWarning: (issueId, text) => this.emit('output', { issueId, text: `Warning: ${text}` }),
+      });
     } catch (err) {
       this.emit('output', {
         issueId: waveLabel,
@@ -245,13 +257,14 @@ export class PlanExecutor extends EventEmitter {
     }
   }
 
+  // ── Review gate orchestration ────────────────────────────────
+
   /**
-   * After a wave, check each issue's status on disk.
-   * `status: done` in issue front matter is the single completion signal.
-   * Output doc existence is NOT used as a proxy — code-focused issues
-   * (bug fixes, refactors) don't produce docs but are still valid completions.
+   * After a wave, check each issue's status on disk and run the AI review gate.
+   * Issues that agents marked as `done` are moved to `in_review`, reviewed,
+   * and either confirmed `done` (passed) or reverted to `todo` (failed).
    */
-  private reconcileWaveResults(issues: Issue[]): number {
+  private async reconcileWaveResults(issues: Issue[]): Promise<number> {
     const pmDir = resolvePmDir(this.workingDir);
     if (!pmDir) return 0;
 
@@ -265,11 +278,8 @@ export class PlanExecutor extends EventEmitter {
         const currentStatus = statusMatch?.[1] ?? 'unknown';
 
         if (currentStatus === 'done') {
-          this.metrics.issuesCompleted++;
-          completed++;
-          this.emit('issueCompleted', issue);
+          completed += await this.runReviewGate(issue, pmDir);
         } else {
-          // Not done — revert to prior status
           this.updateIssueFrontMatter(issue.path, issue.status);
           this.emit('issueError', {
             issueId: issue.id,
@@ -284,170 +294,129 @@ export class PlanExecutor extends EventEmitter {
     return completed;
   }
 
-  // ── Issue picking ─────────────────────────────────────────────
+  /** Run the review gate for a single issue that agents marked as done. Returns 1 if passed, 0 otherwise. */
+  private async runReviewGate(issue: Issue, pmDir: string): Promise<number> {
+    const attempts = getReviewAttemptCount(this.boardDir, issue);
+    if (attempts >= MAX_REVIEW_ATTEMPTS) {
+      this.updateIssueFrontMatter(issue.path, 'in_review');
+      this.emit('reviewProgress', { issueId: issue.id, status: 'max_attempts' });
+      this.emit('output', { issueId: issue.id, text: 'Review: max attempts reached, keeping in review' });
+      return 0;
+    }
+
+    this.updateIssueFrontMatter(issue.path, 'in_review');
+    this.emit('reviewProgress', { issueId: issue.id, status: 'reviewing' });
+
+    const outputPath = resolveOutputPath(issue, this.workingDir, this.boardDir);
+    const result = await reviewIssue({
+      workingDir: this.workingDir,
+      issue,
+      pmDir,
+      outputPath,
+      onOutput: (text) => this.emit('output', { issueId: issue.id, text }),
+    });
+    persistReviewResult(this.boardDir, issue, result);
+
+    if (result.passed) {
+      this.updateIssueFrontMatter(issue.path, 'done');
+      this.metrics.issuesCompleted++;
+      this.emit('reviewProgress', { issueId: issue.id, status: 'passed' });
+      this.emit('issueCompleted', issue);
+      return 1;
+    }
+
+    this.updateIssueFrontMatter(issue.path, 'todo');
+    appendReviewFeedback(pmDir, issue, result);
+    this.emit('reviewProgress', { issueId: issue.id, status: 'failed' });
+    this.emit('issueError', {
+      issueId: issue.id,
+      error: `Review failed: ${result.checks.filter(c => !c.passed).map(c => c.name).join(', ')}`,
+    });
+    return 0;
+  }
+
+  // ── Helpers ──────────────────────────────────────────────────
 
   private pickReadyIssues(): Issue[] {
-    const fullState = parsePlanDirectory(this.workingDir);
-    if (!fullState) {
+    const pmDir = resolvePmDir(this.workingDir);
+    if (!pmDir) {
       this.emit('error', 'No .pm/ directory found');
       return [];
     }
-    if (fullState.state.paused) {
-      this.emit('error', 'Project is paused');
-      return [];
+
+    // Determine which board to execute
+    const effectiveBoardId = this.boardId ?? this.resolveActiveBoardId();
+    let issues: Issue[];
+
+    if (effectiveBoardId) {
+      const boardState = parseBoardDirectory(pmDir, effectiveBoardId);
+      if (!boardState) {
+        this.emit('error', `Board not found: ${effectiveBoardId}`);
+        return [];
+      }
+      if (boardState.state.paused) {
+        this.emit('error', 'Board is paused');
+        return [];
+      }
+      if (boardState.board.status !== 'active') {
+        this.emit('error', `Board ${effectiveBoardId} is not active (status: ${boardState.board.status})`);
+        return [];
+      }
+      issues = boardState.issues;
+    } else {
+      // Fallback: project-level issues (legacy or no boards)
+      const fullState = parsePlanDirectory(this.workingDir);
+      if (!fullState) {
+        this.emit('error', 'No .pm/ directory found');
+        return [];
+      }
+      if (fullState.state.paused) {
+        this.emit('error', 'Project is paused');
+        return [];
+      }
+      issues = fullState.issues;
     }
-    const readyIssues = resolveReadyToWork(fullState.issues, this.epicScope ?? undefined);
+
+    const readyIssues = resolveReadyToWork(issues, this.epicScope ?? undefined);
     if (readyIssues.length === 0) {
       this.emit('complete', this.epicScope ? 'All epic issues are done or blocked' : 'All work is done or blocked');
+      // Auto-complete the board if all issues are done
+      if (effectiveBoardId) {
+        this.tryCompleteBoardIfDone(pmDir, effectiveBoardId, issues);
+      }
     }
     return readyIssues;
   }
 
-  // ── Prompt building ───────────────────────────────────────────
+  /** Check if all issues in a board are done and mark board as completed. */
+  private tryCompleteBoardIfDone(pmDir: string, boardId: string, issues: Issue[]): void {
+    const allDone = issues.length > 0 && issues.every(i => i.status === 'done' || i.status === 'cancelled');
+    if (!allDone) return;
 
-  /**
-   * Build the team lead prompt for a wave of issues.
-   * Uses Agent Teams for true parallel execution as separate processes —
-   * each teammate gets its own context window and sends idle notifications
-   * when done. The team is created implicitly by the first Agent(team_name=...) call.
-   */
-  private buildCoordinatorPrompt(issues: Issue[]): string {
-    const pmDir = resolvePmDir(this.workingDir);
-    const outDir = pmDir ? join(pmDir, 'out') : join(this.workingDir, '.pm', 'out');
+    const boardMdPath = join(pmDir, 'boards', boardId, 'board.md');
+    if (!existsSync(boardMdPath)) return;
 
-    // Collect existing output docs that issues may need as input
-    const existingDocs = this.listExistingDocs();
-
-    const issueBlocks = issues.map(issue => {
-      const criteria = issue.acceptanceCriteria
-        .map(c => `- [${c.checked ? 'x' : ' '}] ${c.text}`)
-        .join('\n');
-
-      const files = issue.filesToModify.length > 0
-        ? `\nFiles to modify:\n${issue.filesToModify.map(f => `- ${f}`).join('\n')}`
-        : '';
-
-      // Find predecessor output docs this issue should read
-      const predecessorDocs = issue.blockedBy
-        .map(bp => {
-          const blockerId = bp.replace(/^backlog\//, '').replace(/\.md$/, '');
-          return existingDocs.find(d => d.toLowerCase().includes(blockerId.toLowerCase()));
-        })
-        .filter(Boolean) as string[];
-
-      const predecessorSection = predecessorDocs.length > 0
-        ? `\nPredecessor outputs to read:\n${predecessorDocs.map(d => `- ${d}`).join('\n')}`
-        : '';
-
-      return `### ${issue.id}: ${issue.title}
-
-**Type**: ${issue.type} | **Priority**: ${issue.priority} | **Estimate**: ${issue.estimate ?? 'unestimated'}
-
-**Description**:
-${issue.description}
-
-**Acceptance Criteria**:
-${criteria || 'No specific criteria defined.'}
-
-**Technical Notes**:
-${issue.technicalNotes || 'None'}
-${files}${predecessorSection}
-
-**Output file**: ${this.resolveOutputPath(issue)}`;
-    }).join('\n\n---\n\n');
-
-    const teamName = `pm-wave-${Date.now()}`;
-
-    const teammateSpawns = issues.map(issue => {
-      const predecessorDocs = issue.blockedBy
-        .map(bp => {
-          const blockerId = bp.replace(/^backlog\//, '').replace(/\.md$/, '');
-          return existingDocs.find(d => d.toLowerCase().includes(blockerId.toLowerCase()));
-        })
-        .filter(Boolean) as string[];
-
-      const predInstr = predecessorDocs.length > 0
-        ? `Read these predecessor output docs before starting: ${predecessorDocs.join(', ')}. `
-        : '';
-
-      const outputFile = this.resolveOutputPath(issue);
-
-      const fileOwnership = issue.filesToModify.length > 0
-        ? `\n> FILE OWNERSHIP: You may ONLY modify these files: ${issue.filesToModify.join(', ')}. Do not touch files owned by other teammates.`
-        : '';
-
-      return `Spawn teammate **${issue.id.toLowerCase()}** using the **Agent** tool with \`team_name: "${teamName}"\` and \`name: "${issue.id.toLowerCase()}"\`:
-> ${predInstr}Work on issue ${issue.id}: ${issue.title}.
-> Read the full spec at ${pmDir ? join(pmDir, issue.path) : issue.path}.
-> Execute all acceptance criteria.
-> CRITICAL: Write ALL output/results to ${outputFile} — this is the handoff artifact for downstream issues.
-> After writing output, update the issue front matter: change \`status: in_progress\` to \`status: done\`.
-> Do not modify STATE.md. Do not work on anything outside this issue's scope.${fileOwnership}`;
-    }).join('\n\n');
-
-    return `You are the team lead coordinating ${issues.length} issue${issues.length > 1 ? 's' : ''} using Agent Teams.
-
-## Project Directory
-Working directory: ${this.workingDir}
-Plan directory: ${pmDir || '.pm/'}
-
-## Issues to Execute
-
-${issueBlocks}
-
-## Execution Protocol — Agent Teams
-
-### Step 1: Spawn teammates
-
-Spawn all ${issues.length} teammates in parallel by sending a single message with ${issues.length} **Agent** tool calls. Each call must include \`team_name: "${teamName}"\` and a unique \`name\`. The team is created automatically when you spawn the first teammate with \`team_name\` — no separate setup step is needed.
-
-${teammateSpawns}
-
-### Step 2: Wait for ALL teammates to complete
-
-CRITICAL: After spawning, you MUST remain active and wait for every single teammate to finish. Each teammate automatically sends you an **idle notification** when they complete their work.
-
-Track completion against this checklist — ALL must report idle before you proceed:
-${issues.map(i => `- [ ] ${i.id.toLowerCase()}`).join('\n')}
-
-**Exact teammate names for SendMessage** (use these EXACTLY — messages to wrong names are silently lost):
-${issues.map(i => `- \`${i.id.toLowerCase()}\``).join('\n')}
-
-While waiting:
-- As each teammate goes idle, verify their output file exists on disk using the **Read** tool
-- If a teammate has not gone idle after 15 minutes, send them a message using **SendMessage** with \`recipient: "{exact name from list above}"\` to check on their progress
-- If a teammate does not respond within 5 more minutes after your SendMessage, assume they stalled: check their output file and issue status on disk. If the output exists and status is done, mark them complete. If not, update the issue status yourself based on whatever partial work exists on disk, then proceed.
-- Do NOT proceed to Step 3 until all ${issues.length} teammates have either gone idle or been confirmed stalled and handled
-
-WARNING: The #1 failure mode is exiting before all teammates finish. If you exit early, all teammate processes are killed and their work is permanently lost. When in doubt, keep waiting. Err on the side of waiting too long rather than exiting too early.
-
-### Step 3: Verify outputs
-
-Once every teammate has gone idle or been handled:
-1. Verify each output file exists in ${outDir}/ using **Read** or **Glob**
-2. Verify each issue's front matter status is \`done\`
-3. If any teammate failed to write output or update status, do it yourself
-4. Do NOT modify STATE.md — the orchestrator handles that
-
-### Step 4: Clean up
-
-After all outputs are verified, tell the team to shut down:
-- Use **SendMessage** to send each remaining active teammate a shutdown message
-- Then exit — the orchestrator will handle the next wave
-
-## Critical Rules
-
-- The team is created implicitly when you spawn the first teammate with \`team_name\`, and cleaned up when all teammates exit or the lead exits.
-- You MUST wait for idle notifications from ALL ${issues.length} teammates before exiting. Exiting early kills all teammate processes and permanently loses their work.
-- Each teammate MUST write its output to disk — research only in conversation is LOST.
-- Each teammate MUST update the issue front matter status to \`done\`.
-- One issue per teammate — no cross-issue work.
-- NEVER send a SendMessage to a teammate name that is not in the exact list above — misaddressed messages are silently dropped.`;
+    try {
+      let content = readFileSync(boardMdPath, 'utf-8');
+      content = replaceFrontMatterField(content, 'status', 'completed');
+      content = replaceFrontMatterField(content, 'completed_at', `"${new Date().toISOString()}"`);
+      writeFileSync(boardMdPath, content, 'utf-8');
+    } catch { /* non-fatal */ }
   }
 
-  /**
-   * Revert issues that stayed in_progress after a failed wave.
-   */
+  private resolveActiveBoardId(): string | null {
+    const pmDir = resolvePmDir(this.workingDir);
+    if (!pmDir) return null;
+    try {
+      const workspacePath = join(pmDir, 'workspace.json');
+      if (!existsSync(workspacePath)) return null;
+      const workspace = JSON.parse(readFileSync(workspacePath, 'utf-8'));
+      return workspace.activeBoardId ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   private revertIncompleteIssues(issues: Issue[]): void {
     const pmDir = resolvePmDir(this.workingDir);
     if (!pmDir) return;
@@ -462,276 +431,39 @@ After all outputs are verified, tell the team to shut down:
     }
   }
 
-  // ── Teammate permissions ─────────────────────────────────────
-
-  /** Saved content of any pre-existing .claude/settings.json so we can restore it */
-  private savedClaudeSettings: string | null = null;
-  private claudeSettingsInstalled = false;
-
-  /**
-   * Pre-approve tools in project .claude/settings.json so Agent Teams
-   * teammates can work without interactive permission prompts.
-   * Teammates are separate processes that inherit the lead's permission
-   * settings. Without pre-approved tools, they hit interactive prompts
-   * that can't be answered in headless/background mode (known bug #25254).
-   */
-  private installTeammatePermissions(): void {
-    const claudeDir = join(this.workingDir, '.claude');
-    const settingsPath = join(claudeDir, 'settings.json');
-
-    if (!existsSync(claudeDir)) {
-      mkdirSync(claudeDir, { recursive: true });
-    }
-
-    // Tools that teammates may need during execution
-    const requiredPermissions = [
-      'Bash',
-      'Read',
-      'Edit',
-      'Write',
-      'Glob',
-      'Grep',
-      'WebFetch',
-      'WebSearch',
-      'Agent',
-    ];
-
-    try {
-      // Save existing settings
-      if (existsSync(settingsPath)) {
-        this.savedClaudeSettings = readFileSync(settingsPath, 'utf-8');
-        const existing = JSON.parse(this.savedClaudeSettings);
-
-        // Merge permissions into existing settings
-        if (!existing.permissions) existing.permissions = {};
-        if (!existing.permissions.allow) existing.permissions.allow = [];
-
-        for (const tool of requiredPermissions) {
-          if (!existing.permissions.allow.includes(tool)) {
-            existing.permissions.allow.push(tool);
-          }
-        }
-
-        writeFileSync(settingsPath, JSON.stringify(existing, null, 2));
-      } else {
-        this.savedClaudeSettings = null;
-        writeFileSync(settingsPath, JSON.stringify({
-          permissions: { allow: requiredPermissions },
-        }, null, 2));
-      }
-      this.claudeSettingsInstalled = true;
-    } catch {
-      // Non-fatal — teammates may hit permission prompts
-    }
-  }
-
-  /**
-   * Restore original .claude/settings.json after wave execution.
-   */
-  private uninstallTeammatePermissions(): void {
-    if (!this.claudeSettingsInstalled) return;
-    const settingsPath = join(this.workingDir, '.claude', 'settings.json');
-
-    try {
-      if (this.savedClaudeSettings !== null) {
-        writeFileSync(settingsPath, this.savedClaudeSettings);
-      } else {
-        unlinkSync(settingsPath);
-      }
-    } catch {
-      // Best effort
-    }
-
-    this.savedClaudeSettings = null;
-    this.claudeSettingsInstalled = false;
-  }
-
-  // ── Bouncer propagation for sub-agents ─────────────────────
-
-  /** Saved content of any pre-existing .mcp.json so we can restore it */
-  private savedMcpJson: string | null = null;
-  private mcpJsonInstalled = false;
-
-  /**
-   * Write .mcp.json in the working directory so Agent Teams teammates
-   * (separate processes) auto-discover the bouncer MCP server.
-   * This is essential — teammates don't inherit --mcp-config or
-   * --permission-prompt-tool from the team lead. .mcp.json project-level
-   * discovery + global PreToolUse hooks are the two bouncer paths for teammates.
-   *
-   * Also generates ~/.mstro/mcp-config.json for the team lead (--mcp-config).
-   */
-  private installBouncerForSubagents(): void {
-    const mcpJsonPath = join(this.workingDir, '.mcp.json');
-
-    // Generate the standard MCP config (for parent --mcp-config) and reuse for sub-agents
-    try {
-      const generatedPath = generateMcpConfig(this.workingDir);
-      if (!generatedPath) return;
-
-      const mcpConfig = readFileSync(generatedPath, 'utf-8');
-
-      // Save any existing .mcp.json
-      if (existsSync(mcpJsonPath)) {
-        this.savedMcpJson = readFileSync(mcpJsonPath, 'utf-8');
-
-        // Merge: add bouncer to existing config
-        const existing = JSON.parse(this.savedMcpJson);
-        const generated = JSON.parse(mcpConfig);
-        existing.mcpServers = {
-          ...existing.mcpServers,
-          'mstro-bouncer': generated.mcpServers['mstro-bouncer'],
-        };
-        writeFileSync(mcpJsonPath, JSON.stringify(existing, null, 2));
-      } else {
-        writeFileSync(mcpJsonPath, mcpConfig);
-      }
-
-      this.mcpJsonInstalled = true;
-    } catch {
-      // Non-fatal: parent has MCP via --mcp-config, teammates fall back to PreToolUse hooks
-    }
-  }
-
-  /**
-   * Restore or remove .mcp.json after execution.
-   */
-  private uninstallBouncerForSubagents(): void {
-    if (!this.mcpJsonInstalled) return;
-    const mcpJsonPath = join(this.workingDir, '.mcp.json');
-
-    try {
-      if (this.savedMcpJson !== null) {
-        // Restore the original
-        writeFileSync(mcpJsonPath, this.savedMcpJson);
-      } else {
-        // We created it — remove it
-        unlinkSync(mcpJsonPath);
-      }
-    } catch {
-      // Best effort cleanup
-    }
-
-    this.savedMcpJson = null;
-    this.mcpJsonInstalled = false;
-  }
-
-  // ── Helpers ───────────────────────────────────────────────────
-
-  /**
-   * Resolve the canonical output path for an issue in .pm/out/.
-   * This is the PM system's internal execution artifact — always under
-   * PM control. User-facing delivery to output_file happens via publishOutputs().
-   */
-  private resolveOutputPath(issue: Issue): string {
-    const pmDir = resolvePmDir(this.workingDir);
-    const outDir = pmDir ? join(pmDir, 'out') : join(this.workingDir, '.pm', 'out');
-    return join(outDir, `${issue.id}-${this.slugify(issue.title)}.md`);
-  }
-
-  /**
-   * List existing execution output docs in .pm/out/.
-   * Single canonical location — no split-brain lookup.
-   */
-  private listExistingDocs(): string[] {
-    const pmDir = resolvePmDir(this.workingDir);
-    if (!pmDir) return [];
-    const outDir = join(pmDir, 'out');
-    if (!existsSync(outDir)) return [];
-
-    try {
-      return readdirSync(outDir)
-        .filter(f => f.endsWith('.md'))
-        .map(f => join(outDir, f));
-    } catch {
-      return [];
-    }
-  }
-
-  /**
-   * Copy confirmed-done outputs from .pm/out/ to user-specified output_file paths.
-   * Only copies for issues that completed successfully and have output_file set.
-   * Failures are non-fatal — the canonical artifact in .pm/out/ is always safe.
-   */
-  private publishOutputs(issues: Issue[]): void {
-    const pmDir = resolvePmDir(this.workingDir);
-    if (!pmDir) return;
-
-    for (const issue of issues) {
-      this.publishSingleOutput(issue, pmDir);
-    }
-  }
-
-  /** Copy a single confirmed-done output to the user-specified output_file path. */
-  private publishSingleOutput(issue: Issue, pmDir: string): void {
-    if (!issue.outputFile) return;
-
-    // Only publish for confirmed-done issues
-    try {
-      const content = readFileSync(join(pmDir, issue.path), 'utf-8');
-      if (!content.match(/^status:\s*done$/m)) return;
-    } catch { return; }
-
-    const srcPath = this.resolveOutputPath(issue);
-    if (!existsSync(srcPath)) return;
-
-    // Guard against path traversal — output_file must resolve within workingDir
-    const destPath = resolve(this.workingDir, issue.outputFile);
-    if (!destPath.startsWith(`${this.workingDir}/`) && destPath !== this.workingDir) {
-      this.emit('output', {
-        issueId: issue.id,
-        text: `Warning: output_file "${issue.outputFile}" escapes project directory — skipping`,
-      });
-      return;
-    }
-
-    try {
-      const destDir = join(destPath, '..');
-      if (!existsSync(destDir)) mkdirSync(destDir, { recursive: true });
-      copyFileSync(srcPath, destPath);
-    } catch {
-      this.emit('output', {
-        issueId: issue.id,
-        text: `Warning: could not copy output to ${issue.outputFile}`,
-      });
-    }
-  }
-
-  private slugify(text: string): string {
-    return text
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .slice(0, 60);
-  }
-
   private updateIssueFrontMatter(issuePath: string, newStatus: string): void {
     const pmDir = resolvePmDir(this.workingDir);
     if (!pmDir) return;
-    const fullPath = join(pmDir, issuePath);
     try {
-      let content = readFileSync(fullPath, 'utf-8');
-      content = content.replace(/^(status:\s*).+$/m, `$1${newStatus}`);
-      writeFileSync(fullPath, content, 'utf-8');
-    } catch {
-      // Ignore errors — file may have been moved
+      setFrontMatterField(join(pmDir, issuePath), 'status', newStatus);
+    } catch { /* file may have been moved */ }
+  }
+
+  private ensureOutputDirs(): void {
+    if (this.boardDir) {
+      const boardOutDir = join(this.boardDir, 'out');
+      if (!existsSync(boardOutDir)) mkdirSync(boardOutDir, { recursive: true });
+    } else {
+      const pmDir = resolvePmDir(this.workingDir);
+      if (pmDir) {
+        const outDir = join(pmDir, 'out');
+        if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
+      }
     }
   }
 
-  /**
-   * Append a progress log entry after a wave completes.
-   * Re-reads issue files from disk to determine which actually completed.
-   */
   private appendProgressEntry(issues: Issue[], waveStart: number): void {
     const pmDir = resolvePmDir(this.workingDir);
     if (!pmDir) return;
-    const progressPath = join(pmDir, 'progress.md');
-    if (!existsSync(progressPath)) return;
+
+    // Board-scoped progress log
+    const progressPath = this.boardDir
+      ? join(this.boardDir, 'progress.md')
+      : join(pmDir, 'progress.md');
 
     const durationMin = Math.round((Date.now() - waveStart) / 60_000);
     const timestamp = new Date().toISOString().replace('T', ' ').slice(0, 16);
 
-    // Re-read issue statuses from disk to get accurate completion count
     const completed: string[] = [];
     const failed: string[] = [];
     for (const issue of issues) {
@@ -760,11 +492,29 @@ After all outputs are verified, tell the team to shut down:
     }
     lines.push('');
 
+    this.writeProgressLines(progressPath, lines);
+  }
+
+  private writeProgressLines(filePath: string, lines: string[]): void {
     try {
-      const existing = readFileSync(progressPath, 'utf-8');
-      writeFileSync(progressPath, `${existing.trimEnd()}\n${lines.join('\n')}`, 'utf-8');
-    } catch {
-      // Non-fatal
-    }
+      if (existsSync(filePath)) {
+        const existing = readFileSync(filePath, 'utf-8');
+        writeFileSync(filePath, `${existing.trimEnd()}\n${lines.join('\n')}`, 'utf-8');
+      } else {
+        writeFileSync(filePath, `# Board Progress\n${lines.join('\n')}`, 'utf-8');
+      }
+    } catch { /* non-fatal */ }
+  }
+
+  /** Resolve the active board's directory path for outputs, reviews, and progress. */
+  private resolveBoardDir(): string | null {
+    const pmDir = resolvePmDir(this.workingDir);
+    if (!pmDir) return null;
+
+    const effectiveBoardId = this.boardId ?? this.resolveActiveBoardId();
+    if (!effectiveBoardId) return null;
+
+    const boardDir = join(pmDir, 'boards', effectiveBoardId);
+    return existsSync(boardDir) ? boardDir : null;
   }
 }

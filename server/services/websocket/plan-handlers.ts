@@ -12,7 +12,9 @@ import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from '
 import { join, resolve } from 'node:path';
 import { handlePlanPrompt } from '../plan/composer.js';
 import { PlanExecutor } from '../plan/executor.js';
-import { getNextId, parsePlanDirectory, parseSingleIssue, parseSingleMilestone, parseSingleSprint, planDirExists, resolvePmDir } from '../plan/parser.js';
+import { replaceFrontMatterField } from '../plan/front-matter.js';
+import { getNextBoardId, getNextBoardNumber, getNextId, getNextSprintId, parseBoardArtifacts, parseBoardDirectory, parsePlanDirectory, parseSingleIssue, parseSingleMilestone, parseSingleSprint, parseSprintArtifacts, planDirExists, resolvePmDir } from '../plan/parser.js';
+import type { Workspace } from '../plan/types.js';
 import { PlanWatcher } from '../plan/watcher.js';
 import type { HandlerContext } from './handler-context.js';
 import type { WebSocketMessage, WSContext } from './types.js';
@@ -215,6 +217,20 @@ export function handlePlanMessage(
     planPause: () => handlePause(ctx, ws, workingDir, permission),
     planStop: () => handleStop(ctx, ws, workingDir, permission),
     planResume: () => handleResume(ctx, ws, workingDir, permission),
+    // Board lifecycle
+    planCreateBoard: () => handleCreateBoard(ctx, ws, msg, workingDir, permission),
+    planUpdateBoard: () => handleUpdateBoard(ctx, ws, msg, workingDir, permission),
+    planArchiveBoard: () => handleArchiveBoard(ctx, ws, msg, workingDir, permission),
+    planGetBoard: () => handleGetBoard(ctx, ws, msg, workingDir),
+    planGetBoardState: () => handleGetBoardState(ctx, ws, msg, workingDir),
+    planReorderBoards: () => handleReorderBoards(ctx, ws, msg, workingDir, permission),
+    planSetActiveBoard: () => handleSetActiveBoard(ctx, ws, msg, workingDir, permission),
+    planGetBoardArtifacts: () => handleGetBoardArtifacts(ctx, ws, msg, workingDir),
+    // Sprint lifecycle (legacy)
+    planCreateSprint: () => handleCreateSprint(ctx, ws, msg, workingDir, permission),
+    planActivateSprint: () => handleActivateSprint(ctx, ws, msg, workingDir, permission),
+    planCompleteSprint: () => handleCompleteSprint(ctx, ws, msg, workingDir, permission),
+    planGetSprintArtifacts: () => handleGetSprintArtifacts(ctx, ws, msg, workingDir),
   };
 
   const handler = handlers[msg.type];
@@ -311,27 +327,50 @@ function handleCreateIssue(
 ): void {
   if (denyIfViewOnly(ctx, ws, permission)) return;
 
-  const { title, type = 'issue', priority = 'P2', labels = [], sprint, description = '' } = msg.data || {};
+  const { title, type = 'issue', priority = 'P2', labels = [], sprint, description = '', boardId } = msg.data || {};
   if (!title) {
     ctx.send(ws, { type: 'planError', data: { error: 'Title required' } });
     return;
   }
 
   const pmDir = resolvePmDir(workingDir) ?? join(workingDir, '.pm');
-  const backlogDir = join(pmDir, 'backlog');
+  const fullState = parsePlanDirectory(workingDir);
+
+  // Resolve backlog dir: board-scoped if boardId provided or active board exists
+  const effectiveBoardId = boardId || fullState?.workspace?.activeBoardId;
+  let backlogDir: string;
+  let issuePath: string;
+  let issues: typeof fullState extends null ? never : NonNullable<typeof fullState>['issues'] = [];
+
+  if (effectiveBoardId && existsSync(join(pmDir, 'boards', effectiveBoardId))) {
+    backlogDir = join(pmDir, 'boards', effectiveBoardId, 'backlog');
+    // Get issues from this specific board
+    const boardState = parseBoardDirectory(pmDir, effectiveBoardId);
+    issues = boardState?.issues ?? [];
+  } else {
+    // Fallback: legacy flat backlog (shouldn't happen after migration)
+    backlogDir = join(pmDir, 'backlog');
+    issues = fullState?.issues ?? [];
+  }
+
   if (!existsSync(backlogDir)) {
     mkdirSync(backlogDir, { recursive: true });
   }
 
-  const fullState = parsePlanDirectory(workingDir);
   const prefix = type === 'bug' ? 'BG' : type === 'epic' ? 'EP' : 'IS';
-  const id = fullState ? getNextId(fullState.issues, prefix) : `${prefix}-001`;
+  const id = getNextId(issues, prefix);
 
   const content = buildIssueMarkdown(id, title, type, priority, labels, sprint, description);
   const fileName = `${id}.md`;
   writeFileSync(join(backlogDir, fileName), content, 'utf-8');
 
-  const issue = parseSingleIssue(workingDir, `backlog/${fileName}`);
+  if (effectiveBoardId && existsSync(join(pmDir, 'boards', effectiveBoardId))) {
+    issuePath = `boards/${effectiveBoardId}/backlog/${fileName}`;
+  } else {
+    issuePath = `backlog/${fileName}`;
+  }
+
+  const issue = parseSingleIssue(workingDir, issuePath);
   ctx.broadcastToAll({ type: 'planIssueCreated', data: issue });
 }
 
@@ -353,28 +392,18 @@ function handleUpdateIssue(
     return;
   }
 
-  const content = readFileSync(fullPath, 'utf-8');
-  const match = content.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
-  if (!match) {
+  let content = readFileSync(fullPath, 'utf-8');
+  if (!content.match(/^---\n/)) {
     ctx.send(ws, { type: 'planError', data: { error: 'Invalid file format' } });
     return;
   }
 
-  let yamlStr = match[1];
-  const body = match[2];
-
   for (const [key, value] of Object.entries(fields as Record<string, unknown>)) {
     const yamlKey = key.replace(/([A-Z])/g, '_$1').toLowerCase();
-    const yamlValue = formatYamlValue(value);
-    const regex = new RegExp(`^${yamlKey}:.*$`, 'm');
-    if (regex.test(yamlStr)) {
-      yamlStr = yamlStr.replace(regex, `${yamlKey}: ${yamlValue}`);
-    } else {
-      yamlStr += `\n${yamlKey}: ${yamlValue}`;
-    }
+    content = replaceFrontMatterField(content, yamlKey, formatYamlValue(value));
   }
 
-  writeFileSync(fullPath, `---\n${yamlStr}\n---\n${body}`, 'utf-8');
+  writeFileSync(fullPath, content, 'utf-8');
 
   const issue = parseSingleIssue(workingDir, path);
   ctx.broadcastToAll({ type: 'planIssueUpdated', data: issue });
@@ -410,14 +439,44 @@ function handleScaffold(
 
   const name = msg.data?.name || 'My Project';
   const planDir = join(workingDir, '.pm');
+  const boardId = 'BOARD-001';
+  const boardDir = join(planDir, 'boards', boardId);
 
-  for (const dir of ['backlog', 'sprints', 'milestones', 'docs', 'docs/decisions']) {
+  // Create board-centric directory structure
+  for (const dir of ['milestones', 'templates']) {
     mkdirSync(join(planDir, dir), { recursive: true });
   }
+  for (const dir of ['backlog', 'out', 'reviews']) {
+    mkdirSync(join(boardDir, dir), { recursive: true });
+  }
 
+  // Project-level files
   writeFileSync(join(planDir, 'project.md'), buildProjectMarkdown(name), 'utf-8');
-  writeFileSync(join(planDir, 'STATE.md'), buildStateMarkdown(name), 'utf-8');
-  writeFileSync(join(planDir, 'progress.md'), '# Progress Log\n', 'utf-8');
+
+  // Workspace registry
+  const workspace: Workspace = { activeBoardId: boardId, boardOrder: [boardId] };
+  writeFileSync(join(planDir, 'workspace.json'), JSON.stringify(workspace, null, 2), 'utf-8');
+
+  // Board files
+  const today = new Date().toISOString().split('T')[0];
+  writeFileSync(join(boardDir, 'board.md'), `---
+id: ${boardId}
+title: "Board 1"
+status: draft
+created: "${today}"
+completed_at: null
+goal: ""
+---
+
+# Board 1
+
+## Goal
+
+## Notes
+`, 'utf-8');
+
+  writeFileSync(join(boardDir, 'STATE.md'), buildStateMarkdown(name), 'utf-8');
+  writeFileSync(join(boardDir, 'progress.md'), '# Board Progress\n', 'utf-8');
 
   const fullState = parsePlanDirectory(workingDir);
   ctx.broadcastToAll({ type: 'planScaffolded', data: fullState });
@@ -492,6 +551,10 @@ function wireExecutorEvents(executor: PlanExecutor, ctx: HandlerContext, working
     if (fullState) {
       ctx.broadcastToAll({ type: 'planStateUpdated', data: fullState });
     }
+  });
+
+  executor.on('reviewProgress', (data: { issueId: string; status: string }) => {
+    ctx.broadcastToAll({ type: 'planReviewProgress', data });
   });
 
   executor.on('complete', (reason: string) => {
@@ -589,4 +652,533 @@ function handleResume(
       });
     });
   }
+}
+
+// ============================================================================
+// Board lifecycle handlers
+// ============================================================================
+
+function handleCreateBoard(
+  ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage,
+  workingDir: string, permission?: 'control' | 'view',
+): void {
+  if (denyIfViewOnly(ctx, ws, permission)) return;
+
+  const pmDir = resolvePmDir(workingDir);
+  if (!pmDir) {
+    ctx.send(ws, { type: 'planError', data: { error: 'No .pm/ directory found' } });
+    return;
+  }
+
+  const fullState = parsePlanDirectory(workingDir);
+  if (!fullState) return;
+
+  const boardId = getNextBoardId(fullState.boards);
+  const boardNum = getNextBoardNumber(fullState.boards);
+  const title = msg.data?.title || `Board ${boardNum}`;
+  const goal = msg.data?.goal || '';
+  const boardDir = join(pmDir, 'boards', boardId);
+
+  // Create directory structure
+  for (const dir of ['backlog', 'out', 'reviews']) {
+    mkdirSync(join(boardDir, dir), { recursive: true });
+  }
+
+  // Create board.md
+  const today = new Date().toISOString().split('T')[0];
+  writeFileSync(join(boardDir, 'board.md'), `---
+id: ${boardId}
+title: "${title.replace(/"/g, '\\"')}"
+status: draft
+created: "${today}"
+completed_at: null
+goal: "${goal.replace(/"/g, '\\"')}"
+---
+
+# ${title}
+
+## Goal
+${goal}
+
+## Notes
+`, 'utf-8');
+
+  // Create STATE.md
+  writeFileSync(join(boardDir, 'STATE.md'), `---
+project: ../../project.md
+board: board.md
+paused: false
+---
+
+# Board State
+
+## Ready to Work
+
+## In Progress
+
+## Blocked
+
+## Recently Completed
+
+## Warnings
+`, 'utf-8');
+
+  // Create progress.md
+  writeFileSync(join(boardDir, 'progress.md'), '# Board Progress\n', 'utf-8');
+
+  // Update workspace.json
+  const workspaceContent = readFileSync(join(pmDir, 'workspace.json'), 'utf-8');
+  const workspace: Workspace = JSON.parse(workspaceContent);
+  workspace.boardOrder.push(boardId);
+  if (!workspace.activeBoardId) {
+    workspace.activeBoardId = boardId;
+  }
+  writeFileSync(join(pmDir, 'workspace.json'), JSON.stringify(workspace, null, 2), 'utf-8');
+
+  const boardState = parseBoardDirectory(pmDir, boardId);
+  if (boardState) {
+    ctx.broadcastToAll({ type: 'planBoardCreated', data: boardState.board });
+    ctx.broadcastToAll({ type: 'planWorkspaceUpdated', data: workspace });
+  }
+}
+
+function handleUpdateBoard(
+  ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage,
+  workingDir: string, permission?: 'control' | 'view',
+): void {
+  if (denyIfViewOnly(ctx, ws, permission)) return;
+
+  const { boardId, fields } = msg.data || {};
+  if (!boardId || !fields) {
+    ctx.send(ws, { type: 'planError', data: { error: 'Board ID and fields required' } });
+    return;
+  }
+
+  const pmDir = resolvePmDir(workingDir);
+  if (!pmDir) return;
+
+  const boardMdPath = join(pmDir, 'boards', boardId, 'board.md');
+  if (!existsSync(boardMdPath)) {
+    ctx.send(ws, { type: 'planError', data: { error: `Board not found: ${boardId}` } });
+    return;
+  }
+
+  let content = readFileSync(boardMdPath, 'utf-8');
+  for (const [key, value] of Object.entries(fields as Record<string, unknown>)) {
+    const yamlKey = key.replace(/([A-Z])/g, '_$1').toLowerCase();
+    content = replaceFrontMatterField(content, yamlKey, formatYamlValue(value));
+  }
+  writeFileSync(boardMdPath, content, 'utf-8');
+
+  const boardState = parseBoardDirectory(pmDir, boardId);
+  if (boardState) {
+    ctx.broadcastToAll({ type: 'planBoardUpdated', data: boardState.board });
+  }
+}
+
+function handleArchiveBoard(
+  ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage,
+  workingDir: string, permission?: 'control' | 'view',
+): void {
+  if (denyIfViewOnly(ctx, ws, permission)) return;
+
+  const boardId = msg.data?.boardId;
+  if (!boardId) {
+    ctx.send(ws, { type: 'planError', data: { error: 'Board ID required' } });
+    return;
+  }
+
+  const pmDir = resolvePmDir(workingDir);
+  if (!pmDir) return;
+
+  const boardMdPath = join(pmDir, 'boards', boardId, 'board.md');
+  if (!existsSync(boardMdPath)) {
+    ctx.send(ws, { type: 'planError', data: { error: `Board not found: ${boardId}` } });
+    return;
+  }
+
+  // Set status to archived
+  let content = readFileSync(boardMdPath, 'utf-8');
+  content = replaceFrontMatterField(content, 'status', 'archived');
+  writeFileSync(boardMdPath, content, 'utf-8');
+
+  // Remove from workspace.json boardOrder and update activeBoardId if needed
+  const workspacePath = join(pmDir, 'workspace.json');
+  if (existsSync(workspacePath)) {
+    const workspace: Workspace = JSON.parse(readFileSync(workspacePath, 'utf-8'));
+    workspace.boardOrder = workspace.boardOrder.filter(id => id !== boardId);
+    if (workspace.activeBoardId === boardId) {
+      workspace.activeBoardId = workspace.boardOrder[0] || null;
+    }
+    writeFileSync(workspacePath, JSON.stringify(workspace, null, 2), 'utf-8');
+    ctx.broadcastToAll({ type: 'planWorkspaceUpdated', data: workspace });
+  }
+
+  const boardState = parseBoardDirectory(pmDir, boardId);
+  if (boardState) {
+    ctx.broadcastToAll({ type: 'planBoardArchived', data: boardState.board });
+  }
+}
+
+function handleGetBoard(
+  ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage,
+  workingDir: string,
+): void {
+  const boardId = msg.data?.boardId;
+  if (!boardId) {
+    ctx.send(ws, { type: 'planError', data: { error: 'Board ID required' } });
+    return;
+  }
+
+  const pmDir = resolvePmDir(workingDir);
+  if (!pmDir) return;
+
+  const boardState = parseBoardDirectory(pmDir, boardId);
+  if (!boardState) {
+    ctx.send(ws, { type: 'planError', data: { error: `Board not found: ${boardId}` } });
+    return;
+  }
+
+  ctx.send(ws, { type: 'planBoardState', data: boardState });
+}
+
+function handleGetBoardState(
+  ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage,
+  workingDir: string,
+): void {
+  handleGetBoard(ctx, ws, msg, workingDir);
+}
+
+function handleReorderBoards(
+  ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage,
+  workingDir: string, permission?: 'control' | 'view',
+): void {
+  if (denyIfViewOnly(ctx, ws, permission)) return;
+
+  const boardOrder = msg.data?.boardOrder;
+  if (!Array.isArray(boardOrder)) {
+    ctx.send(ws, { type: 'planError', data: { error: 'boardOrder array required' } });
+    return;
+  }
+
+  const pmDir = resolvePmDir(workingDir);
+  if (!pmDir) return;
+
+  const workspacePath = join(pmDir, 'workspace.json');
+  if (!existsSync(workspacePath)) return;
+
+  const workspace: Workspace = JSON.parse(readFileSync(workspacePath, 'utf-8'));
+  workspace.boardOrder = boardOrder;
+  writeFileSync(workspacePath, JSON.stringify(workspace, null, 2), 'utf-8');
+
+  ctx.broadcastToAll({ type: 'planWorkspaceUpdated', data: workspace });
+}
+
+function handleSetActiveBoard(
+  ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage,
+  workingDir: string, permission?: 'control' | 'view',
+): void {
+  if (denyIfViewOnly(ctx, ws, permission)) return;
+
+  const boardId = msg.data?.boardId;
+  if (!boardId) {
+    ctx.send(ws, { type: 'planError', data: { error: 'Board ID required' } });
+    return;
+  }
+
+  const pmDir = resolvePmDir(workingDir);
+  if (!pmDir) return;
+
+  const workspacePath = join(pmDir, 'workspace.json');
+  if (!existsSync(workspacePath)) return;
+
+  const workspace: Workspace = JSON.parse(readFileSync(workspacePath, 'utf-8'));
+  workspace.activeBoardId = boardId;
+  writeFileSync(workspacePath, JSON.stringify(workspace, null, 2), 'utf-8');
+
+  ctx.broadcastToAll({ type: 'planWorkspaceUpdated', data: workspace });
+
+  // Also send the active board's full state
+  const boardState = parseBoardDirectory(pmDir, boardId);
+  if (boardState) {
+    ctx.send(ws, { type: 'planBoardState', data: boardState });
+  }
+}
+
+function handleGetBoardArtifacts(
+  ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage,
+  workingDir: string,
+): void {
+  const boardId = msg.data?.boardId;
+  if (!boardId) {
+    ctx.send(ws, { type: 'planError', data: { error: 'Board ID required' } });
+    return;
+  }
+
+  const artifacts = parseBoardArtifacts(workingDir, boardId);
+  if (!artifacts) {
+    ctx.send(ws, { type: 'planBoardArtifacts', data: { boardId, progressLog: '', outputFiles: [], reviewResults: [] } });
+    return;
+  }
+
+  ctx.send(ws, { type: 'planBoardArtifacts', data: artifacts });
+}
+
+// ============================================================================
+// Sprint lifecycle handlers (legacy — kept for backward compatibility)
+// ============================================================================
+
+function buildSprintMarkdown(
+  id: string, title: string, goal: string, start: string, end: string,
+  issueRefs: string[],
+): string {
+  const issuesYaml = issueRefs.length > 0
+    ? `\n${issueRefs.map(p => `  - ${p}`).join('\n')}`
+    : ' []';
+  return `---
+id: ${id}
+title: "${title.replace(/"/g, '\\"')}"
+status: planned
+start: "${start}"
+end: "${end}"
+goal: "${goal.replace(/"/g, '\\"')}"
+capacity: null
+committed: null
+completed: null
+completed_at: null
+issues:${issuesYaml}
+---
+
+# ${id}: ${title}
+
+## Sprint Goal
+${goal}
+
+## Issues
+| Issue | Title | Points | Status |
+|---|---|---|---|
+`;
+}
+
+function handleCreateSprint(
+  ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage,
+  workingDir: string, permission?: 'control' | 'view',
+): void {
+  if (denyIfViewOnly(ctx, ws, permission)) return;
+
+  const { title, goal = '', start = '', end = '', issueIds = [] } = msg.data || {};
+  if (!title) {
+    ctx.send(ws, { type: 'planError', data: { error: 'Sprint title required' } });
+    return;
+  }
+
+  const pmDir = resolvePmDir(workingDir) ?? join(workingDir, '.pm');
+  const sprintsDir = join(pmDir, 'sprints');
+  if (!existsSync(sprintsDir)) {
+    mkdirSync(sprintsDir, { recursive: true });
+  }
+
+  const fullState = parsePlanDirectory(workingDir);
+  const id = fullState ? getNextSprintId(fullState.sprints) : 'SPRINT-001';
+
+  // Resolve issue paths from IDs
+  const issueRefs = (issueIds as string[]).map((issueId: string) => {
+    const issue = fullState?.issues.find(i => i.id === issueId);
+    return issue ? issue.path : `backlog/${issueId}.md`;
+  });
+
+  const content = buildSprintMarkdown(id, title, goal, start, end, issueRefs);
+  writeFileSync(join(sprintsDir, `${id}.md`), content, 'utf-8');
+
+  // Create sandbox directory for sprint artifacts
+  const sandboxDir = join(sprintsDir, id);
+  mkdirSync(join(sandboxDir, 'out'), { recursive: true });
+  mkdirSync(join(sandboxDir, 'reviews'), { recursive: true });
+  writeFileSync(join(sandboxDir, 'progress.md'), `# ${id}: ${title} — Progress Log\n`, 'utf-8');
+
+  // Assign issues to the sprint if provided
+  if (issueRefs.length > 0 && fullState) {
+    for (const issueId of issueIds as string[]) {
+      const issue = fullState.issues.find(i => i.id === issueId);
+      if (issue) {
+        const issuePath = resolvePlanPath(workingDir, issue.path);
+        if (issuePath && existsSync(issuePath)) {
+          let issueContent = readFileSync(issuePath, 'utf-8');
+          issueContent = replaceFrontMatterField(issueContent, 'sprint', `sprints/${id}.md`);
+          writeFileSync(issuePath, issueContent, 'utf-8');
+        }
+      }
+    }
+  }
+
+  const sprint = parseSingleSprint(workingDir, `sprints/${id}.md`);
+  ctx.broadcastToAll({ type: 'planSprintCreated', data: sprint });
+}
+
+function handleActivateSprint(
+  ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage,
+  workingDir: string, permission?: 'control' | 'view',
+): void {
+  if (denyIfViewOnly(ctx, ws, permission)) return;
+
+  const sprintId = msg.data?.sprintId;
+  if (!sprintId) {
+    ctx.send(ws, { type: 'planError', data: { error: 'Sprint ID required' } });
+    return;
+  }
+
+  const fullState = parsePlanDirectory(workingDir);
+  if (!fullState) {
+    ctx.send(ws, { type: 'planError', data: { error: 'No project found' } });
+    return;
+  }
+
+  // Check no other sprint is active
+  const currentActive = fullState.sprints.find(s => s.status === 'active');
+  if (currentActive && currentActive.id !== sprintId) {
+    ctx.send(ws, { type: 'planError', data: { error: `Sprint ${currentActive.id} is already active. Complete it first.` } });
+    return;
+  }
+
+  const sprint = fullState.sprints.find(s => s.id === sprintId);
+  if (!sprint) {
+    ctx.send(ws, { type: 'planError', data: { error: `Sprint not found: ${sprintId}` } });
+    return;
+  }
+
+  const pmDir = resolvePmDir(workingDir);
+  if (!pmDir) return;
+
+  // Update sprint status to active
+  const sprintPath = join(pmDir, sprint.path);
+  if (existsSync(sprintPath)) {
+    let content = readFileSync(sprintPath, 'utf-8');
+    content = replaceFrontMatterField(content, 'status', 'active');
+    writeFileSync(sprintPath, content, 'utf-8');
+  }
+
+  // Update STATE.md current_sprint
+  const statePath = join(pmDir, 'STATE.md');
+  if (existsSync(statePath)) {
+    let stateContent = readFileSync(statePath, 'utf-8');
+    stateContent = replaceFrontMatterField(stateContent, 'current_sprint', `"${sprint.path}"`);
+    writeFileSync(statePath, stateContent, 'utf-8');
+  }
+
+  // Move sprint's assigned issues from backlog to todo
+  for (const issueSummary of sprint.issues) {
+    const issue = fullState.issues.find(i => i.id === issueSummary.id || i.path === issueSummary.path);
+    if (issue && (issue.status === 'backlog')) {
+      const issuePath = join(pmDir, issue.path);
+      if (existsSync(issuePath)) {
+        let issueContent = readFileSync(issuePath, 'utf-8');
+        issueContent = replaceFrontMatterField(issueContent, 'status', 'todo');
+        writeFileSync(issuePath, issueContent, 'utf-8');
+      }
+    }
+  }
+
+  const updatedSprint = parseSingleSprint(workingDir, sprint.path);
+  ctx.broadcastToAll({ type: 'planSprintUpdated', data: updatedSprint });
+
+  // Refresh full state for all clients
+  const updatedState = parsePlanDirectory(workingDir);
+  if (updatedState) {
+    ctx.broadcastToAll({ type: 'planStateUpdated', data: updatedState });
+  }
+}
+
+function handleCompleteSprint(
+  ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage,
+  workingDir: string, permission?: 'control' | 'view',
+): void {
+  if (denyIfViewOnly(ctx, ws, permission)) return;
+
+  const sprintId = msg.data?.sprintId;
+  if (!sprintId) {
+    ctx.send(ws, { type: 'planError', data: { error: 'Sprint ID required' } });
+    return;
+  }
+
+  const fullState = parsePlanDirectory(workingDir);
+  if (!fullState) {
+    ctx.send(ws, { type: 'planError', data: { error: 'No project found' } });
+    return;
+  }
+
+  const sprint = fullState.sprints.find(s => s.id === sprintId);
+  if (!sprint) {
+    ctx.send(ws, { type: 'planError', data: { error: `Sprint not found: ${sprintId}` } });
+    return;
+  }
+
+  const pmDir = resolvePmDir(workingDir);
+  if (!pmDir) return;
+
+  const now = new Date().toISOString();
+
+  // Compute execution summary from sprint issues
+  const sprintIssues = fullState.issues.filter(i => i.sprint === sprint.path);
+  const completedIssues = sprintIssues.filter(i => i.status === 'done').length;
+  const failedIssues = sprintIssues.filter(i => i.status !== 'done' && i.status !== 'cancelled').length;
+
+  // Update sprint file with completion data
+  const sprintPath = join(pmDir, sprint.path);
+  if (existsSync(sprintPath)) {
+    let content = readFileSync(sprintPath, 'utf-8');
+    content = replaceFrontMatterField(content, 'status', 'completed');
+    content = replaceFrontMatterField(content, 'completed_at', `"${now}"`);
+    content = replaceFrontMatterField(content, 'completed', String(completedIssues));
+
+    // Write execution summary if not already present
+    if (!content.includes('execution_summary:')) {
+      const summaryYaml = [
+        'execution_summary:',
+        `  total_issues: ${sprintIssues.length}`,
+        `  completed_issues: ${completedIssues}`,
+        `  failed_issues: ${failedIssues}`,
+      ].join('\n');
+      // Insert before the closing --- of front matter
+      content = content.replace(/^---\s*$/m, `${summaryYaml}\n---`);
+    }
+
+    writeFileSync(sprintPath, content, 'utf-8');
+  }
+
+  // Clear STATE.md current_sprint
+  const statePath = join(pmDir, 'STATE.md');
+  if (existsSync(statePath)) {
+    let stateContent = readFileSync(statePath, 'utf-8');
+    stateContent = replaceFrontMatterField(stateContent, 'current_sprint', 'null');
+    writeFileSync(statePath, stateContent, 'utf-8');
+  }
+
+  const updatedSprint = parseSingleSprint(workingDir, sprint.path);
+  ctx.broadcastToAll({ type: 'planSprintCompleted', data: updatedSprint });
+
+  // Refresh full state
+  const updatedState = parsePlanDirectory(workingDir);
+  if (updatedState) {
+    ctx.broadcastToAll({ type: 'planStateUpdated', data: updatedState });
+  }
+}
+
+function handleGetSprintArtifacts(
+  ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage,
+  workingDir: string,
+): void {
+  const sprintId = msg.data?.sprintId;
+  if (!sprintId) {
+    ctx.send(ws, { type: 'planError', data: { error: 'Sprint ID required' } });
+    return;
+  }
+
+  const artifacts = parseSprintArtifacts(workingDir, sprintId);
+  if (!artifacts) {
+    // Fall back to empty artifacts if sandbox dir doesn't exist yet
+    ctx.send(ws, { type: 'planSprintArtifacts', data: { sprintId, progressLog: '', outputFiles: [], reviewResults: [] } });
+    return;
+  }
+
+  ctx.send(ws, { type: 'planSprintArtifacts', data: artifacts });
 }

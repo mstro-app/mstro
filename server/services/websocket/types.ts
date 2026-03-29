@@ -136,7 +136,21 @@ export interface WebSocketMessage {
     | 'planExecuteEpic'
     | 'planPause'
     | 'planStop'
-    | 'planResume';
+    | 'planResume'
+    // Board lifecycle message types
+    | 'planCreateBoard'
+    | 'planUpdateBoard'
+    | 'planArchiveBoard'
+    | 'planGetBoard'
+    | 'planGetBoardState'
+    | 'planReorderBoards'
+    | 'planSetActiveBoard'
+    | 'planGetBoardArtifacts'
+    // Sprint lifecycle message types (legacy)
+    | 'planCreateSprint'
+    | 'planActivateSprint'
+    | 'planCompleteSprint'
+    | 'planGetSprintArtifacts';
   tabId?: string;
   terminalId?: string;
   // biome-ignore lint/suspicious/noExplicitAny: message envelope carries heterogeneous payloads
@@ -282,7 +296,20 @@ export interface WebSocketResponse {
     | 'planExecutionMetrics'
     | 'planExecutionComplete'
     | 'planExecutionError'
-    | 'planError';
+    | 'planError'
+    // Board lifecycle response types
+    | 'planBoardCreated'
+    | 'planBoardUpdated'
+    | 'planBoardArchived'
+    | 'planBoardState'
+    | 'planBoardArtifacts'
+    | 'planWorkspaceUpdated'
+    // Sprint lifecycle response types (legacy)
+    | 'planSprintCreated'
+    | 'planSprintUpdated'
+    | 'planSprintCompleted'
+    | 'planSprintArtifacts'
+    | 'planReviewProgress';
   tabId?: string;
   terminalId?: string;
   // biome-ignore lint/suspicious/noExplicitAny: message envelope carries heterogeneous payloads

@@ -7,10 +7,14 @@
  * Handles YAML front matter extraction and markdown body parsing.
  */
 
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type {
   AcceptanceCriterion,
+  Board,
+  BoardArtifacts,
+  BoardExecutionSummary,
+  BoardFullState,
   Issue,
   IssueSummary,
   Milestone,
@@ -18,10 +22,14 @@ import type {
   PlanFullState,
   ProjectConfig,
   ProjectState,
+  ReviewResult,
   Sprint,
+  SprintArtifacts,
+  SprintExecutionSummary,
   SprintIssueSummary,
   Team,
   WorkflowStatus,
+  Workspace,
 } from './types.js';
 
 // ============================================================================
@@ -341,6 +349,19 @@ function parseSprint(content: string, filePath: string): Sprint {
     });
   }
 
+  // Parse execution_summary if present (JSON object in front matter)
+  let executionSummary: SprintExecutionSummary | null = null;
+  if (fm.execution_summary && typeof fm.execution_summary === 'object') {
+    const es = fm.execution_summary as Record<string, unknown>;
+    executionSummary = {
+      totalIssues: Number(es.total_issues ?? 0),
+      completedIssues: Number(es.completed_issues ?? 0),
+      failedIssues: Number(es.failed_issues ?? 0),
+      totalDuration: Number(es.total_duration ?? 0),
+      waves: Number(es.waves ?? 0),
+    };
+  }
+
   return {
     id: String(fm.id || ''),
     title: String(fm.title || ''),
@@ -353,6 +374,8 @@ function parseSprint(content: string, filePath: string): Sprint {
     completed: optionalNumber(fm.completed),
     issues,
     path: filePath,
+    completedAt: optionalString(fm.completed_at),
+    executionSummary,
   };
 }
 
@@ -386,6 +409,206 @@ function parseMilestone(content: string, filePath: string): Milestone {
     epics,
     path: filePath,
   };
+}
+
+// ============================================================================
+// Board Parser
+// ============================================================================
+
+function parseBoard(content: string, filePath: string): Board {
+  const { frontMatter: fm, body } = parseFrontMatter(content);
+  const sections = extractSections(body);
+
+  let executionSummary: BoardExecutionSummary | null = null;
+  if (fm.execution_summary && typeof fm.execution_summary === 'object') {
+    const es = fm.execution_summary as Record<string, unknown>;
+    executionSummary = {
+      totalIssues: Number(es.total_issues ?? 0),
+      completedIssues: Number(es.completed_issues ?? 0),
+      failedIssues: Number(es.failed_issues ?? 0),
+      totalDuration: Number(es.total_duration ?? 0),
+      waves: Number(es.waves ?? 0),
+    };
+  }
+
+  return {
+    id: String(fm.id || ''),
+    title: String(fm.title || ''),
+    status: (fm.status as Board['status']) || 'draft',
+    created: String(fm.created || ''),
+    completedAt: optionalString(fm.completed_at),
+    goal: String(fm.goal || sections.get('Goal') || ''),
+    executionSummary,
+    path: filePath,
+  };
+}
+
+function parseWorkspace(content: string): Workspace {
+  try {
+    const parsed = JSON.parse(content) as Record<string, unknown>;
+    return {
+      activeBoardId: typeof parsed.activeBoardId === 'string' ? parsed.activeBoardId : null,
+      boardOrder: Array.isArray(parsed.boardOrder) ? parsed.boardOrder.map(String) : [],
+    };
+  } catch {
+    return { activeBoardId: null, boardOrder: [] };
+  }
+}
+
+/** Check whether a .pm/ directory uses the board-centric format (has boards/ subdirectory). */
+export function isBoardCentricFormat(pmDir: string): boolean {
+  return existsSync(join(pmDir, 'boards'));
+}
+
+/** Check whether a .pm/ directory uses the legacy flat format (has backlog/ at root, no boards/). */
+function isLegacyFormat(pmDir: string): boolean {
+  return existsSync(join(pmDir, 'backlog')) && !existsSync(join(pmDir, 'boards'));
+}
+
+// ============================================================================
+// Legacy → Board Migration
+// ============================================================================
+
+/**
+ * Migrate a legacy flat .pm/ directory to board-centric format.
+ * Creates BOARD-001 from the existing backlog, state, outputs, and reviews.
+ */
+function migrateToBoards(pmDir: string): void {
+  const boardId = 'BOARD-001';
+  const boardDir = join(pmDir, 'boards', boardId);
+
+  // Create board directory structure
+  mkdirSync(boardDir, { recursive: true });
+  mkdirSync(join(boardDir, 'backlog'), { recursive: true });
+  mkdirSync(join(boardDir, 'out'), { recursive: true });
+  mkdirSync(join(boardDir, 'reviews'), { recursive: true });
+
+  // Move backlog/
+  const backlogDir = join(pmDir, 'backlog');
+  if (existsSync(backlogDir)) {
+    for (const file of readdirSync(backlogDir)) {
+      renameSync(join(backlogDir, file), join(boardDir, 'backlog', file));
+    }
+    rmSync(backlogDir, { recursive: true });
+  }
+
+  // Move STATE.md
+  const statePath = join(pmDir, 'STATE.md');
+  if (existsSync(statePath)) {
+    renameSync(statePath, join(boardDir, 'STATE.md'));
+  }
+
+  // Move out/
+  const outDir = join(pmDir, 'out');
+  if (existsSync(outDir)) {
+    for (const file of readdirSync(outDir)) {
+      renameSync(join(outDir, file), join(boardDir, 'out', file));
+    }
+    rmSync(outDir, { recursive: true });
+  }
+
+  // Move progress.md
+  const progressPath = join(pmDir, 'progress.md');
+  if (existsSync(progressPath)) {
+    renameSync(progressPath, join(boardDir, 'progress.md'));
+  }
+
+  // Merge sprint sandbox reviews into board reviews
+  const sprintsDir = join(pmDir, 'sprints');
+  let sprintGoal = '';
+  let hasActiveIssues = false;
+  if (existsSync(sprintsDir)) {
+    for (const entry of readdirSync(sprintsDir)) {
+      const entryPath = join(sprintsDir, entry);
+      // Copy reviews from sprint sandbox directories
+      if (!entry.endsWith('.md') && existsSync(join(entryPath, 'reviews'))) {
+        const reviewsDir = join(entryPath, 'reviews');
+        for (const reviewFile of readdirSync(reviewsDir)) {
+          cpSync(join(reviewsDir, reviewFile), join(boardDir, 'reviews', reviewFile));
+        }
+      }
+      // Extract goal from active sprint
+      if (entry.endsWith('.md')) {
+        const sprintContent = readFileIfExists(join(sprintsDir, entry));
+        if (sprintContent) {
+          const fm = parseFrontMatter(sprintContent).frontMatter;
+          if (fm.status === 'active') {
+            sprintGoal = String(fm.goal || '');
+          }
+        }
+      }
+    }
+    rmSync(sprintsDir, { recursive: true });
+  }
+
+  // Check if any migrated issues are in_progress
+  const boardBacklog = join(boardDir, 'backlog');
+  if (existsSync(boardBacklog)) {
+    for (const file of readdirSync(boardBacklog).filter(f => f.endsWith('.md'))) {
+      const content = readFileIfExists(join(boardBacklog, file));
+      if (content?.match(/^status:\s*(in_progress|in_review|todo)/m)) {
+        hasActiveIssues = true;
+      }
+      // Remove sprint field from migrated issues
+      if (content?.match(/^sprint:\s*.+$/m)) {
+        const updated = content.replace(/^sprint:\s*.+\n?/m, '');
+        writeFileSync(join(boardBacklog, file), updated, 'utf-8');
+      }
+    }
+  }
+
+  // Create board.md
+  const boardStatus = hasActiveIssues ? 'active' : 'draft';
+  const today = new Date().toISOString().slice(0, 10);
+  const boardMd = [
+    '---',
+    `id: ${boardId}`,
+    'title: "Board 1"',
+    `status: ${boardStatus}`,
+    `created: "${today}"`,
+    'completed_at: null',
+    `goal: "${sprintGoal.replace(/"/g, '\\"')}"`,
+    '---',
+    '',
+    '# Board 1',
+    '',
+    sprintGoal ? `## Goal\n${sprintGoal}\n` : '',
+  ].join('\n');
+  writeFileSync(join(boardDir, 'board.md'), boardMd, 'utf-8');
+
+  // Create workspace.json
+  const workspace: Workspace = { activeBoardId: boardId, boardOrder: [boardId] };
+  writeFileSync(join(pmDir, 'workspace.json'), JSON.stringify(workspace, null, 2), 'utf-8');
+
+  // Create STATE.md if it wasn't moved (project had no STATE.md)
+  if (!existsSync(join(boardDir, 'STATE.md'))) {
+    const defaultState = [
+      '---',
+      'project: ../../project.md',
+      'board: board.md',
+      'paused: false',
+      '---',
+      '',
+      '# Board State',
+      '',
+      '## Ready to Work',
+      '',
+      '## In Progress',
+      '',
+      '## Blocked',
+      '',
+      '## Recently Completed',
+      '',
+      '## Warnings',
+      '',
+    ].join('\n');
+    writeFileSync(join(boardDir, 'STATE.md'), defaultState, 'utf-8');
+  }
+
+  // Create progress.md if it wasn't moved
+  if (!existsSync(join(boardDir, 'progress.md'))) {
+    writeFileSync(join(boardDir, 'progress.md'), '# Board Progress\n', 'utf-8');
+  }
 }
 
 // ============================================================================
@@ -424,35 +647,103 @@ function readMdFilesInDir(dirPath: string): Array<{ name: string; content: strin
   } catch { return []; }
 }
 
+const defaultProject: ProjectConfig = {
+  name: '', id: '', created: '', status: 'active', estimation: 'none',
+  idPrefixes: {}, workflows: [], labels: [], teams: [],
+};
+
+const defaultState: ProjectState = {
+  project: '', currentSprint: null, activeMilestone: null, paused: false,
+  lastSession: null, readyToWork: [], inProgress: [], blocked: [],
+  recentlyCompleted: [], warnings: [],
+};
+
+/** Parse a single board's full state (board.md + STATE.md + backlog/). */
+export function parseBoardDirectory(pmDir: string, boardId: string): BoardFullState | null {
+  const boardDir = join(pmDir, 'boards', boardId);
+  if (!existsSync(boardDir)) return null;
+
+  const boardContent = readFileIfExists(join(boardDir, 'board.md'));
+  if (!boardContent) return null;
+  const board = parseBoard(boardContent, `boards/${boardId}/board.md`);
+
+  const stateContent = readFileIfExists(join(boardDir, 'STATE.md'));
+  const state = stateContent ? parseProjectState(stateContent) : { ...defaultState };
+
+  const issueFiles = readMdFilesInDir(join(boardDir, 'backlog'));
+  const issues = issueFiles.map(f => parseIssue(f.content, `boards/${boardId}/backlog/${f.name}`));
+
+  return { board, state, issues };
+}
+
 export function parsePlanDirectory(workingDir: string): PlanFullState | null {
   const planDir = resolvePmDir(workingDir);
   if (!planDir) return null;
 
-  // Parse project.md
+  // Auto-migrate legacy format to board-centric
+  if (isLegacyFormat(planDir)) {
+    migrateToBoards(planDir);
+  }
+
+  // Parse project.md (always at root)
   const projectContent = readFileIfExists(join(planDir, 'project.md'));
-  const project = projectContent
-    ? parseProjectConfig(projectContent)
-    : { name: '', id: '', created: '', status: 'active' as const, estimation: 'none' as const, idPrefixes: {}, workflows: [], labels: [], teams: [] };
+  const project = projectContent ? parseProjectConfig(projectContent) : { ...defaultProject };
 
-  // Parse STATE.md
-  const stateContent = readFileIfExists(join(planDir, 'STATE.md'));
-  const state = stateContent
-    ? parseProjectState(stateContent)
-    : { project: '', currentSprint: null, activeMilestone: null, paused: false, lastSession: null, readyToWork: [], inProgress: [], blocked: [], recentlyCompleted: [], warnings: [] };
-
-  // Parse backlog issues
-  const issueFiles = readMdFilesInDir(join(planDir, 'backlog'));
-  const issues = issueFiles.map(f => parseIssue(f.content, `backlog/${f.name}`));
-
-  // Parse sprints
-  const sprintFiles = readMdFilesInDir(join(planDir, 'sprints'));
-  const sprints = sprintFiles.map(f => parseSprint(f.content, `sprints/${f.name}`));
-
-  // Parse milestones
+  // Parse milestones (project-level)
   const milestoneFiles = readMdFilesInDir(join(planDir, 'milestones'));
   const milestones = milestoneFiles.map(f => parseMilestone(f.content, `milestones/${f.name}`));
 
-  return { project, state, issues, sprints, milestones };
+  // Board-centric format
+  if (isBoardCentricFormat(planDir)) {
+    const workspaceContent = readFileIfExists(join(planDir, 'workspace.json'));
+    const workspace = workspaceContent ? parseWorkspace(workspaceContent) : { activeBoardId: null, boardOrder: [] };
+
+    // Parse all board metadata
+    const boards: Board[] = [];
+    const boardsDir = join(planDir, 'boards');
+    if (existsSync(boardsDir)) {
+      for (const entry of readdirSync(boardsDir)) {
+        const boardMdPath = join(boardsDir, entry, 'board.md');
+        if (existsSync(boardMdPath)) {
+          const content = readFileSync(boardMdPath, 'utf-8');
+          boards.push(parseBoard(content, `boards/${entry}/board.md`));
+        }
+      }
+    }
+
+    // Sort boards by workspace.boardOrder
+    const orderMap = new Map(workspace.boardOrder.map((id, i) => [id, i]));
+    boards.sort((a, b) => (orderMap.get(a.id) ?? 999) - (orderMap.get(b.id) ?? 999));
+
+    // Load active board's full state
+    let activeBoard: BoardFullState | null = null;
+    if (workspace.activeBoardId) {
+      activeBoard = parseBoardDirectory(planDir, workspace.activeBoardId);
+    }
+
+    return {
+      project,
+      state: activeBoard?.state ?? { ...defaultState },
+      boards,
+      workspace,
+      activeBoard,
+      issues: activeBoard?.issues ?? [],
+      sprints: [],
+      milestones,
+    };
+  }
+
+  // Fallback: no boards, no backlog — empty project
+  return {
+    project,
+    state: { ...defaultState },
+    boards: [],
+    workspace: { activeBoardId: null, boardOrder: [] },
+    activeBoard: null,
+    issues: [],
+    sprints: [],
+    milestones,
+  };
 }
 
 export function parseSingleIssue(workingDir: string, issuePath: string): Issue | null {
@@ -495,4 +786,111 @@ export function getNextId(issues: Issue[], prefix: string): string {
     }
   }
   return `${prefix}-${String(max + 1).padStart(3, '0')}`;
+}
+
+/** Compute the next available board ID (e.g., "BOARD-003") */
+export function getNextBoardId(boards: Board[]): string {
+  let max = 0;
+  for (const board of boards) {
+    const match = board.id.match(/^BOARD-(\d+)$/);
+    if (match) {
+      const num = Number.parseInt(match[1], 10);
+      if (num > max) max = num;
+    }
+  }
+  return `BOARD-${String(max + 1).padStart(3, '0')}`;
+}
+
+/** Compute the next available board number for display title (e.g., "Board 3") */
+export function getNextBoardNumber(boards: Board[]): number {
+  let max = 0;
+  for (const board of boards) {
+    const match = board.title.match(/^Board (\d+)$/);
+    if (match) {
+      const num = Number.parseInt(match[1], 10);
+      if (num > max) max = num;
+    }
+  }
+  return max + 1;
+}
+
+/** Parse board artifacts from boards/BOARD-N/ directory. */
+export function parseBoardArtifacts(workingDir: string, boardId: string): BoardArtifacts | null {
+  const pmDir = resolvePmDir(workingDir);
+  if (!pmDir) return null;
+
+  const boardDir = join(pmDir, 'boards', boardId);
+  if (!existsSync(boardDir)) return null;
+
+  const progressLog = readFileIfExists(join(boardDir, 'progress.md')) ?? '';
+
+  const outDir = join(boardDir, 'out');
+  let outputFiles: string[] = [];
+  if (existsSync(outDir)) {
+    try {
+      outputFiles = readdirSync(outDir).filter(f => f.endsWith('.md'));
+    } catch { /* skip */ }
+  }
+
+  const reviewsDir = join(boardDir, 'reviews');
+  const reviewResults: ReviewResult[] = [];
+  if (existsSync(reviewsDir)) {
+    try {
+      for (const f of readdirSync(reviewsDir).filter(f => f.endsWith('.json'))) {
+        const content = readFileIfExists(join(reviewsDir, f));
+        if (content) {
+          reviewResults.push(JSON.parse(content) as ReviewResult);
+        }
+      }
+    } catch { /* skip */ }
+  }
+
+  return { boardId, progressLog, outputFiles, reviewResults };
+}
+
+/** @deprecated Use getNextBoardId — kept for migration compatibility */
+export function getNextSprintId(sprints: Sprint[]): string {
+  let max = 0;
+  for (const sprint of sprints) {
+    const match = sprint.id.match(/^SPRINT-(\d+)$/);
+    if (match) {
+      const num = Number.parseInt(match[1], 10);
+      if (num > max) max = num;
+    }
+  }
+  return `SPRINT-${String(max + 1).padStart(3, '0')}`;
+}
+
+/** @deprecated Use parseBoardArtifacts — kept for migration compatibility */
+export function parseSprintArtifacts(workingDir: string, sprintId: string): SprintArtifacts | null {
+  const pmDir = resolvePmDir(workingDir);
+  if (!pmDir) return null;
+
+  const sandboxDir = join(pmDir, 'sprints', sprintId);
+  if (!existsSync(sandboxDir)) return null;
+
+  const progressLog = readFileIfExists(join(sandboxDir, 'progress.md')) ?? '';
+
+  const outDir = join(sandboxDir, 'out');
+  let outputFiles: string[] = [];
+  if (existsSync(outDir)) {
+    try {
+      outputFiles = readdirSync(outDir).filter(f => f.endsWith('.md'));
+    } catch { /* skip */ }
+  }
+
+  const reviewsDir = join(sandboxDir, 'reviews');
+  const reviewResults: ReviewResult[] = [];
+  if (existsSync(reviewsDir)) {
+    try {
+      for (const f of readdirSync(reviewsDir).filter(f => f.endsWith('.json'))) {
+        const content = readFileIfExists(join(reviewsDir, f));
+        if (content) {
+          reviewResults.push(JSON.parse(content) as ReviewResult);
+        }
+      }
+    } catch { /* skip */ }
+  }
+
+  return { sprintId, progressLog, outputFiles, reviewResults };
 }

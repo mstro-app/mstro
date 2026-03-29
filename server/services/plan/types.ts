@@ -106,7 +106,39 @@ export interface AcceptanceCriterion {
 }
 
 // ============================================================================
-// Sprint (sprints/*.md)
+// Board (boards/BOARD-N/board.md)
+// ============================================================================
+
+export interface Board {
+  id: string;
+  title: string;
+  status: 'draft' | 'active' | 'completed' | 'archived';
+  created: string;
+  completedAt: string | null;
+  goal: string;
+  executionSummary: BoardExecutionSummary | null;
+  path: string;
+}
+
+export interface BoardExecutionSummary {
+  totalIssues: number;
+  completedIssues: number;
+  failedIssues: number;
+  totalDuration: number;
+  waves: number;
+}
+
+// ============================================================================
+// Workspace (workspace.json)
+// ============================================================================
+
+export interface Workspace {
+  activeBoardId: string | null;
+  boardOrder: string[];
+}
+
+// ============================================================================
+// Sprint (sprints/*.md) — legacy, kept for migration
 // ============================================================================
 
 export interface Sprint {
@@ -121,6 +153,16 @@ export interface Sprint {
   completed: number | null;
   issues: SprintIssueSummary[];
   path: string;
+  completedAt: string | null;
+  executionSummary: SprintExecutionSummary | null;
+}
+
+export interface SprintExecutionSummary {
+  totalIssues: number;
+  completedIssues: number;
+  failedIssues: number;
+  totalDuration: number;
+  waves: number;
 }
 
 export interface SprintIssueSummary {
@@ -154,12 +196,64 @@ export interface MilestoneEpicSummary {
 }
 
 // ============================================================================
+// Review (sprint quality gate)
+// ============================================================================
+
+export interface ReviewResult {
+  issueId: string;
+  issueType: 'code' | 'non-code';
+  passed: boolean;
+  checks: ReviewCheck[];
+  reviewedAt: string;
+}
+
+export interface ReviewCheck {
+  name: string;
+  passed: boolean;
+  details: string;
+}
+
+// ============================================================================
+// Board Artifacts (board-scoped execution data)
+// ============================================================================
+
+export interface BoardArtifacts {
+  boardId: string;
+  progressLog: string;
+  outputFiles: string[];
+  reviewResults: ReviewResult[];
+}
+
+/** @deprecated Use BoardArtifacts — kept for migration compatibility */
+export interface SprintArtifacts {
+  sprintId: string;
+  progressLog: string;
+  outputFiles: string[];
+  reviewResults: ReviewResult[];
+}
+
+// ============================================================================
+// Board full state (per-board data sent on board load)
+// ============================================================================
+
+export interface BoardFullState {
+  board: Board;
+  state: ProjectState;
+  issues: Issue[];
+}
+
+// ============================================================================
 // Plan full state (sent on planInit)
 // ============================================================================
 
 export interface PlanFullState {
   project: ProjectConfig;
   state: ProjectState;
+  boards: Board[];
+  workspace: Workspace;
+  // Active board's data (loaded eagerly for the focused tab)
+  activeBoard: BoardFullState | null;
+  // Legacy fields — populated during migration, normally empty
   issues: Issue[];
   sprints: Sprint[];
   milestones: Milestone[];

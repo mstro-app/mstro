@@ -23,38 +23,16 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import semverGt from 'semver/functions/gt.js';
-import updateNotifier from 'update-notifier';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const CLIENT_ROOT = resolve(__dirname, '..');
 
-// Read package.json for update-notifier
 const pkg = JSON.parse(readFileSync(join(CLIENT_ROOT, 'package.json'), 'utf-8'));
 
-// Check for updates (runs async in background, notifies on next run)
-// update-notifier initializes lastUpdateCheck to Date.now(), which means the
-// first check won't happen until 24h after install. We detect first-run by
-// checking if the configstore has never stored an update result, and if so
-// reset the timestamp to force an immediate background check.
-const notifier = updateNotifier({
-  pkg,
-  updateCheckInterval: 1000 * 60 * 60 * 24  // Check daily
-});
-try {
-  if (notifier.config && !notifier.config.has('update') && !notifier.update) {
-    const lastCheck = notifier.config.get('lastUpdateCheck');
-    // If lastUpdateCheck was just set (within the last 30s), this is a fresh
-    // configstore — reset it to 0 so the library spawns a check immediately.
-    if (lastCheck && (Date.now() - lastCheck) < 30_000) {
-      notifier.config.set('lastUpdateCheck', 0);
-      notifier.check();
-    }
-  }
-} catch {
-  // Non-critical — don't let update check logic crash the CLI
-}
+// Self-update: cache file for registry check results
+const UPDATE_CHECK_FILE = join(homedir(), '.mstro', 'update-check.json');
+const UPDATE_CHECK_INTERVAL = 1000 * 60 * 60; // Re-check hourly
 
 // Capture the user's original working directory before any cwd changes
 const USER_CWD = process.cwd();
@@ -404,31 +382,134 @@ function parseServerUrl(args) {
 }
 
 /**
+ * Compare two semver strings (x.y.z). Returns 1 if a > b, -1 if a < b, 0 if equal.
+ */
+function compareVersions(a, b) {
+  const pa = a.split('.').map(Number);
+  const pb = b.split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] || 0) > (pb[i] || 0)) return 1;
+    if ((pa[i] || 0) < (pb[i] || 0)) return -1;
+  }
+  return 0;
+}
+
+/**
+ * Read cached update check result from ~/.mstro/update-check.json
+ */
+function readUpdateCache() {
+  try {
+    if (!existsSync(UPDATE_CHECK_FILE)) return null;
+    return JSON.parse(readFileSync(UPDATE_CHECK_FILE, 'utf-8'));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Write the update check cache.
+ */
+function writeUpdateCache(latest) {
+  try {
+    const dir = dirname(UPDATE_CHECK_FILE);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(UPDATE_CHECK_FILE, JSON.stringify({ latest, checkedAt: Date.now() }));
+  } catch {
+    // Non-fatal
+  }
+}
+
+/**
+ * Fetch the latest published version from the npm registry inline.
+ * Returns the version string, or null on failure/timeout.
+ */
+async function fetchLatestVersion(timeoutMs = 3000) {
+  try {
+    const res = await fetch(`https://registry.npmjs.org/${pkg.name}/latest`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) return null;
+    const { version } = await res.json();
+    if (version) writeUpdateCache(version);
+    return version || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Determine the update type label from two semver strings.
+ */
+function updateType(current, latest) {
+  const c = current.split('.').map(Number);
+  const l = latest.split('.').map(Number);
+  if (l[0] > c[0]) return 'major';
+  if (l[1] > c[1]) return 'minor';
+  return 'patch';
+}
+
+/**
+ * Resolve the latest available version, using cache when fresh.
+ */
+async function resolveLatestVersion() {
+  const cache = readUpdateCache();
+
+  if (cache?.latest && (Date.now() - cache.checkedAt) < UPDATE_CHECK_INTERVAL) {
+    return cache.latest;
+  }
+
+  // Cache is stale or missing — check the registry inline
+  const fetched = await fetchLatestVersion(3000);
+  if (fetched) return fetched;
+
+  // Network failed — fall back to stale cache
+  return cache?.latest || null;
+}
+
+/**
+ * Install a specific version globally via npm.
+ * Returns { ok, stderr }.
+ */
+function installGlobalVersion(version) {
+  const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  return new Promise((resolve) => {
+    const child = spawn(npmCmd, ['install', '-g', `${pkg.name}@${version}`], {
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.on('error', () => resolve({ ok: false, stderr: '' }));
+    child.on('exit', (code) => resolve({ ok: code === 0, stderr }));
+  });
+}
+
+/**
  * Auto-update if a new version is available.
- * Installs the update globally and re-execs mstro with the same arguments.
+ * Uses a local cache (refreshed hourly) so most startups add zero latency.
+ * When the cache is stale or missing, does an inline registry fetch (≤3 s).
+ * If a newer version exists, installs it globally and re-execs.
  * Returns true if the process was re-spawned (caller should return).
  */
 async function autoUpdate() {
   try {
-    if (!notifier.update || !semverGt(notifier.update.latest, notifier.update.current)) {
+    const latest = await resolveLatestVersion();
+
+    if (!latest || compareVersions(latest, pkg.version) <= 0) {
       return false;
     }
 
-    const { current, latest, type } = notifier.update;
+    const current = pkg.version;
+    const type = updateType(current, latest);
     log(`\n  Updating mstro: ${colors.dim}${current}${colors.reset} → ${colors.green}${latest}${colors.reset} ${colors.dim}(${type})${colors.reset}`);
 
-    const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+    const installResult = await installGlobalVersion(latest);
 
-    const success = await new Promise((resolve) => {
-      const child = spawn(npmCmd, ['install', '-g', pkg.name], {
-        stdio: ['ignore', 'ignore', 'pipe'],
-      });
-      child.on('error', () => resolve(false));
-      child.on('exit', (code) => resolve(code === 0));
-    });
-
-    if (!success) {
+    if (!installResult.ok) {
       log(`  Update failed — continuing with v${current}`, colors.yellow);
+      if (installResult.stderr) {
+        const reason = installResult.stderr.split('\n').find(l => l.trim()) || '';
+        if (reason) log(`  ${colors.dim}${reason.trim()}${colors.reset}`);
+      }
       log(`  Run manually: ${colors.cyan}npm i -g ${pkg.name}${colors.reset}\n`);
       return false;
     }
@@ -441,7 +522,6 @@ async function autoUpdate() {
       env: { ...process.env, MSTRO_SKIP_UPDATE_CHECK: '1' },
     });
 
-    // Parent ignores SIGINT — child handles it via shared terminal
     process.on('SIGINT', () => {});
     process.on('SIGTERM', () => child.kill('SIGTERM'));
 
@@ -452,7 +532,6 @@ async function autoUpdate() {
 
     return true;
   } catch {
-    // Don't let update logic crash the CLI
     return false;
   }
 }

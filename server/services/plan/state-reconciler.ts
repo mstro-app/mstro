@@ -11,7 +11,8 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { resolveReadyToWork } from './dependency-resolver.js';
-import { parsePlanDirectory, resolvePmDir } from './parser.js';
+import { replaceFrontMatterField, replaceYamlField } from './front-matter.js';
+import { isBoardCentricFormat, parseBoardDirectory, parsePlanDirectory, resolvePmDir } from './parser.js';
 import type { Issue, Sprint } from './types.js';
 
 interface CategorizedIssues {
@@ -138,7 +139,14 @@ function reconcileSprintStatuses(pmDir: string, sprints: Sprint[], issueByPath: 
     const sprintPath = join(pmDir, sprint.path);
     try {
       let content = readFileSync(sprintPath, 'utf-8');
-      content = content.replace(/^(status:\s*).+$/m, `$1${derived}`);
+      content = replaceFrontMatterField(content, 'status', derived);
+
+      // Write completed_at when transitioning to completed
+      if (derived === 'completed' && !content.match(/^completed_at:/m)) {
+        const timestamp = new Date().toISOString().split('T')[0];
+        content = replaceFrontMatterField(content, 'completed_at', timestamp);
+      }
+
       writeFileSync(sprintPath, content, 'utf-8');
     } catch {
       // Sprint file may be missing or unwritable
@@ -146,9 +154,17 @@ function reconcileSprintStatuses(pmDir: string, sprints: Sprint[], issueByPath: 
   }
 }
 
-export function reconcileState(workingDir: string): void {
+export function reconcileState(workingDir: string, boardId?: string): void {
   const pmDir = resolvePmDir(workingDir);
   if (!pmDir) return;
+
+  // Board-centric: reconcile a specific board's STATE.md
+  if (isBoardCentricFormat(pmDir)) {
+    reconcileBoardState(pmDir, workingDir, boardId);
+    return;
+  }
+
+  // Legacy sprint-based reconciliation
   const statePath = join(pmDir, 'STATE.md');
   if (!existsSync(statePath)) return;
 
@@ -166,9 +182,53 @@ export function reconcileState(workingDir: string): void {
   const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
   const frontMatter = fmMatch ? fmMatch[1] : `project: "${project.name}"\ncurrent_sprint: null\nactive_milestone: null\npaused: false\nlast_session: null`;
 
-  const newContent = buildStateMarkdown(frontMatter, categories, warnings, issueByPath);
-  writeFileSync(statePath, newContent, 'utf-8');
-
   // Reconcile sprint statuses from actual issue statuses
   reconcileSprintStatuses(pmDir, sprints, issueByPath);
+
+  // Update current_sprint in front matter based on actual sprint statuses
+  const recomputedActive = sprints.find(s => {
+    const derived = deriveSprintStatus(s, issueByPath);
+    return (derived ?? s.status) === 'active';
+  });
+  const updatedFM = replaceYamlField(frontMatter, 'current_sprint', recomputedActive ? recomputedActive.id : 'null');
+
+  const newContent = buildStateMarkdown(updatedFM, categories, warnings, issueByPath);
+  writeFileSync(statePath, newContent, 'utf-8');
+}
+
+function reconcileBoardState(pmDir: string, workingDir: string, boardId?: string): void {
+  // Determine which board to reconcile
+  const effectiveBoardId = boardId ?? resolveActiveBoardId(pmDir);
+  if (!effectiveBoardId) return;
+
+  const boardState = parseBoardDirectory(pmDir, effectiveBoardId);
+  if (!boardState) return;
+
+  const statePath = join(pmDir, 'boards', effectiveBoardId, 'STATE.md');
+  if (!existsSync(statePath)) return;
+
+  const { board, issues } = boardState;
+
+  const issueByPath = new Map(issues.map(i => [i.path, i]));
+  const categories = categorizeIssues(issues, issueByPath);
+  const warnings = computeWarnings(issues);
+
+  // Read existing front matter from the board's STATE.md
+  const content = readFileSync(statePath, 'utf-8');
+  const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+  const frontMatter = fmMatch ? fmMatch[1] : `board: "${board.id}"\npaused: false\nlast_session: null`;
+
+  const newContent = buildStateMarkdown(frontMatter, categories, warnings, issueByPath);
+  writeFileSync(statePath, newContent, 'utf-8');
+}
+
+function resolveActiveBoardId(pmDir: string): string | null {
+  const wsPath = join(pmDir, 'workspace.json');
+  if (!existsSync(wsPath)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(wsPath, 'utf-8'));
+    return typeof parsed.activeBoardId === 'string' ? parsed.activeBoardId : null;
+  } catch {
+    return null;
+  }
 }

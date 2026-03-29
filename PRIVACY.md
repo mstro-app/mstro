@@ -11,7 +11,7 @@ Mstro, Inc. ("we", "us", "our", "Mstro") is committed to protecting your privacy
 
 We are the **data controller** for personal data processed through the Service. Our registered place of business is in the United States.
 
-**Privacy contact:** privacy@mstro.app
+**Privacy contact:** bravo@mstro.app
 **Website:** https://mstro.app
 
 If you have questions about how we handle your data, please contact us before using the Service.
@@ -140,7 +140,24 @@ When you use mstro.app, we and our third-party service providers use cookies and
 |---|---|---|---|
 | Strictly necessary | Authentication, session management, security | Clerk session cookies | No -- required for the Service |
 | Analytics | Understanding how users interact with the platform | PostHog analytics cookies | Yes -- via telemetry opt-out or browser settings |
-| Error tracking | Capturing errors for debugging | Sentry session replay (if enabled) | Yes -- via telemetry opt-out |
+| Error tracking | Captu
+  npm audit --omit=dev
+  shell: /usr/bin/bash -e {0}
+# npm audit report
+
+path-to-regexp  8.0.0 - 8.3.0
+Severity: high
+path-to-regexp vulnerable to Denial of Service via sequential optional groups - https://github.com/advisories/GHSA-j3q9-mxjg-w52f
+path-to-regexp vulnerable to Regular Expression Denial of Service via multiple wildcards - https://github.com/advisories/GHSA-27v5-c462-wpq7
+fix available via `npm audit fix`
+node_modules/path-to-regexp
+
+1 high severity vulnerability
+
+To address all issues, run:
+  npm audit fix
+Error: Process completed with exit code 1.
+ring errors for debugging | Sentry session replay (if enabled) | Yes -- via telemetry opt-out |
 
 ### 4.2 Managing Cookies
 

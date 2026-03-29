@@ -12,7 +12,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { resolveReadyToWork } from './dependency-resolver.js';
 import { parsePlanDirectory, resolvePmDir } from './parser.js';
-import type { Issue } from './types.js';
+import type { Issue, Sprint } from './types.js';
 
 interface CategorizedIssues {
   inProgress: Issue[];
@@ -107,6 +107,45 @@ function buildStateMarkdown(
   return `---\n${frontMatter}\n---\n\n${sections.join('\n')}`;
 }
 
+/**
+ * Derive sprint status from its issues' actual statuses.
+ * - All issues done/cancelled → completed
+ * - Any issue in_progress/in_review → active
+ * - Otherwise → planned (unchanged)
+ */
+function deriveSprintStatus(sprint: Sprint, issueByPath: Map<string, Issue>): Sprint['status'] | null {
+  // Sprint references issues by path (e.g., "backlog/IS-001.md")
+  const issuePaths = sprint.issues.map(si => si.path);
+  if (issuePaths.length === 0) return null;
+
+  const statuses = issuePaths.map(p => issueByPath.get(p)?.status).filter(Boolean) as string[];
+  if (statuses.length === 0) return null;
+
+  const allFinished = statuses.every(s => s === 'done' || s === 'cancelled');
+  if (allFinished) return 'completed';
+
+  const anyStarted = statuses.some(s => s === 'in_progress' || s === 'in_review');
+  if (anyStarted) return 'active';
+
+  return null;
+}
+
+function reconcileSprintStatuses(pmDir: string, sprints: Sprint[], issueByPath: Map<string, Issue>): void {
+  for (const sprint of sprints) {
+    const derived = deriveSprintStatus(sprint, issueByPath);
+    if (!derived || derived === sprint.status) continue;
+
+    const sprintPath = join(pmDir, sprint.path);
+    try {
+      let content = readFileSync(sprintPath, 'utf-8');
+      content = content.replace(/^(status:\s*).+$/m, `$1${derived}`);
+      writeFileSync(sprintPath, content, 'utf-8');
+    } catch {
+      // Sprint file may be missing or unwritable
+    }
+  }
+}
+
 export function reconcileState(workingDir: string): void {
   const pmDir = resolvePmDir(workingDir);
   if (!pmDir) return;
@@ -116,7 +155,7 @@ export function reconcileState(workingDir: string): void {
   const fullState = parsePlanDirectory(workingDir);
   if (!fullState) return;
 
-  const { issues, project } = fullState;
+  const { issues, sprints, project } = fullState;
 
   const issueByPath = new Map(issues.map(i => [i.path, i]));
   const categories = categorizeIssues(issues, issueByPath);
@@ -129,4 +168,7 @@ export function reconcileState(workingDir: string): void {
 
   const newContent = buildStateMarkdown(frontMatter, categories, warnings, issueByPath);
   writeFileSync(statePath, newContent, 'utf-8');
+
+  // Reconcile sprint statuses from actual issue statuses
+  reconcileSprintStatuses(pmDir, sprints, issueByPath);
 }

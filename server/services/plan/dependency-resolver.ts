@@ -158,6 +158,9 @@ export function computeCriticalPath(issues: Issue[]): Issue[] {
       return [];
     }
 
+    // Set sentinel before recursing to break cycles
+    longestFrom.set(path, [issue]);
+
     let best: Issue[] = [];
     for (const dep of issue.blocks) {
       const sub = getLongest(dep);

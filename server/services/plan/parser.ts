@@ -60,13 +60,29 @@ function parseFrontMatter(content: string): ParsedFile {
     return { frontMatter: {}, body: content };
   }
   const frontMatter: Record<string, unknown> = {};
+  const lines = match[1].split('\n');
 
-  for (const line of match[1].split('\n')) {
-    const trimmed = line.trim();
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
     if (!trimmed || trimmed.startsWith('#')) continue;
     const colonIdx = trimmed.indexOf(':');
     if (colonIdx === -1) continue;
-    frontMatter[trimmed.slice(0, colonIdx).trim()] = parseYamlValue(trimmed.slice(colonIdx + 1).trim());
+
+    const key = trimmed.slice(0, colonIdx).trim();
+    const rawValue = trimmed.slice(colonIdx + 1).trim();
+
+    // Handle multi-line indented YAML lists (key:\n  - item1\n  - item2)
+    if (!rawValue) {
+      const items: string[] = [];
+      while (i + 1 < lines.length && /^\s+-\s/.test(lines[i + 1])) {
+        i++;
+        const item = lines[i].trim().replace(/^-\s+/, '');
+        items.push(stripQuotes(item));
+      }
+      frontMatter[key] = items.length > 0 ? items : null;
+    } else {
+      frontMatter[key] = parseYamlValue(rawValue);
+    }
   }
 
   return { frontMatter, body: match[2] };
@@ -241,7 +257,9 @@ function toStringArray(val: unknown): string[] {
 }
 
 function optionalString(val: unknown): string | null {
-  return (val as string) || null;
+  if (val == null) return null;
+  const s = String(val);
+  return s === '' ? null : s;
 }
 
 function parseIssue(content: string, filePath: string): Issue {
@@ -273,6 +291,7 @@ function parseIssue(content: string, filePath: string): Issue {
     technicalNotes: sections.get('Technical Notes') || null,
     filesToModify: parseListItems(sections.get('Files to Modify') || ''),
     activity: parseListItems(sections.get('Activity') || ''),
+    outputFile: optionalString(fm.output_file),
     body,
     path: filePath,
   };
@@ -304,17 +323,28 @@ function parseSprint(content: string, filePath: string): Sprint {
   const { frontMatter: fm, body } = parseFrontMatter(content);
   const sections = extractSections(body);
 
+  // Table-based parsing (markdown links in table rows)
+  let issues = parseSprintIssues(sections.get('Issues'));
+
+  // Fallback: front matter issues array (e.g., ["backlog/IS-001.md", ...])
+  if (issues.length === 0 && Array.isArray(fm.issues)) {
+    issues = (fm.issues as string[]).map(path => {
+      const id = path.replace(/^backlog\//, '').replace(/\.md$/, '');
+      return { id, path, title: '', points: null, status: '' };
+    });
+  }
+
   return {
     id: String(fm.id || ''),
     title: String(fm.title || ''),
     status: (fm.status as Sprint['status']) || 'planned',
-    start: String(fm.start || ''),
-    end: String(fm.end || ''),
-    goal: String(fm.goal || sections.get('Goal') || ''),
+    start: String(fm.start || fm.start_date || ''),
+    end: String(fm.end || fm.end_date || ''),
+    goal: String(fm.goal || sections.get('Goal') || sections.get('Sprint Goal') || ''),
     capacity: optionalNumber(fm.capacity),
     committed: optionalNumber(fm.committed),
     completed: optionalNumber(fm.completed),
-    issues: parseSprintIssues(sections.get('Issues')),
+    issues,
     path: filePath,
   };
 }
@@ -447,9 +477,11 @@ export function parseSingleMilestone(workingDir: string, milestonePath: string):
 
 /** Compute the next available ID for a given prefix (e.g., "IS" → "IS-004") */
 export function getNextId(issues: Issue[], prefix: string): string {
+  const escaped = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(`^${escaped}-(\\d+)$`);
   let max = 0;
   for (const issue of issues) {
-    const match = issue.id.match(new RegExp(`^${prefix}-(\\d+)$`));
+    const match = issue.id.match(pattern);
     if (match) {
       const num = Number.parseInt(match[1], 10);
       if (num > max) max = num;

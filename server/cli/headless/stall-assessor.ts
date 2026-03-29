@@ -61,12 +61,13 @@ function hasSubagentPending(pendingNames: Set<string>, lastToolName: string | un
  * tools but is legitimately waiting for teammate idle events.
  */
 function checkAgentTeamsWaiting(ctx: StallContext, hasPendingTools: boolean): StallVerdict | null {
+  // The lead may use any tool while waiting (Glob to verify outputs, Bash to
+  // check disk, ToolSearch, etc.), so don't gate on lastToolName. The key
+  // signal is: prompt contains team_name, tools were called, nothing pending.
   if (
     !hasPendingTools &&
     ctx.totalToolCalls > 0 &&
-    ctx.originalPrompt.includes('team_name') &&
-    (ctx.lastToolName === 'Agent' || ctx.lastToolName === 'SendMessage'
-      || ctx.lastToolName === 'TaskList' || ctx.lastToolName === 'Read')
+    ctx.originalPrompt.includes('team_name')
   ) {
     return {
       action: 'extend',

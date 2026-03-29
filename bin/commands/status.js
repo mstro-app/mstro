@@ -144,7 +144,7 @@ export async function status() {
     log(`    Status:     ${colors.green}Online${colors.reset}`, colors.dim);
     if (platformStatus.data?.relay) {
       const relay = platformStatus.data.relay;
-      log(`    Orchestras: ${relay.pairedClients || 0} connected`, colors.dim);
+      log(`    Apps:        ${relay.pairedClients || 0} connected`, colors.dim);
     }
   } else {
     log(`    Status:     ${colors.red}Offline${colors.reset} (${platformStatus.error})`, colors.dim);

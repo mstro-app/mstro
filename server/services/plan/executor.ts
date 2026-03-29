@@ -10,8 +10,8 @@
  */
 
 import { EventEmitter } from 'node:events';
-import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { runWithFileLogger } from '../../cli/headless/headless-logger.js';
 import { HeadlessRunner } from '../../cli/headless/index.js';
 import { generateMcpConfig } from '../../cli/headless/mcp-config.js';
@@ -121,10 +121,18 @@ export class PlanExecutor extends EventEmitter {
   // ── Wave execution (Agent Teams) ──────────────────────────────
 
   private async executeWave(issues: Issue[]): Promise<void> {
+    const waveStart = Date.now();
     const waveIds = issues.map(i => i.id);
     this.metrics.currentWaveIds = waveIds;
     this.metrics.issuesAttempted += issues.length;
     this.emit('waveStarted', { issueIds: waveIds });
+
+    // Ensure .pm/out/ exists for execution output
+    const pmDir = resolvePmDir(this.workingDir);
+    if (pmDir) {
+      const outDir = join(pmDir, 'out');
+      if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
+    }
 
     // Pre-approve tools so teammates don't hit interactive permission prompts
     this.installTeammatePermissions();
@@ -171,22 +179,30 @@ export class PlanExecutor extends EventEmitter {
         error: error instanceof Error ? error.message : String(error),
       });
       this.revertIncompleteIssues(issues);
+    } finally {
+      // Clean up temporary configs — must run even if wave throws
+      this.uninstallBouncerForSubagents();
+      this.uninstallTeammatePermissions();
     }
 
-    // Clean up temporary configs
-    this.uninstallBouncerForSubagents();
-    this.uninstallTeammatePermissions();
-
-    // Reconcile STATE.md after wave
+    // Reconcile STATE.md and sprint statuses after wave
     reconcileState(this.workingDir);
     this.emit('stateUpdated');
+
+    // Copy confirmed-done outputs to user-specified output_file paths
+    this.publishOutputs(issues);
+
+    // Append progress log entry
+    this.appendProgressEntry(issues, waveStart);
+
     this.metrics.currentWaveIds = [];
   }
 
   /**
    * After a wave, check each issue's status on disk.
-   * The coordinator agent is instructed to mark issues as done via front matter,
-   * so we trust the disk state and update metrics accordingly.
+   * `status: done` in issue front matter is the single completion signal.
+   * Output doc existence is NOT used as a proxy — code-focused issues
+   * (bug fixes, refactors) don't produce docs but are still valid completions.
    */
   private reconcileWaveResults(issues: Issue[]): void {
     const pmDir = resolvePmDir(this.workingDir);
@@ -202,46 +218,17 @@ export class PlanExecutor extends EventEmitter {
         if (currentStatus === 'done') {
           this.metrics.issuesCompleted++;
           this.emit('issueCompleted', issue);
-        } else if (currentStatus === 'in_progress') {
-          // Agent didn't finish — check if output doc exists (partial completion)
-          const outputDoc = this.findOutputDoc(issue.id);
-          if (outputDoc) {
-            // Output was written but status not updated — mark done
-            this.updateIssueFrontMatter(issue.path, 'done');
-            this.metrics.issuesCompleted++;
-            this.emit('issueCompleted', issue);
-          } else {
-            // Genuinely incomplete — revert to prior status
-            this.updateIssueFrontMatter(issue.path, issue.status);
-            this.emit('issueError', {
-              issueId: issue.id,
-              error: 'Issue did not complete during wave execution',
-            });
-          }
+        } else {
+          // Not done — revert to prior status
+          this.updateIssueFrontMatter(issue.path, issue.status);
+          this.emit('issueError', {
+            issueId: issue.id,
+            error: 'Issue did not complete during wave execution',
+          });
         }
       } catch {
-        // File read error — treat as incomplete
         this.emit('issueError', { issueId: issue.id, error: 'Could not read issue file after wave' });
       }
-    }
-  }
-
-  /**
-   * Look for an output document matching an issue ID in .pm/docs/.
-   */
-  private findOutputDoc(issueId: string): string | null {
-    const pmDir = resolvePmDir(this.workingDir);
-    if (!pmDir) return null;
-    const docsDir = join(pmDir, 'docs');
-    if (!existsSync(docsDir)) return null;
-
-    try {
-      const files = readdirSync(docsDir);
-      const prefix = issueId.toLowerCase();
-      const match = files.find(f => f.toLowerCase().startsWith(prefix) && f.endsWith('.md'));
-      return match ? join(docsDir, match) : null;
-    } catch {
-      return null;
     }
   }
 
@@ -274,7 +261,7 @@ export class PlanExecutor extends EventEmitter {
    */
   private buildCoordinatorPrompt(issues: Issue[]): string {
     const pmDir = resolvePmDir(this.workingDir);
-    const docsDir = pmDir ? join(pmDir, 'docs') : '.pm/docs';
+    const outDir = pmDir ? join(pmDir, 'out') : join(this.workingDir, '.pm', 'out');
 
     // Collect existing output docs that issues may need as input
     const existingDocs = this.listExistingDocs();
@@ -314,7 +301,7 @@ ${criteria || 'No specific criteria defined.'}
 ${issue.technicalNotes || 'None'}
 ${files}${predecessorSection}
 
-**Output file**: ${docsDir}/${issue.id}-${this.slugify(issue.title)}.md`;
+**Output file**: ${this.resolveOutputPath(issue)}`;
     }).join('\n\n---\n\n');
 
     const teamName = `pm-wave-${Date.now()}`;
@@ -331,7 +318,7 @@ ${files}${predecessorSection}
         ? `Read these predecessor output docs before starting: ${predecessorDocs.join(', ')}. `
         : '';
 
-      const outputFile = `${docsDir}/${issue.id}-${this.slugify(issue.title)}.md`;
+      const outputFile = this.resolveOutputPath(issue);
 
       return `Spawn teammate **${issue.id.toLowerCase()}** using the **Agent** tool with \`team_name: "${teamName}"\` and \`name: "${issue.id.toLowerCase()}"\`:
 > ${predInstr}Work on issue ${issue.id}: ${issue.title}.
@@ -356,7 +343,7 @@ ${issueBlocks}
 
 ### Step 1: Spawn teammates
 
-Spawn all ${issues.length} teammates in parallel by sending a single message with ${issues.length} **Agent** tool calls. Each call must include \`team_name: "${teamName}"\` and a unique \`name\`. Do NOT call "TeamCreate" — it does not exist. The team is created automatically when you spawn the first teammate with \`team_name\`.
+Spawn all ${issues.length} teammates in parallel by sending a single message with ${issues.length} **Agent** tool calls. Each call must include \`team_name: "${teamName}"\` and a unique \`name\`. The team is created automatically when you spawn the first teammate with \`team_name\` — no separate setup step is needed.
 
 ${teammateSpawns}
 
@@ -377,14 +364,14 @@ WARNING: The #1 failure mode is exiting before all teammates finish. If you exit
 ### Step 3: Verify outputs
 
 Once every teammate has gone idle:
-1. Verify each output file exists in ${docsDir}/ using **Read** or **Glob**
+1. Verify each output file exists in ${outDir}/ using **Read** or **Glob**
 2. Verify each issue's front matter status is \`done\`
 3. If any teammate failed to write output or update status, do it yourself
 4. Do NOT modify STATE.md — the orchestrator handles that
 
 ## Critical Rules
 
-- DO NOT use "TeamCreate" or "TeamDelete" — these are not real tools. The team is created implicitly when you spawn the first teammate with \`team_name\`, and cleaned up automatically when all teammates exit.
+- The team is created implicitly when you spawn the first teammate with \`team_name\`, and cleaned up automatically when all teammates exit. Your only job is to spawn teammates, wait, and verify.
 - You MUST wait for idle notifications from ALL ${issues.length} teammates before exiting. Exiting early kills all teammate processes and permanently loses their work.
 - Each teammate MUST write its output to disk — research only in conversation is LOST.
 - Each teammate MUST update the issue front matter status to \`done\`.
@@ -510,10 +497,7 @@ Once every teammate has gone idle:
   private installBouncerForSubagents(): void {
     const mcpJsonPath = join(this.workingDir, '.mcp.json');
 
-    // Generate the standard MCP config (for parent --mcp-config)
-    generateMcpConfig(this.workingDir);
-
-    // Read the generated config and write it as .mcp.json for sub-agent discovery
+    // Generate the standard MCP config (for parent --mcp-config) and reuse for sub-agents
     try {
       const generatedPath = generateMcpConfig(this.workingDir);
       if (!generatedPath) return;
@@ -567,18 +551,79 @@ Once every teammate has gone idle:
 
   // ── Helpers ───────────────────────────────────────────────────
 
+  /**
+   * Resolve the canonical output path for an issue in .pm/out/.
+   * This is the PM system's internal execution artifact — always under
+   * PM control. User-facing delivery to output_file happens via publishOutputs().
+   */
+  private resolveOutputPath(issue: Issue): string {
+    const pmDir = resolvePmDir(this.workingDir);
+    const outDir = pmDir ? join(pmDir, 'out') : join(this.workingDir, '.pm', 'out');
+    return join(outDir, `${issue.id}-${this.slugify(issue.title)}.md`);
+  }
+
+  /**
+   * List existing execution output docs in .pm/out/.
+   * Single canonical location — no split-brain lookup.
+   */
   private listExistingDocs(): string[] {
     const pmDir = resolvePmDir(this.workingDir);
     if (!pmDir) return [];
-    const docsDir = join(pmDir, 'docs');
-    if (!existsSync(docsDir)) return [];
+    const outDir = join(pmDir, 'out');
+    if (!existsSync(outDir)) return [];
 
     try {
-      return readdirSync(docsDir, { recursive: true })
-        .filter((f): f is string => typeof f === 'string' && f.endsWith('.md'))
-        .map(f => join(docsDir, f));
+      return readdirSync(outDir)
+        .filter(f => f.endsWith('.md'))
+        .map(f => join(outDir, f));
     } catch {
       return [];
+    }
+  }
+
+  /**
+   * Copy confirmed-done outputs from .pm/out/ to user-specified output_file paths.
+   * Only copies for issues that completed successfully and have output_file set.
+   * Failures are non-fatal — the canonical artifact in .pm/out/ is always safe.
+   */
+  private publishOutputs(issues: Issue[]): void {
+    const pmDir = resolvePmDir(this.workingDir);
+    if (!pmDir) return;
+
+    for (const issue of issues) {
+      if (!issue.outputFile) continue;
+
+      // Only publish for confirmed-done issues
+      try {
+        const content = readFileSync(join(pmDir, issue.path), 'utf-8');
+        if (!content.match(/^status:\s*done$/m)) continue;
+      } catch { continue; }
+
+      const srcPath = this.resolveOutputPath(issue);
+      if (!existsSync(srcPath)) continue;
+
+      // Guard against path traversal — output_file must resolve within workingDir
+      const destPath = resolve(this.workingDir, issue.outputFile);
+      if (!destPath.startsWith(this.workingDir + '/') && destPath !== this.workingDir) {
+        this.emit('output', {
+          issueId: issue.id,
+          text: `Warning: output_file "${issue.outputFile}" escapes project directory — skipping`,
+        });
+        continue;
+      }
+
+      try {
+        // Ensure destination directory exists
+        const destDir = join(destPath, '..');
+        if (!existsSync(destDir)) mkdirSync(destDir, { recursive: true });
+        copyFileSync(srcPath, destPath);
+      } catch {
+        // Non-fatal — canonical artifact is safe in .pm/out/
+        this.emit('output', {
+          issueId: issue.id,
+          text: `Warning: could not copy output to ${issue.outputFile}`,
+        });
+      }
     }
   }
 
@@ -600,6 +645,56 @@ Once every teammate has gone idle:
       writeFileSync(fullPath, content, 'utf-8');
     } catch {
       // Ignore errors — file may have been moved
+    }
+  }
+
+  /**
+   * Append a progress log entry after a wave completes.
+   * Re-reads issue files from disk to determine which actually completed.
+   */
+  private appendProgressEntry(issues: Issue[], waveStart: number): void {
+    const pmDir = resolvePmDir(this.workingDir);
+    if (!pmDir) return;
+    const progressPath = join(pmDir, 'progress.md');
+    if (!existsSync(progressPath)) return;
+
+    const durationMin = Math.round((Date.now() - waveStart) / 60_000);
+    const timestamp = new Date().toISOString().replace('T', ' ').slice(0, 16);
+
+    // Re-read issue statuses from disk to get accurate completion count
+    const completed: string[] = [];
+    const failed: string[] = [];
+    for (const issue of issues) {
+      try {
+        const content = readFileSync(join(pmDir, issue.path), 'utf-8');
+        const statusMatch = content.match(/^status:\s*(\S+)/m);
+        if (statusMatch?.[1] === 'done') {
+          completed.push(issue.id);
+        } else {
+          failed.push(issue.id);
+        }
+      } catch {
+        failed.push(issue.id);
+      }
+    }
+
+    const lines = [
+      '',
+      `## ${timestamp} — Wave [${issues.map(i => i.id).join(', ')}]`,
+      '',
+      `- **Duration**: ${durationMin} min`,
+      `- **Completed**: ${completed.length}/${issues.length}${completed.length > 0 ? ` (${completed.join(', ')})` : ''}`,
+    ];
+    if (failed.length > 0) {
+      lines.push(`- **Failed**: ${failed.join(', ')}`);
+    }
+    lines.push('');
+
+    try {
+      const existing = readFileSync(progressPath, 'utf-8');
+      writeFileSync(progressPath, existing.trimEnd() + '\n' + lines.join('\n'), 'utf-8');
+    } catch {
+      // Non-fatal
     }
   }
 }

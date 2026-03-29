@@ -479,7 +479,7 @@ describe('Adversarial: Risk classification accuracy', () => {
 
 describe('Adversarial: Sandbox containment', () => {
   let harness: BouncerSandboxHarness;
-  let sandboxAvailable: boolean;
+  let sandboxAvailable = false;
 
   beforeAll(async () => {
     harness = new BouncerSandboxHarness();

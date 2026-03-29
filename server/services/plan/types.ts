@@ -92,6 +92,8 @@ export interface Issue {
   children: string[];
   // Progress (for epics)
   progress: string | null;
+  // Planned output file path (from front matter output_file, relative to working dir)
+  outputFile: string | null;
   // Full markdown body
   body: string;
   // File path relative to .pm/

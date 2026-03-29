@@ -303,9 +303,9 @@ describe('ToolWatchdog', () => {
       watchdog.startWatch('hung-tool', 'WebFetch', { url: 'http://slow.com' }, vi.fn());
 
       const accumulatedTools = [
-        { toolId: 'tool-1', toolName: 'Read', toolInput: { path: 'a.ts' }, result: 'content', isError: false, duration: 100 },
-        { toolId: 'tool-2', toolName: 'Grep', toolInput: { pattern: 'foo' }, result: undefined, isError: false },
-        { toolId: 'hung-tool', toolName: 'WebFetch', toolInput: { url: 'http://slow.com' }, result: undefined, isError: false },
+        { toolId: 'tool-1', toolName: 'Read', toolInput: { path: 'a.ts' }, result: 'content', isError: false, duration: 100, startTime: processStartTime },
+        { toolId: 'tool-2', toolName: 'Grep', toolInput: { pattern: 'foo' }, result: undefined, isError: false, startTime: processStartTime },
+        { toolId: 'hung-tool', toolName: 'WebFetch', toolInput: { url: 'http://slow.com' }, result: undefined, isError: false, startTime: processStartTime },
       ];
 
       const checkpoint = watchdog.buildCheckpoint(
@@ -343,7 +343,7 @@ describe('ToolWatchdog', () => {
       watchdog.startWatch('t1', 'WebFetch', { url: 'http://example.com' }, vi.fn());
 
       const tools = [
-        { toolId: 't1', toolName: 'WebFetch', toolInput: { url: 'http://example.com' }, result: undefined, isError: false },
+        { toolId: 't1', toolName: 'WebFetch', toolInput: { url: 'http://example.com' }, result: undefined, isError: false, startTime: Date.now() },
       ];
 
       const cp = watchdog.buildCheckpoint('prompt', '', '', tools, 't1', undefined, Date.now());
@@ -355,7 +355,7 @@ describe('ToolWatchdog', () => {
       watchdog.startWatch('t1', 'WebSearch', { query: 'test search' }, vi.fn());
 
       const tools = [
-        { toolId: 't1', toolName: 'WebSearch', toolInput: { query: 'test search' }, result: undefined, isError: false },
+        { toolId: 't1', toolName: 'WebSearch', toolInput: { query: 'test search' }, result: undefined, isError: false, startTime: Date.now() },
       ];
 
       const cp = watchdog.buildCheckpoint('prompt', '', '', tools, 't1', undefined, Date.now());

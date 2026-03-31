@@ -25,13 +25,42 @@ const REQUIRED_PERMISSIONS = [
   'Agent',
 ];
 
+/** Restore a file from a .pm-backup, handling the __NONE__ sentinel for files that didn't exist. */
+function restoreFromBackup(backupPath: string, targetPath: string): void {
+  try {
+    if (!existsSync(backupPath)) return;
+    const backup = readFileSync(backupPath, 'utf-8');
+    if (backup === '__NONE__') {
+      if (existsSync(targetPath)) unlinkSync(targetPath);
+    } else {
+      writeFileSync(targetPath, backup);
+    }
+    unlinkSync(backupPath);
+  } catch { /* best effort */ }
+}
+
 export class ConfigInstaller {
   private savedClaudeSettings: string | null = null;
   private claudeSettingsInstalled = false;
   private savedMcpJson: string | null = null;
   private mcpJsonInstalled = false;
 
-  constructor(private workingDir: string) {}
+  constructor(private workingDir: string) {
+    // Recover from prior crash: if backup files exist, restore them
+    this.recoverFromCrash();
+  }
+
+  /** Restore .claude/settings.json and .mcp.json from backups left by a previous crash. */
+  private recoverFromCrash(): void {
+    restoreFromBackup(
+      join(this.workingDir, '.claude', 'settings.json.pm-backup'),
+      join(this.workingDir, '.claude', 'settings.json'),
+    );
+    restoreFromBackup(
+      join(this.workingDir, '.mcp.json.pm-backup'),
+      join(this.workingDir, '.mcp.json'),
+    );
+  }
 
   /**
    * Pre-approve tools in .claude/settings.json so Agent Teams
@@ -45,9 +74,11 @@ export class ConfigInstaller {
       mkdirSync(claudeDir, { recursive: true });
     }
 
+    const backupPath = join(claudeDir, 'settings.json.pm-backup');
     try {
       if (existsSync(settingsPath)) {
         this.savedClaudeSettings = readFileSync(settingsPath, 'utf-8');
+        writeFileSync(backupPath, this.savedClaudeSettings);
         const existing = JSON.parse(this.savedClaudeSettings);
 
         if (!existing.permissions) existing.permissions = {};
@@ -62,6 +93,7 @@ export class ConfigInstaller {
         writeFileSync(settingsPath, JSON.stringify(existing, null, 2));
       } else {
         this.savedClaudeSettings = null;
+        writeFileSync(backupPath, '__NONE__');
         writeFileSync(settingsPath, JSON.stringify({
           permissions: { allow: REQUIRED_PERMISSIONS },
         }, null, 2));
@@ -76,6 +108,7 @@ export class ConfigInstaller {
   uninstallTeammatePermissions(): void {
     if (!this.claudeSettingsInstalled) return;
     const settingsPath = join(this.workingDir, '.claude', 'settings.json');
+    const backupPath = join(this.workingDir, '.claude', 'settings.json.pm-backup');
 
     try {
       if (this.savedClaudeSettings !== null) {
@@ -86,6 +119,9 @@ export class ConfigInstaller {
     } catch {
       // Best effort
     }
+
+    // Remove backup — successful restore means crash recovery is no longer needed
+    try { if (existsSync(backupPath)) unlinkSync(backupPath); } catch { /* ok */ }
 
     this.savedClaudeSettings = null;
     this.claudeSettingsInstalled = false;
@@ -98,6 +134,7 @@ export class ConfigInstaller {
   installBouncerForSubagents(): void {
     const mcpJsonPath = join(this.workingDir, '.mcp.json');
 
+    const backupPath = join(this.workingDir, '.mcp.json.pm-backup');
     try {
       const generatedPath = generateMcpConfig(this.workingDir);
       if (!generatedPath) return;
@@ -106,6 +143,7 @@ export class ConfigInstaller {
 
       if (existsSync(mcpJsonPath)) {
         this.savedMcpJson = readFileSync(mcpJsonPath, 'utf-8');
+        writeFileSync(backupPath, this.savedMcpJson);
 
         const existing = JSON.parse(this.savedMcpJson);
         const generated = JSON.parse(mcpConfig);
@@ -115,6 +153,7 @@ export class ConfigInstaller {
         };
         writeFileSync(mcpJsonPath, JSON.stringify(existing, null, 2));
       } else {
+        writeFileSync(backupPath, '__NONE__');
         writeFileSync(mcpJsonPath, mcpConfig);
       }
 
@@ -128,6 +167,7 @@ export class ConfigInstaller {
   uninstallBouncerForSubagents(): void {
     if (!this.mcpJsonInstalled) return;
     const mcpJsonPath = join(this.workingDir, '.mcp.json');
+    const backupPath = join(this.workingDir, '.mcp.json.pm-backup');
 
     try {
       if (this.savedMcpJson !== null) {
@@ -138,6 +178,8 @@ export class ConfigInstaller {
     } catch {
       // Best effort cleanup
     }
+
+    try { if (existsSync(backupPath)) unlinkSync(backupPath); } catch { /* ok */ }
 
     this.savedMcpJson = null;
     this.mcpJsonInstalled = false;

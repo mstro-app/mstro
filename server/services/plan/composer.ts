@@ -15,7 +15,8 @@ import { runWithFileLogger } from '../../cli/headless/headless-logger.js';
 import { HeadlessRunner, type ToolUseEvent } from '../../cli/headless/index.js';
 import type { HandlerContext } from '../websocket/handler-context.js';
 import type { WSContext } from '../websocket/types.js';
-import { getNextId, parsePlanDirectory, resolvePmDir } from './parser.js';
+import { defaultPmDir, getNextId, parseBoardDirectory, parsePlanDirectory, resolvePmDir } from './parser.js';
+import type { Issue } from './types.js';
 
 const PROMPT_TOOL_MESSAGES: Record<string, string> = {
   Glob: 'Discovering project files...',
@@ -64,57 +65,159 @@ function readFileOrEmpty(path: string): string {
   return '';
 }
 
+interface ComposerContext {
+  boardContext: string;
+  stateContent: string;
+  issues: Issue[];
+  idInfo: string;
+  epicContext: string;
+  issuesSummary: string;
+  boardDir: string;
+  backlogPath: string;
+  effectiveBoardId: string | null;
+}
+
+function buildComposerContext(pmDir: string, workingDir: string, boardId?: string): ComposerContext {
+  const fullState = parsePlanDirectory(workingDir);
+  const effectiveBoardId = boardId ?? fullState?.workspace?.activeBoardId ?? null;
+
+  let boardContext = '';
+  let stateContent = '';
+  let issues: Issue[] = [];
+
+  if (effectiveBoardId) {
+    const boardState = parseBoardDirectory(pmDir, effectiveBoardId);
+    if (boardState) {
+      stateContent = readFileOrEmpty(join(pmDir, 'boards', effectiveBoardId, 'STATE.md'));
+      issues = boardState.issues;
+      boardContext = `\nActive board: ${effectiveBoardId} — "${boardState.board.title}"
+Board status: ${boardState.board.status}
+Board goal: ${boardState.board.goal || '(none set)'}
+Board directory: ${pmDir}/boards/${effectiveBoardId}/
+Backlog directory: ${pmDir}/boards/${effectiveBoardId}/backlog/\n`;
+    }
+  }
+
+  if (!stateContent) stateContent = readFileOrEmpty(join(pmDir, 'STATE.md'));
+  if (issues.length === 0 && fullState) issues = fullState.issues;
+
+  const idInfo = (issues.length > 0 || fullState)
+    ? `Next available IDs: ${getNextId(issues, 'IS')}, ${getNextId(issues, 'BG')}, ${getNextId(issues, 'EP')}`
+    : '';
+
+  const existingEpics = issues.filter(i => i.type === 'epic');
+  const epicContext = existingEpics.length > 0
+    ? `\nExisting epics:\n${existingEpics.map(e => `- ${e.id}: ${e.title} (${e.path}, children: ${e.children.length})`).join('\n')}\n`
+    : '';
+
+  const nonEpicIssues = issues.filter(i => i.type !== 'epic');
+  const issuesSummary = nonEpicIssues.length > 0
+    ? `\nExisting issues on this board:\n${nonEpicIssues.map(i => `- ${i.id}: ${i.title} [${i.status}] (P${i.priority})`).join('\n')}\n`
+    : '';
+
+  const boardDir = effectiveBoardId ? `boards/${effectiveBoardId}` : '';
+  const backlogPath = effectiveBoardId
+    ? `${pmDir}/boards/${effectiveBoardId}/backlog/`
+    : `${pmDir}/backlog/`;
+
+  return { boardContext, stateContent, issues, idInfo, epicContext, issuesSummary, boardDir, backlogPath, effectiveBoardId };
+}
+
 export async function handlePlanPrompt(
   ctx: HandlerContext,
   ws: WSContext,
   userPrompt: string,
   workingDir: string,
+  boardId?: string,
 ): Promise<void> {
-  const pmDir = resolvePmDir(workingDir) ?? join(workingDir, '.pm');
-  const stateContent = readFileOrEmpty(join(pmDir, 'STATE.md'));
+  const pmDir = resolvePmDir(workingDir) ?? defaultPmDir(workingDir);
   const projectContent = readFileOrEmpty(join(pmDir, 'project.md'));
+  const cc = buildComposerContext(pmDir, workingDir, boardId);
 
-  // Compute next available IDs
-  const fullState = parsePlanDirectory(workingDir);
-  let idInfo = '';
-  if (fullState) {
-    const nextIS = getNextId(fullState.issues, 'IS');
-    const nextBG = getNextId(fullState.issues, 'BG');
-    const nextEP = getNextId(fullState.issues, 'EP');
-    idInfo = `Next available IDs: ${nextIS}, ${nextBG}, ${nextEP}`;
-  }
-
-  // Read existing epic files to provide context
-  let epicContext = '';
-  if (fullState) {
-    const existingEpics = fullState.issues.filter((i: { type: string }) => i.type === 'epic');
-    if (existingEpics.length > 0) {
-      epicContext = `\nExisting epics:\n${existingEpics.map((e: { id: string; title: string; path: string; children: string[] }) => `- ${e.id}: ${e.title} (${e.path}, children: ${e.children.length})`).join('\n')}\n`;
-    }
-  }
-
-  const enrichedPrompt = `You are managing a project in the .pm/ directory format (Project Plan Spec).
-The project's current state is:
-
+  const enrichedPrompt = `You are managing a project using a board-centric PM system (Project Plan Spec v2).
+All issues belong to a board. Each board has its own backlog/, STATE.md, and out/ directory.
+${cc.boardContext}
 <state>
-${stateContent || 'No STATE.md exists yet'}
+${cc.stateContent || 'No STATE.md exists yet'}
 </state>
 
 <project>
 ${projectContent || 'No project.md yet'}
 </project>
 
-${idInfo}
-${epicContext}
+${cc.idInfo}
+${cc.epicContext}
+${cc.issuesSummary}
 
-Follow these rules:
-- When creating .pm/ files, use YAML front matter + markdown body
+## Directory structure
+
+\`\`\`
+${pmDir}/
+├── project.md
+├── workspace.json
+└── boards/
+    └── ${cc.effectiveBoardId || 'BOARD-NNN'}/
+        ├── board.md          # Board metadata
+        ├── STATE.md          # Board execution state
+        ├── backlog/          # Issues, epics, bugs
+        │   ├── EP-*.md
+        │   ├── IS-*.md
+        │   └── BG-*.md
+        ├── out/              # Output artifacts
+        ├── reviews/          # Review gate results
+        └── progress.md       # Execution log
+\`\`\`
+
+## Rules
+
+- ALL new issue files MUST be created in \`${cc.backlogPath}\`
+- Use YAML front matter + markdown body for all files
 - When modifying issues, preserve all existing YAML fields you don't change
-- After any state change, update STATE.md to reflect the new status
+- After any state change, update the board's STATE.md at \`${pmDir}/${cc.boardDir}/STATE.md\`
 - Use the next available ID for new entities
+- Set all new issue statuses to \`todo\` so they appear in the "Ready to Work" section
 - Respond briefly describing what you did
 
-Issue scoping rules (critical for execution quality):
+## Issue format
+
+Each issue file must have this structure:
+\`\`\`markdown
+---
+id: IS-NNN
+title: "Short descriptive title"
+type: issue
+status: todo
+priority: P0|P1|P2|P3
+estimate: 1-5
+labels: []
+epic: backlog/EP-NNN.md    # if part of an epic
+created: "YYYY-MM-DD"
+blocked_by: []             # Use backlog-relative paths: backlog/IS-NNN.md
+blocks: []                 # Use backlog-relative paths: backlog/IS-NNN.md
+review_gate: auto
+output_file: null
+---
+
+# IS-NNN: Title
+
+## Description
+What needs to be done and why.
+
+## Acceptance Criteria
+- [ ] Criterion 1
+- [ ] Criterion 2
+
+## Technical Notes
+Implementation guidance.
+
+## Files to Modify
+- path/to/file.ts
+
+## Activity
+\`\`\`
+
+## Issue scoping rules (critical for execution quality)
+
 - Each issue is executed by a single AI agent with its own context window
 - Issues estimated at 1-3 story points execute well (focused, single concern)
 - Issues at 5 story points are viable if scoped to one subsystem
@@ -124,8 +227,9 @@ Issue scoping rules (critical for execution quality):
 - If an issue requires work across multiple subsystems, split it into one issue per subsystem with blocked_by edges between them
 - Research/investigation issues should be separate from implementation issues
 
-Epic creation rules (when user asks for a feature with sub-tasks or an epic):
-- Create an EP-*.md file in .pm/backlog/ with type: epic and a children: [] field in front matter
+## Epic creation rules
+
+- Create an EP-*.md file in ${cc.backlogPath} with type: epic and a children: [] field in front matter
 - Create individual IS-*.md (or BG-*.md) files for each child issue
 - Each child issue must have epic: backlog/EP-XXX.md in its front matter
 - The epic's children field must list all child paths: [backlog/IS-001.md, backlog/IS-002.md, ...]

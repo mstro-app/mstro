@@ -9,12 +9,12 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { handlePlanPrompt } from '../plan/composer.js';
 import { PlanExecutor } from '../plan/executor.js';
 import { replaceFrontMatterField } from '../plan/front-matter.js';
-import { getNextBoardId, getNextBoardNumber, getNextId, getNextSprintId, parseBoardArtifacts, parseBoardDirectory, parsePlanDirectory, parseSingleIssue, parseSingleMilestone, parseSingleSprint, parseSprintArtifacts, planDirExists, resolvePmDir } from '../plan/parser.js';
-import type { Workspace } from '../plan/types.js';
+import { defaultPmDir, getNextBoardId, getNextBoardNumber, getNextId, getNextSprintId, parseBoardArtifacts, parseBoardDirectory, parsePlanDirectory, parseSingleIssue, parseSingleMilestone, parseSingleSprint, parseSprintArtifacts, planDirExists, resolvePmDir } from '../plan/parser.js';
+import type { Issue, Workspace } from '../plan/types.js';
 import { PlanWatcher } from '../plan/watcher.js';
 import type { HandlerContext } from './handler-context.js';
 import type { WebSocketMessage, WSContext } from './types.js';
@@ -212,7 +212,7 @@ export function handlePlanMessage(
     planDeleteIssue: () => handleDeleteIssue(ctx, ws, msg, workingDir, permission),
     planScaffold: () => handleScaffold(ctx, ws, msg, workingDir, permission),
     planPrompt: () => handlePrompt(ctx, ws, msg, workingDir, permission),
-    planExecute: () => handleExecute(ctx, ws, workingDir, permission),
+    planExecute: () => handleExecute(ctx, ws, msg, workingDir, permission),
     planExecuteEpic: () => handleExecuteEpic(ctx, ws, msg, workingDir, permission),
     planPause: () => handlePause(ctx, ws, workingDir, permission),
     planStop: () => handleStop(ctx, ws, workingDir, permission),
@@ -248,10 +248,50 @@ export function handlePlanMessage(
 // Read-only handlers
 // ============================================================================
 
+/** Create the .mstro/pm/ directory structure with a default board. */
+function scaffoldPmDirectory(workingDir: string, name: string): void {
+  const planDir = defaultPmDir(workingDir);
+  const boardId = 'BOARD-001';
+  const boardDir = join(planDir, 'boards', boardId);
+
+  for (const dir of ['milestones', 'templates']) {
+    mkdirSync(join(planDir, dir), { recursive: true });
+  }
+  for (const dir of ['backlog', 'out', 'reviews']) {
+    mkdirSync(join(boardDir, dir), { recursive: true });
+  }
+
+  writeFileSync(join(planDir, 'project.md'), buildProjectMarkdown(name), 'utf-8');
+
+  const workspace: Workspace = { activeBoardId: boardId, boardOrder: [boardId] };
+  writeFileSync(join(planDir, 'workspace.json'), JSON.stringify(workspace, null, 2), 'utf-8');
+
+  const today = new Date().toISOString().split('T')[0];
+  writeFileSync(join(boardDir, 'board.md'), `---
+id: ${boardId}
+title: "Board 1"
+status: draft
+created: "${today}"
+completed_at: null
+goal: ""
+---
+
+# Board 1
+
+## Goal
+
+## Notes
+`, 'utf-8');
+
+  writeFileSync(join(boardDir, 'STATE.md'), buildStateMarkdown(name), 'utf-8');
+  writeFileSync(join(boardDir, 'progress.md'), '# Board Progress\n', 'utf-8');
+}
+
 function handlePlanInit(ctx: HandlerContext, ws: WSContext, workingDir: string): void {
+  // Auto-scaffold if .mstro/pm/ doesn't exist
   if (!planDirExists(workingDir)) {
-    ctx.send(ws, { type: 'planNotFound', data: {} });
-    return;
+    const projectName = basename(workingDir) || 'My Project';
+    scaffoldPmDirectory(workingDir, projectName);
   }
 
   const fullState = parsePlanDirectory(workingDir);
@@ -321,6 +361,26 @@ function handleGetMilestone(ctx: HandlerContext, ws: WSContext, msg: WebSocketMe
 // Mutation handlers
 // ============================================================================
 
+/** Resolve backlog directory and existing issues for a board or legacy layout. */
+function resolveBacklogContext(pmDir: string, workingDir: string, boardId?: string) {
+  const fullState = parsePlanDirectory(workingDir);
+  const effectiveBoardId = boardId || fullState?.workspace?.activeBoardId;
+
+  if (effectiveBoardId && existsSync(join(pmDir, 'boards', effectiveBoardId))) {
+    const boardState = parseBoardDirectory(pmDir, effectiveBoardId);
+    return {
+      backlogDir: join(pmDir, 'boards', effectiveBoardId, 'backlog'),
+      issues: boardState?.issues ?? [],
+      pathPrefix: `boards/${effectiveBoardId}/backlog`,
+    };
+  }
+  return {
+    backlogDir: join(pmDir, 'backlog'),
+    issues: fullState?.issues ?? [],
+    pathPrefix: 'backlog',
+  };
+}
+
 function handleCreateIssue(
   ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage,
   workingDir: string, permission?: 'control' | 'view',
@@ -333,44 +393,18 @@ function handleCreateIssue(
     return;
   }
 
-  const pmDir = resolvePmDir(workingDir) ?? join(workingDir, '.pm');
-  const fullState = parsePlanDirectory(workingDir);
+  const pmDir = resolvePmDir(workingDir) ?? defaultPmDir(workingDir);
+  const { backlogDir, issues, pathPrefix } = resolveBacklogContext(pmDir, workingDir, boardId);
 
-  // Resolve backlog dir: board-scoped if boardId provided or active board exists
-  const effectiveBoardId = boardId || fullState?.workspace?.activeBoardId;
-  let backlogDir: string;
-  let issuePath: string;
-  let issues: typeof fullState extends null ? never : NonNullable<typeof fullState>['issues'] = [];
-
-  if (effectiveBoardId && existsSync(join(pmDir, 'boards', effectiveBoardId))) {
-    backlogDir = join(pmDir, 'boards', effectiveBoardId, 'backlog');
-    // Get issues from this specific board
-    const boardState = parseBoardDirectory(pmDir, effectiveBoardId);
-    issues = boardState?.issues ?? [];
-  } else {
-    // Fallback: legacy flat backlog (shouldn't happen after migration)
-    backlogDir = join(pmDir, 'backlog');
-    issues = fullState?.issues ?? [];
-  }
-
-  if (!existsSync(backlogDir)) {
-    mkdirSync(backlogDir, { recursive: true });
-  }
+  if (!existsSync(backlogDir)) mkdirSync(backlogDir, { recursive: true });
 
   const prefix = type === 'bug' ? 'BG' : type === 'epic' ? 'EP' : 'IS';
   const id = getNextId(issues, prefix);
-
-  const content = buildIssueMarkdown(id, title, type, priority, labels, sprint, description);
   const fileName = `${id}.md`;
-  writeFileSync(join(backlogDir, fileName), content, 'utf-8');
 
-  if (effectiveBoardId && existsSync(join(pmDir, 'boards', effectiveBoardId))) {
-    issuePath = `boards/${effectiveBoardId}/backlog/${fileName}`;
-  } else {
-    issuePath = `backlog/${fileName}`;
-  }
+  writeFileSync(join(backlogDir, fileName), buildIssueMarkdown(id, title, type, priority, labels, sprint, description), 'utf-8');
 
-  const issue = parseSingleIssue(workingDir, issuePath);
+  const issue = parseSingleIssue(workingDir, `${pathPrefix}/${fileName}`);
   ctx.broadcastToAll({ type: 'planIssueCreated', data: issue });
 }
 
@@ -438,45 +472,7 @@ function handleScaffold(
   if (denyIfViewOnly(ctx, ws, permission)) return;
 
   const name = msg.data?.name || 'My Project';
-  const planDir = join(workingDir, '.pm');
-  const boardId = 'BOARD-001';
-  const boardDir = join(planDir, 'boards', boardId);
-
-  // Create board-centric directory structure
-  for (const dir of ['milestones', 'templates']) {
-    mkdirSync(join(planDir, dir), { recursive: true });
-  }
-  for (const dir of ['backlog', 'out', 'reviews']) {
-    mkdirSync(join(boardDir, dir), { recursive: true });
-  }
-
-  // Project-level files
-  writeFileSync(join(planDir, 'project.md'), buildProjectMarkdown(name), 'utf-8');
-
-  // Workspace registry
-  const workspace: Workspace = { activeBoardId: boardId, boardOrder: [boardId] };
-  writeFileSync(join(planDir, 'workspace.json'), JSON.stringify(workspace, null, 2), 'utf-8');
-
-  // Board files
-  const today = new Date().toISOString().split('T')[0];
-  writeFileSync(join(boardDir, 'board.md'), `---
-id: ${boardId}
-title: "Board 1"
-status: draft
-created: "${today}"
-completed_at: null
-goal: ""
----
-
-# Board 1
-
-## Goal
-
-## Notes
-`, 'utf-8');
-
-  writeFileSync(join(boardDir, 'STATE.md'), buildStateMarkdown(name), 'utf-8');
-  writeFileSync(join(boardDir, 'progress.md'), '# Board Progress\n', 'utf-8');
+  scaffoldPmDirectory(workingDir, name);
 
   const fullState = parsePlanDirectory(workingDir);
   ctx.broadcastToAll({ type: 'planScaffolded', data: fullState });
@@ -493,11 +489,12 @@ function handlePrompt(
   if (denyIfViewOnly(ctx, ws, permission)) return;
 
   const prompt = msg.data?.prompt;
+  const boardId = msg.data?.boardId as string | undefined;
   if (!prompt) {
     ctx.send(ws, { type: 'planError', data: { error: 'Prompt required' } });
     return;
   }
-  handlePlanPrompt(ctx, ws, prompt, workingDir).catch(error => {
+  handlePlanPrompt(ctx, ws, prompt, workingDir, boardId).catch(error => {
     ctx.send(ws, {
       type: 'planError',
       data: { error: error instanceof Error ? error.message : String(error) },
@@ -567,7 +564,7 @@ function wireExecutorEvents(executor: PlanExecutor, ctx: HandlerContext, working
 }
 
 function handleExecute(
-  ctx: HandlerContext, ws: WSContext,
+  ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage,
   workingDir: string, permission?: 'control' | 'view',
 ): void {
   if (denyIfViewOnly(ctx, ws, permission)) return;
@@ -581,8 +578,11 @@ function handleExecute(
 
   wireExecutorEvents(executor, ctx, workingDir);
 
-  ctx.send(ws, { type: 'planExecutionStarted', data: { status: 'executing' } });
-  executor.start().catch(error => {
+  // Execute the board the user is looking at, falling back to workspace.json activeBoardId
+  const boardId = msg.data?.boardId as string | undefined;
+  ctx.send(ws, { type: 'planExecutionStarted', data: { status: 'executing', boardId } });
+  const startPromise = boardId ? executor.startBoard(boardId) : executor.start();
+  startPromise.catch(error => {
     ctx.send(ws, {
       type: 'planExecutionError',
       data: { error: error instanceof Error ? error.message : String(error) },
@@ -666,7 +666,7 @@ function handleCreateBoard(
 
   const pmDir = resolvePmDir(workingDir);
   if (!pmDir) {
-    ctx.send(ws, { type: 'planError', data: { error: 'No .pm/ directory found' } });
+    ctx.send(ws, { type: 'planError', data: { error: 'No PM directory found' } });
     return;
   }
 
@@ -727,7 +727,11 @@ paused: false
   writeFileSync(join(boardDir, 'progress.md'), '# Board Progress\n', 'utf-8');
 
   // Update workspace.json
-  const workspaceContent = readFileSync(join(pmDir, 'workspace.json'), 'utf-8');
+  const wsPath = join(pmDir, 'workspace.json');
+  if (!existsSync(wsPath)) {
+    writeFileSync(wsPath, JSON.stringify({ activeBoardId: null, boardOrder: [] }, null, 2), 'utf-8');
+  }
+  const workspaceContent = readFileSync(wsPath, 'utf-8');
   const workspace: Workspace = JSON.parse(workspaceContent);
   workspace.boardOrder.push(boardId);
   if (!workspace.activeBoardId) {
@@ -960,6 +964,18 @@ ${goal}
 `;
 }
 
+/** Assign issues to a sprint by updating their front matter sprint field. */
+function assignIssuesToSprint(workingDir: string, issues: Issue[], issueIds: string[], sprintPath: string): void {
+  for (const issueId of issueIds) {
+    const issue = issues.find(i => i.id === issueId);
+    if (!issue) continue;
+    const fullPath = resolvePlanPath(workingDir, issue.path);
+    if (!fullPath || !existsSync(fullPath)) continue;
+    const content = replaceFrontMatterField(readFileSync(fullPath, 'utf-8'), 'sprint', sprintPath);
+    writeFileSync(fullPath, content, 'utf-8');
+  }
+}
+
 function handleCreateSprint(
   ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage,
   workingDir: string, permission?: 'control' | 'view',
@@ -972,47 +988,48 @@ function handleCreateSprint(
     return;
   }
 
-  const pmDir = resolvePmDir(workingDir) ?? join(workingDir, '.pm');
+  const pmDir = resolvePmDir(workingDir) ?? defaultPmDir(workingDir);
   const sprintsDir = join(pmDir, 'sprints');
-  if (!existsSync(sprintsDir)) {
-    mkdirSync(sprintsDir, { recursive: true });
-  }
+  if (!existsSync(sprintsDir)) mkdirSync(sprintsDir, { recursive: true });
 
   const fullState = parsePlanDirectory(workingDir);
   const id = fullState ? getNextSprintId(fullState.sprints) : 'SPRINT-001';
 
-  // Resolve issue paths from IDs
   const issueRefs = (issueIds as string[]).map((issueId: string) => {
     const issue = fullState?.issues.find(i => i.id === issueId);
     return issue ? issue.path : `backlog/${issueId}.md`;
   });
 
-  const content = buildSprintMarkdown(id, title, goal, start, end, issueRefs);
-  writeFileSync(join(sprintsDir, `${id}.md`), content, 'utf-8');
+  writeFileSync(join(sprintsDir, `${id}.md`), buildSprintMarkdown(id, title, goal, start, end, issueRefs), 'utf-8');
 
-  // Create sandbox directory for sprint artifacts
   const sandboxDir = join(sprintsDir, id);
   mkdirSync(join(sandboxDir, 'out'), { recursive: true });
   mkdirSync(join(sandboxDir, 'reviews'), { recursive: true });
   writeFileSync(join(sandboxDir, 'progress.md'), `# ${id}: ${title} — Progress Log\n`, 'utf-8');
 
-  // Assign issues to the sprint if provided
   if (issueRefs.length > 0 && fullState) {
-    for (const issueId of issueIds as string[]) {
-      const issue = fullState.issues.find(i => i.id === issueId);
-      if (issue) {
-        const issuePath = resolvePlanPath(workingDir, issue.path);
-        if (issuePath && existsSync(issuePath)) {
-          let issueContent = readFileSync(issuePath, 'utf-8');
-          issueContent = replaceFrontMatterField(issueContent, 'sprint', `sprints/${id}.md`);
-          writeFileSync(issuePath, issueContent, 'utf-8');
-        }
-      }
-    }
+    assignIssuesToSprint(workingDir, fullState.issues, issueIds as string[], `sprints/${id}.md`);
   }
 
   const sprint = parseSingleSprint(workingDir, `sprints/${id}.md`);
   ctx.broadcastToAll({ type: 'planSprintCreated', data: sprint });
+}
+
+/** Promote sprint issues from 'backlog' to 'todo' status. */
+function promoteSprintIssues(pmDir: string, sprint: { issues: Array<{ id: string; path: string }> }, allIssues: Issue[]): void {
+  for (const issueSummary of sprint.issues) {
+    const issue = allIssues.find(i => i.id === issueSummary.id || i.path === issueSummary.path);
+    if (!issue || issue.status !== 'backlog') continue;
+    const issuePath = join(pmDir, issue.path);
+    if (!existsSync(issuePath)) continue;
+    writeFileSync(issuePath, replaceFrontMatterField(readFileSync(issuePath, 'utf-8'), 'status', 'todo'), 'utf-8');
+  }
+}
+
+/** Update a file's front matter field if the file exists. */
+function updateFileField(filePath: string, field: string, value: string): void {
+  if (!existsSync(filePath)) return;
+  writeFileSync(filePath, replaceFrontMatterField(readFileSync(filePath, 'utf-8'), field, value), 'utf-8');
 }
 
 function handleActivateSprint(
@@ -1033,7 +1050,6 @@ function handleActivateSprint(
     return;
   }
 
-  // Check no other sprint is active
   const currentActive = fullState.sprints.find(s => s.status === 'active');
   if (currentActive && currentActive.id !== sprintId) {
     ctx.send(ws, { type: 'planError', data: { error: `Sprint ${currentActive.id} is already active. Complete it first.` } });
@@ -1049,39 +1065,13 @@ function handleActivateSprint(
   const pmDir = resolvePmDir(workingDir);
   if (!pmDir) return;
 
-  // Update sprint status to active
-  const sprintPath = join(pmDir, sprint.path);
-  if (existsSync(sprintPath)) {
-    let content = readFileSync(sprintPath, 'utf-8');
-    content = replaceFrontMatterField(content, 'status', 'active');
-    writeFileSync(sprintPath, content, 'utf-8');
-  }
-
-  // Update STATE.md current_sprint
-  const statePath = join(pmDir, 'STATE.md');
-  if (existsSync(statePath)) {
-    let stateContent = readFileSync(statePath, 'utf-8');
-    stateContent = replaceFrontMatterField(stateContent, 'current_sprint', `"${sprint.path}"`);
-    writeFileSync(statePath, stateContent, 'utf-8');
-  }
-
-  // Move sprint's assigned issues from backlog to todo
-  for (const issueSummary of sprint.issues) {
-    const issue = fullState.issues.find(i => i.id === issueSummary.id || i.path === issueSummary.path);
-    if (issue && (issue.status === 'backlog')) {
-      const issuePath = join(pmDir, issue.path);
-      if (existsSync(issuePath)) {
-        let issueContent = readFileSync(issuePath, 'utf-8');
-        issueContent = replaceFrontMatterField(issueContent, 'status', 'todo');
-        writeFileSync(issuePath, issueContent, 'utf-8');
-      }
-    }
-  }
+  updateFileField(join(pmDir, sprint.path), 'status', 'active');
+  updateFileField(join(pmDir, 'STATE.md'), 'current_sprint', `"${sprint.path}"`);
+  promoteSprintIssues(pmDir, sprint, fullState.issues);
 
   const updatedSprint = parseSingleSprint(workingDir, sprint.path);
   ctx.broadcastToAll({ type: 'planSprintUpdated', data: updatedSprint });
 
-  // Refresh full state for all clients
   const updatedState = parsePlanDirectory(workingDir);
   if (updatedState) {
     ctx.broadcastToAll({ type: 'planStateUpdated', data: updatedState });
@@ -1138,8 +1128,11 @@ function handleCompleteSprint(
         `  completed_issues: ${completedIssues}`,
         `  failed_issues: ${failedIssues}`,
       ].join('\n');
-      // Insert before the closing --- of front matter
-      content = content.replace(/^---\s*$/m, `${summaryYaml}\n---`);
+      // Insert before the closing --- of front matter (second occurrence)
+      const fmClose = content.indexOf('\n---', content.indexOf('---') + 3);
+      if (fmClose !== -1) {
+        content = `${content.slice(0, fmClose)}\n${summaryYaml}${content.slice(fmClose)}`;
+      }
     }
 
     writeFileSync(sprintPath, content, 'utf-8');

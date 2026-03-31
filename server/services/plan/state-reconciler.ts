@@ -70,6 +70,7 @@ function buildStateMarkdown(
   categories: CategorizedIssues,
   warnings: string[],
   issueByPath: Map<string, Issue>,
+  header = '# Project State',
 ): string {
   const formatSummary = (issue: Issue, index: number): string => {
     return `${index + 1}. [${issue.id}](${issue.path}) — ${issue.title} (${issue.priority})`;
@@ -84,7 +85,7 @@ function buildStateMarkdown(
   };
 
   const sections = [
-    '# Project State',
+    header,
     '',
     '## Current Focus',
     '',
@@ -196,7 +197,7 @@ export function reconcileState(workingDir: string, boardId?: string): void {
   writeFileSync(statePath, newContent, 'utf-8');
 }
 
-function reconcileBoardState(pmDir: string, workingDir: string, boardId?: string): void {
+function reconcileBoardState(pmDir: string, _workingDir: string, boardId?: string): void {
   // Determine which board to reconcile
   const effectiveBoardId = boardId ?? resolveActiveBoardId(pmDir);
   if (!effectiveBoardId) return;
@@ -218,7 +219,7 @@ function reconcileBoardState(pmDir: string, workingDir: string, boardId?: string
   const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
   const frontMatter = fmMatch ? fmMatch[1] : `board: "${board.id}"\npaused: false\nlast_session: null`;
 
-  const newContent = buildStateMarkdown(frontMatter, categories, warnings, issueByPath);
+  const newContent = buildStateMarkdown(frontMatter, categories, warnings, issueByPath, '# Board State');
   writeFileSync(statePath, newContent, 'utf-8');
 }
 

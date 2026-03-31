@@ -306,6 +306,7 @@ function parseIssue(content: string, filePath: string): Issue {
     technicalNotes: sections.get('Technical Notes') || null,
     filesToModify: parseListItems(sections.get('Files to Modify') || ''),
     activity: parseListItems(sections.get('Activity') || ''),
+    reviewGate: (['none', 'auto', 'required'].includes(String(fm.review_gate)) ? String(fm.review_gate) : 'auto') as Issue['reviewGate'],
     outputFile: optionalString(fm.output_file),
     body,
     path: filePath,
@@ -469,6 +470,95 @@ function isLegacyFormat(pmDir: string): boolean {
 // Legacy → Board Migration
 // ============================================================================
 
+/** Move all files from a legacy directory into a board subdirectory and remove the source. */
+function moveLegacyDir(srcDir: string, destDir: string): void {
+  if (!existsSync(srcDir)) return;
+  for (const file of readdirSync(srcDir)) {
+    renameSync(join(srcDir, file), join(destDir, file));
+  }
+  rmSync(srcDir, { recursive: true });
+}
+
+/** Move a single file if it exists. */
+function moveLegacyFile(src: string, dest: string): void {
+  if (existsSync(src)) renameSync(src, dest);
+}
+
+/** Copy review files from sprint sandbox directories into the board reviews dir. */
+function copySprintReviews(sprintsDir: string, boardReviewsDir: string): void {
+  for (const entry of readdirSync(sprintsDir)) {
+    if (entry.endsWith('.md')) continue;
+    const reviewsDir = join(sprintsDir, entry, 'reviews');
+    if (!existsSync(reviewsDir)) continue;
+    for (const reviewFile of readdirSync(reviewsDir)) {
+      cpSync(join(reviewsDir, reviewFile), join(boardReviewsDir, reviewFile));
+    }
+  }
+}
+
+/** Find and return the goal from the active sprint .md file. */
+function extractActiveSprintGoal(sprintsDir: string): string {
+  for (const entry of readdirSync(sprintsDir).filter(e => e.endsWith('.md'))) {
+    const content = readFileIfExists(join(sprintsDir, entry));
+    if (!content) continue;
+    const fm = parseFrontMatter(content).frontMatter;
+    if (fm.status === 'active') return String(fm.goal || '');
+  }
+  return '';
+}
+
+/** Migrate sprint reviews and extract the active sprint's goal. */
+function migrateLegacySprints(sprintsDir: string, boardReviewsDir: string): string {
+  if (!existsSync(sprintsDir)) return '';
+  copySprintReviews(sprintsDir, boardReviewsDir);
+  const goal = extractActiveSprintGoal(sprintsDir);
+  rmSync(sprintsDir, { recursive: true });
+  return goal;
+}
+
+/** Clean up migrated issues: remove sprint fields, detect active issues. */
+function cleanupMigratedIssues(boardBacklogDir: string): boolean {
+  if (!existsSync(boardBacklogDir)) return false;
+  let hasActive = false;
+
+  for (const file of readdirSync(boardBacklogDir).filter(f => f.endsWith('.md'))) {
+    const content = readFileIfExists(join(boardBacklogDir, file));
+    if (!content) continue;
+    if (content.match(/^status:\s*(in_progress|in_review|todo)/m)) hasActive = true;
+    if (content.match(/^sprint:\s*.+$/m)) {
+      writeFileSync(join(boardBacklogDir, file), content.replace(/^sprint:\s*.+\n?/m, ''), 'utf-8');
+    }
+  }
+  return hasActive;
+}
+
+/** Write the board metadata files (board.md, workspace.json, STATE.md, progress.md). */
+function writeBoardMetadata(pmDir: string, boardDir: string, boardId: string, sprintGoal: string, hasActive: boolean): void {
+  const today = new Date().toISOString().slice(0, 10);
+  const boardMd = [
+    '---', `id: ${boardId}`, 'title: "Board 1"',
+    `status: ${hasActive ? 'active' : 'draft'}`, `created: "${today}"`,
+    'completed_at: null', `goal: "${sprintGoal.replace(/"/g, '\\"')}"`,
+    '---', '', '# Board 1', '',
+    sprintGoal ? `## Goal\n${sprintGoal}\n` : '',
+  ].join('\n');
+  writeFileSync(join(boardDir, 'board.md'), boardMd, 'utf-8');
+
+  const workspace: Workspace = { activeBoardId: boardId, boardOrder: [boardId] };
+  writeFileSync(join(pmDir, 'workspace.json'), JSON.stringify(workspace, null, 2), 'utf-8');
+
+  if (!existsSync(join(boardDir, 'STATE.md'))) {
+    writeFileSync(join(boardDir, 'STATE.md'), [
+      '---', 'project: ../../project.md', 'board: board.md', 'paused: false', '---', '',
+      '# Board State', '', '## Ready to Work', '', '## In Progress', '',
+      '## Blocked', '', '## Recently Completed', '', '## Warnings', '',
+    ].join('\n'), 'utf-8');
+  }
+  if (!existsSync(join(boardDir, 'progress.md'))) {
+    writeFileSync(join(boardDir, 'progress.md'), '# Board Progress\n', 'utf-8');
+  }
+}
+
 /**
  * Migrate a legacy flat .pm/ directory to board-centric format.
  * Creates BOARD-001 from the existing backlog, state, outputs, and reviews.
@@ -477,151 +567,39 @@ function migrateToBoards(pmDir: string): void {
   const boardId = 'BOARD-001';
   const boardDir = join(pmDir, 'boards', boardId);
 
-  // Create board directory structure
   mkdirSync(boardDir, { recursive: true });
   mkdirSync(join(boardDir, 'backlog'), { recursive: true });
   mkdirSync(join(boardDir, 'out'), { recursive: true });
   mkdirSync(join(boardDir, 'reviews'), { recursive: true });
 
-  // Move backlog/
-  const backlogDir = join(pmDir, 'backlog');
-  if (existsSync(backlogDir)) {
-    for (const file of readdirSync(backlogDir)) {
-      renameSync(join(backlogDir, file), join(boardDir, 'backlog', file));
-    }
-    rmSync(backlogDir, { recursive: true });
-  }
+  moveLegacyDir(join(pmDir, 'backlog'), join(boardDir, 'backlog'));
+  moveLegacyFile(join(pmDir, 'STATE.md'), join(boardDir, 'STATE.md'));
+  moveLegacyDir(join(pmDir, 'out'), join(boardDir, 'out'));
+  moveLegacyFile(join(pmDir, 'progress.md'), join(boardDir, 'progress.md'));
 
-  // Move STATE.md
-  const statePath = join(pmDir, 'STATE.md');
-  if (existsSync(statePath)) {
-    renameSync(statePath, join(boardDir, 'STATE.md'));
-  }
-
-  // Move out/
-  const outDir = join(pmDir, 'out');
-  if (existsSync(outDir)) {
-    for (const file of readdirSync(outDir)) {
-      renameSync(join(outDir, file), join(boardDir, 'out', file));
-    }
-    rmSync(outDir, { recursive: true });
-  }
-
-  // Move progress.md
-  const progressPath = join(pmDir, 'progress.md');
-  if (existsSync(progressPath)) {
-    renameSync(progressPath, join(boardDir, 'progress.md'));
-  }
-
-  // Merge sprint sandbox reviews into board reviews
-  const sprintsDir = join(pmDir, 'sprints');
-  let sprintGoal = '';
-  let hasActiveIssues = false;
-  if (existsSync(sprintsDir)) {
-    for (const entry of readdirSync(sprintsDir)) {
-      const entryPath = join(sprintsDir, entry);
-      // Copy reviews from sprint sandbox directories
-      if (!entry.endsWith('.md') && existsSync(join(entryPath, 'reviews'))) {
-        const reviewsDir = join(entryPath, 'reviews');
-        for (const reviewFile of readdirSync(reviewsDir)) {
-          cpSync(join(reviewsDir, reviewFile), join(boardDir, 'reviews', reviewFile));
-        }
-      }
-      // Extract goal from active sprint
-      if (entry.endsWith('.md')) {
-        const sprintContent = readFileIfExists(join(sprintsDir, entry));
-        if (sprintContent) {
-          const fm = parseFrontMatter(sprintContent).frontMatter;
-          if (fm.status === 'active') {
-            sprintGoal = String(fm.goal || '');
-          }
-        }
-      }
-    }
-    rmSync(sprintsDir, { recursive: true });
-  }
-
-  // Check if any migrated issues are in_progress
-  const boardBacklog = join(boardDir, 'backlog');
-  if (existsSync(boardBacklog)) {
-    for (const file of readdirSync(boardBacklog).filter(f => f.endsWith('.md'))) {
-      const content = readFileIfExists(join(boardBacklog, file));
-      if (content?.match(/^status:\s*(in_progress|in_review|todo)/m)) {
-        hasActiveIssues = true;
-      }
-      // Remove sprint field from migrated issues
-      if (content?.match(/^sprint:\s*.+$/m)) {
-        const updated = content.replace(/^sprint:\s*.+\n?/m, '');
-        writeFileSync(join(boardBacklog, file), updated, 'utf-8');
-      }
-    }
-  }
-
-  // Create board.md
-  const boardStatus = hasActiveIssues ? 'active' : 'draft';
-  const today = new Date().toISOString().slice(0, 10);
-  const boardMd = [
-    '---',
-    `id: ${boardId}`,
-    'title: "Board 1"',
-    `status: ${boardStatus}`,
-    `created: "${today}"`,
-    'completed_at: null',
-    `goal: "${sprintGoal.replace(/"/g, '\\"')}"`,
-    '---',
-    '',
-    '# Board 1',
-    '',
-    sprintGoal ? `## Goal\n${sprintGoal}\n` : '',
-  ].join('\n');
-  writeFileSync(join(boardDir, 'board.md'), boardMd, 'utf-8');
-
-  // Create workspace.json
-  const workspace: Workspace = { activeBoardId: boardId, boardOrder: [boardId] };
-  writeFileSync(join(pmDir, 'workspace.json'), JSON.stringify(workspace, null, 2), 'utf-8');
-
-  // Create STATE.md if it wasn't moved (project had no STATE.md)
-  if (!existsSync(join(boardDir, 'STATE.md'))) {
-    const defaultState = [
-      '---',
-      'project: ../../project.md',
-      'board: board.md',
-      'paused: false',
-      '---',
-      '',
-      '# Board State',
-      '',
-      '## Ready to Work',
-      '',
-      '## In Progress',
-      '',
-      '## Blocked',
-      '',
-      '## Recently Completed',
-      '',
-      '## Warnings',
-      '',
-    ].join('\n');
-    writeFileSync(join(boardDir, 'STATE.md'), defaultState, 'utf-8');
-  }
-
-  // Create progress.md if it wasn't moved
-  if (!existsSync(join(boardDir, 'progress.md'))) {
-    writeFileSync(join(boardDir, 'progress.md'), '# Board Progress\n', 'utf-8');
-  }
+  const sprintGoal = migrateLegacySprints(join(pmDir, 'sprints'), join(boardDir, 'reviews'));
+  const hasActive = cleanupMigratedIssues(join(boardDir, 'backlog'));
+  writeBoardMetadata(pmDir, boardDir, boardId, sprintGoal, hasActive);
 }
 
 // ============================================================================
 // Directory Parser
 // ============================================================================
 
-/** Resolve the PM directory — prefers .pm/, falls back to legacy .plan/ */
+/** Resolve the PM directory — prefers .mstro/pm/, falls back to legacy .pm/ and .plan/ */
 export function resolvePmDir(workingDir: string): string | null {
-  const pmDir = join(workingDir, '.pm');
-  if (existsSync(pmDir)) return pmDir;
-  const legacyDir = join(workingDir, '.plan');
-  if (existsSync(legacyDir)) return legacyDir;
+  const mstroPmDir = join(workingDir, '.mstro', 'pm');
+  if (existsSync(mstroPmDir)) return mstroPmDir;
+  const legacyPmDir = join(workingDir, '.pm');
+  if (existsSync(legacyPmDir)) return legacyPmDir;
+  const legacyPlanDir = join(workingDir, '.plan');
+  if (existsSync(legacyPlanDir)) return legacyPlanDir;
   return null;
+}
+
+/** Default PM directory path for new projects */
+export function defaultPmDir(workingDir: string): string {
+  return join(workingDir, '.mstro', 'pm');
 }
 
 export function planDirExists(workingDir: string): boolean {
@@ -671,78 +649,64 @@ export function parseBoardDirectory(pmDir: string, boardId: string): BoardFullSt
   const state = stateContent ? parseProjectState(stateContent) : { ...defaultState };
 
   const issueFiles = readMdFilesInDir(join(boardDir, 'backlog'));
-  const issues = issueFiles.map(f => parseIssue(f.content, `boards/${boardId}/backlog/${f.name}`));
+  const boardPrefix = `boards/${boardId}/`;
+  const issues = issueFiles.map(f => {
+    const issue = parseIssue(f.content, `${boardPrefix}backlog/${f.name}`);
+    // Normalize blocked_by/blocks to full board-relative paths so dependency resolver matches
+    issue.blockedBy = issue.blockedBy.map(bp => bp.startsWith('boards/') ? bp : `${boardPrefix}${bp}`);
+    issue.blocks = issue.blocks.map(bp => bp.startsWith('boards/') ? bp : `${boardPrefix}${bp}`);
+    if (issue.epic && !issue.epic.startsWith('boards/')) issue.epic = `${boardPrefix}${issue.epic}`;
+    return issue;
+  });
 
   return { board, state, issues };
+}
+
+/** Parse all boards from the boards/ directory and resolve the active board. */
+function parseBoardCentricState(planDir: string): { boards: Board[]; workspace: Workspace; activeBoard: BoardFullState | null } {
+  const workspaceContent = readFileIfExists(join(planDir, 'workspace.json'));
+  const workspace = workspaceContent ? parseWorkspace(workspaceContent) : { activeBoardId: null, boardOrder: [] };
+
+  const boards: Board[] = [];
+  const boardsDir = join(planDir, 'boards');
+  if (existsSync(boardsDir)) {
+    for (const entry of readdirSync(boardsDir)) {
+      const boardMdPath = join(boardsDir, entry, 'board.md');
+      if (!existsSync(boardMdPath)) continue;
+      boards.push(parseBoard(readFileSync(boardMdPath, 'utf-8'), `boards/${entry}/board.md`));
+    }
+  }
+
+  const orderMap = new Map(workspace.boardOrder.map((id, i) => [id, i]));
+  boards.sort((a, b) => (orderMap.get(a.id) ?? 999) - (orderMap.get(b.id) ?? 999));
+
+  const activeBoard = workspace.activeBoardId ? parseBoardDirectory(planDir, workspace.activeBoardId) : null;
+  return { boards, workspace, activeBoard };
 }
 
 export function parsePlanDirectory(workingDir: string): PlanFullState | null {
   const planDir = resolvePmDir(workingDir);
   if (!planDir) return null;
 
-  // Auto-migrate legacy format to board-centric
-  if (isLegacyFormat(planDir)) {
-    migrateToBoards(planDir);
-  }
+  if (isLegacyFormat(planDir)) migrateToBoards(planDir);
 
-  // Parse project.md (always at root)
   const projectContent = readFileIfExists(join(planDir, 'project.md'));
   const project = projectContent ? parseProjectConfig(projectContent) : { ...defaultProject };
-
-  // Parse milestones (project-level)
   const milestoneFiles = readMdFilesInDir(join(planDir, 'milestones'));
   const milestones = milestoneFiles.map(f => parseMilestone(f.content, `milestones/${f.name}`));
 
-  // Board-centric format
-  if (isBoardCentricFormat(planDir)) {
-    const workspaceContent = readFileIfExists(join(planDir, 'workspace.json'));
-    const workspace = workspaceContent ? parseWorkspace(workspaceContent) : { activeBoardId: null, boardOrder: [] };
-
-    // Parse all board metadata
-    const boards: Board[] = [];
-    const boardsDir = join(planDir, 'boards');
-    if (existsSync(boardsDir)) {
-      for (const entry of readdirSync(boardsDir)) {
-        const boardMdPath = join(boardsDir, entry, 'board.md');
-        if (existsSync(boardMdPath)) {
-          const content = readFileSync(boardMdPath, 'utf-8');
-          boards.push(parseBoard(content, `boards/${entry}/board.md`));
-        }
-      }
-    }
-
-    // Sort boards by workspace.boardOrder
-    const orderMap = new Map(workspace.boardOrder.map((id, i) => [id, i]));
-    boards.sort((a, b) => (orderMap.get(a.id) ?? 999) - (orderMap.get(b.id) ?? 999));
-
-    // Load active board's full state
-    let activeBoard: BoardFullState | null = null;
-    if (workspace.activeBoardId) {
-      activeBoard = parseBoardDirectory(planDir, workspace.activeBoardId);
-    }
-
+  if (!isBoardCentricFormat(planDir)) {
     return {
-      project,
-      state: activeBoard?.state ?? { ...defaultState },
-      boards,
-      workspace,
-      activeBoard,
-      issues: activeBoard?.issues ?? [],
-      sprints: [],
-      milestones,
+      project, state: { ...defaultState }, boards: [], workspace: { activeBoardId: null, boardOrder: [] },
+      activeBoard: null, issues: [], sprints: [], milestones,
     };
   }
 
-  // Fallback: no boards, no backlog — empty project
+  const { boards, workspace, activeBoard } = parseBoardCentricState(planDir);
   return {
-    project,
-    state: { ...defaultState },
-    boards: [],
-    workspace: { activeBoardId: null, boardOrder: [] },
-    activeBoard: null,
-    issues: [],
-    sprints: [],
-    milestones,
+    project, state: activeBoard?.state ?? { ...defaultState },
+    boards, workspace, activeBoard, issues: activeBoard?.issues ?? [],
+    sprints: [], milestones,
   };
 }
 

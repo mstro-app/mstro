@@ -64,6 +64,8 @@ export class PlanExecutor extends EventEmitter {
   /** Board ID being executed (e.g. "BOARD-001") */
   private boardId: string | null = null;
   private configInstaller: ConfigInstaller;
+  /** Flag to prevent start() from clearing scope set by startBoard/startEpic */
+  private _scopeSetByCall = false;
   private metrics: ExecutionMetrics = {
     issuesCompleted: 0,
     issuesAttempted: 0,
@@ -83,12 +85,14 @@ export class PlanExecutor extends EventEmitter {
 
   async startEpic(epicPath: string): Promise<void> {
     this.epicScope = epicPath;
+    this._scopeSetByCall = true;
     return this.start();
   }
 
   /** Start execution, optionally scoped to a specific board. */
   async startBoard(boardId: string): Promise<void> {
     this.boardId = boardId;
+    this._scopeSetByCall = true;
     return this.start();
   }
 
@@ -97,6 +101,12 @@ export class PlanExecutor extends EventEmitter {
 
     this.shouldStop = false;
     this.shouldPause = false;
+    // Reset scoping from previous runs unless explicitly set by startBoard/startEpic
+    if (!this._scopeSetByCall) {
+      this.epicScope = null;
+      this.boardId = null;
+    }
+    this._scopeSetByCall = false;
     this.status = 'starting';
     this.emit('statusChanged', this.status);
 
@@ -106,31 +116,14 @@ export class PlanExecutor extends EventEmitter {
 
     this.boardDir = this.resolveBoardDir();
 
-    let consecutiveZeroCompletions = 0;
-
-    while (!this.shouldStop && !this.shouldPause) {
-      const readyIssues = this.pickReadyIssues();
-      if (readyIssues.length === 0) break;
-
-      const waveIssues = readyIssues.slice(0, MAX_WAVE_SIZE);
-      const completedCount = await this.executeWave(waveIssues);
-
-      if (completedCount > 0) {
-        consecutiveZeroCompletions = 0;
-      } else {
-        consecutiveZeroCompletions++;
-        if (consecutiveZeroCompletions >= MAX_CONSECUTIVE_EMPTY_WAVES) {
-          this.metrics.totalDuration = Date.now() - startTime;
-          this.status = 'error';
-          this.emit('statusChanged', this.status);
-          return;
-        }
-      }
-    }
+    const stallResult = await this.runWaveLoop();
 
     this.metrics.totalDuration = Date.now() - startTime;
 
-    if (this.shouldPause) {
+    if (stallResult === 'stalled') {
+      this.status = 'error';
+      this.emit('error', `Execution stalled: ${MAX_CONSECUTIVE_EMPTY_WAVES} consecutive waves completed zero issues. Issues may be stuck in review or failing repeatedly.`);
+    } else if (this.shouldPause) {
       this.status = 'paused';
     } else if (this.shouldStop) {
       this.status = 'idle';
@@ -140,12 +133,34 @@ export class PlanExecutor extends EventEmitter {
     this.emit('statusChanged', this.status);
   }
 
+  /** Run waves until done, paused, stopped, or stalled. Returns 'stalled' if zero-completion cap hit. */
+  private async runWaveLoop(): Promise<'done' | 'stalled'> {
+    let consecutiveZeroCompletions = 0;
+
+    while (!this.shouldStop && !this.shouldPause) {
+      const readyIssues = this.pickReadyIssues();
+      if (readyIssues.length === 0) break;
+
+      const completedCount = await this.executeWave(readyIssues.slice(0, MAX_WAVE_SIZE));
+
+      if (completedCount > 0) {
+        consecutiveZeroCompletions = 0;
+        continue;
+      }
+      consecutiveZeroCompletions++;
+      if (consecutiveZeroCompletions >= MAX_CONSECUTIVE_EMPTY_WAVES) return 'stalled';
+    }
+    return 'done';
+  }
+
   pause(): void { this.shouldPause = true; }
   stop(): void { this.shouldStop = true; }
 
   resume(): Promise<void> {
     if (this.status !== 'paused') return Promise.resolve();
     this.shouldPause = false;
+    // Preserve board/epic scope across resume by marking as a scoped call
+    this._scopeSetByCall = true;
     return this.start();
   }
 
@@ -173,6 +188,7 @@ export class PlanExecutor extends EventEmitter {
       issues,
       workingDir: this.workingDir,
       pmDir,
+      boardDir: this.boardDir,
       existingDocs,
       resolveOutputPath: (issue) => resolveOutputPath(issue, this.workingDir, this.boardDir),
     });
@@ -278,7 +294,14 @@ export class PlanExecutor extends EventEmitter {
         const currentStatus = statusMatch?.[1] ?? 'unknown';
 
         if (currentStatus === 'done') {
-          completed += await this.runReviewGate(issue, pmDir);
+          if (issue.reviewGate === 'none') {
+            // Skip review gate — accept agent's done status directly
+            this.metrics.issuesCompleted++;
+            this.emit('issueCompleted', issue);
+            completed++;
+          } else {
+            completed += await this.runReviewGate(issue, pmDir);
+          }
         } else {
           this.updateIssueFrontMatter(issue.path, issue.status);
           this.emit('issueError', {
@@ -296,7 +319,8 @@ export class PlanExecutor extends EventEmitter {
 
   /** Run the review gate for a single issue that agents marked as done. Returns 1 if passed, 0 otherwise. */
   private async runReviewGate(issue: Issue, pmDir: string): Promise<number> {
-    const attempts = getReviewAttemptCount(this.boardDir, issue);
+    const reviewDir = this.boardDir ?? pmDir;
+    const attempts = getReviewAttemptCount(reviewDir, issue);
     if (attempts >= MAX_REVIEW_ATTEMPTS) {
       this.updateIssueFrontMatter(issue.path, 'in_review');
       this.emit('reviewProgress', { issueId: issue.id, status: 'max_attempts' });
@@ -315,7 +339,7 @@ export class PlanExecutor extends EventEmitter {
       outputPath,
       onOutput: (text) => this.emit('output', { issueId: issue.id, text }),
     });
-    persistReviewResult(this.boardDir, issue, result);
+    persistReviewResult(reviewDir, issue, result);
 
     if (result.passed) {
       this.updateIssueFrontMatter(issue.path, 'done');
@@ -340,52 +364,69 @@ export class PlanExecutor extends EventEmitter {
   private pickReadyIssues(): Issue[] {
     const pmDir = resolvePmDir(this.workingDir);
     if (!pmDir) {
-      this.emit('error', 'No .pm/ directory found');
+      this.emit('error', 'No PM directory found');
       return [];
     }
 
-    // Determine which board to execute
     const effectiveBoardId = this.boardId ?? this.resolveActiveBoardId();
-    let issues: Issue[];
+    const issues = effectiveBoardId
+      ? this.loadBoardIssues(pmDir, effectiveBoardId)
+      : this.loadProjectIssues();
 
-    if (effectiveBoardId) {
-      const boardState = parseBoardDirectory(pmDir, effectiveBoardId);
-      if (!boardState) {
-        this.emit('error', `Board not found: ${effectiveBoardId}`);
-        return [];
-      }
-      if (boardState.state.paused) {
-        this.emit('error', 'Board is paused');
-        return [];
-      }
-      if (boardState.board.status !== 'active') {
-        this.emit('error', `Board ${effectiveBoardId} is not active (status: ${boardState.board.status})`);
-        return [];
-      }
-      issues = boardState.issues;
-    } else {
-      // Fallback: project-level issues (legacy or no boards)
-      const fullState = parsePlanDirectory(this.workingDir);
-      if (!fullState) {
-        this.emit('error', 'No .pm/ directory found');
-        return [];
-      }
-      if (fullState.state.paused) {
-        this.emit('error', 'Project is paused');
-        return [];
-      }
-      issues = fullState.issues;
-    }
+    if (!issues) return [];
 
     const readyIssues = resolveReadyToWork(issues, this.epicScope ?? undefined);
     if (readyIssues.length === 0) {
       this.emit('complete', this.epicScope ? 'All epic issues are done or blocked' : 'All work is done or blocked');
-      // Auto-complete the board if all issues are done
       if (effectiveBoardId) {
         this.tryCompleteBoardIfDone(pmDir, effectiveBoardId, issues);
       }
     }
     return readyIssues;
+  }
+
+  /** Load issues from a specific board, auto-activating draft boards. Returns null on error. */
+  private loadBoardIssues(pmDir: string, boardId: string): Issue[] | null {
+    const boardState = parseBoardDirectory(pmDir, boardId);
+    if (!boardState) {
+      this.emit('error', `Board not found: ${boardId}`);
+      return null;
+    }
+    if (boardState.state.paused) {
+      this.emit('error', 'Board is paused');
+      return null;
+    }
+    if (boardState.board.status === 'draft') {
+      this.activateBoard(pmDir, boardId);
+    } else if (boardState.board.status !== 'active') {
+      this.emit('error', `Board ${boardId} is not active (status: ${boardState.board.status})`);
+      return null;
+    }
+    return boardState.issues;
+  }
+
+  /** Load project-level issues (legacy or no boards). Returns null on error. */
+  private loadProjectIssues(): Issue[] | null {
+    const fullState = parsePlanDirectory(this.workingDir);
+    if (!fullState) {
+      this.emit('error', 'No PM directory found');
+      return null;
+    }
+    if (fullState.state.paused) {
+      this.emit('error', 'Project is paused');
+      return null;
+    }
+    return fullState.issues;
+  }
+
+  /** Activate a draft board by updating its status in board.md. */
+  private activateBoard(pmDir: string, boardId: string): void {
+    const boardMdPath = join(pmDir, 'boards', boardId, 'board.md');
+    if (!existsSync(boardMdPath)) return;
+    try {
+      const content = readFileSync(boardMdPath, 'utf-8');
+      writeFileSync(boardMdPath, replaceFrontMatterField(content, 'status', 'active'), 'utf-8');
+    } catch { /* non-fatal — pickReadyIssues will re-check */ }
   }
 
   /** Check if all issues in a board are done and mark board as completed. */

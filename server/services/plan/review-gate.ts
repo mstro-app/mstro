@@ -65,10 +65,10 @@ export async function reviewIssue(options: ReviewIssueOptions): Promise<ReviewRe
   }
 }
 
-/** Count existing review result files for this issue in the sprint sandbox. */
-export function getReviewAttemptCount(sprintSandboxDir: string | null, issue: Issue): number {
-  if (!sprintSandboxDir) return 0;
-  const reviewsDir = join(sprintSandboxDir, 'reviews');
+/** Count existing review result files for this issue in the board/sprint directory. */
+export function getReviewAttemptCount(boardOrSandboxDir: string | null, issue: Issue): number {
+  if (!boardOrSandboxDir) return 0;
+  const reviewsDir = join(boardOrSandboxDir, 'reviews');
   if (!existsSync(reviewsDir)) return 0;
   try {
     return readdirSync(reviewsDir).filter(f => f.startsWith(issue.id) && f.endsWith('.json')).length;
@@ -77,10 +77,10 @@ export function getReviewAttemptCount(sprintSandboxDir: string | null, issue: Is
   }
 }
 
-/** Persist a review result as JSON in the sprint sandbox reviews directory. */
-export function persistReviewResult(sprintSandboxDir: string | null, issue: Issue, result: ReviewResult): void {
-  if (!sprintSandboxDir) return;
-  const reviewsDir = join(sprintSandboxDir, 'reviews');
+/** Persist a review result as JSON in the board/sprint reviews directory. */
+export function persistReviewResult(boardOrSandboxDir: string | null, issue: Issue, result: ReviewResult): void {
+  if (!boardOrSandboxDir) return;
+  const reviewsDir = join(boardOrSandboxDir, 'reviews');
   if (!existsSync(reviewsDir)) mkdirSync(reviewsDir, { recursive: true });
   try {
     writeFileSync(
@@ -109,23 +109,38 @@ export function appendReviewFeedback(pmDir: string, issue: Issue, result: Review
   } catch { /* non-fatal */ }
 }
 
+/** Extract the outermost JSON object from AI output using brace balancing. */
+function extractJsonObject(text: string): string | null {
+  const start = text.indexOf('{');
+  if (start === -1) return null;
+  let depth = 0;
+  for (let i = start; i < text.length; i++) {
+    if (text[i] === '{') depth++;
+    else if (text[i] === '}') depth--;
+    if (depth === 0) return text.slice(start, i + 1);
+  }
+  return null;
+}
+
 /** Parse structured JSON review output from AI response. */
 export function parseReviewOutput(issueId: string, issueType: ReviewResult['issueType'], output: string): ReviewResult {
-  const jsonMatch = output.match(/\{[\s\S]*?"passed"[\s\S]*?"checks"[\s\S]*?\}/);
-  if (jsonMatch) {
+  const jsonStr = extractJsonObject(output);
+  if (jsonStr) {
     try {
-      const parsed = JSON.parse(jsonMatch[0]);
-      return {
-        issueId,
-        issueType,
-        passed: !!parsed.passed,
-        checks: Array.isArray(parsed.checks) ? parsed.checks.map((c: Record<string, unknown>) => ({
-          name: String(c.name ?? 'unknown'),
-          passed: !!c.passed,
-          details: String(c.details ?? ''),
-        } satisfies ReviewCheck)) : [],
-        reviewedAt: new Date().toISOString(),
-      };
+      const parsed = JSON.parse(jsonStr);
+      if (typeof parsed.passed === 'boolean' || typeof parsed.passed === 'number') {
+        return {
+          issueId,
+          issueType,
+          passed: !!parsed.passed,
+          checks: Array.isArray(parsed.checks) ? parsed.checks.map((c: Record<string, unknown>) => ({
+            name: String(c.name ?? 'unknown'),
+            passed: !!c.passed,
+            details: String(c.details ?? ''),
+          } satisfies ReviewCheck)) : [],
+          reviewedAt: new Date().toISOString(),
+        };
+      }
     } catch { /* fall through */ }
   }
   return autoPassResult(issueId, issueType, 'Could not parse review output');
@@ -137,6 +152,7 @@ export function autoPassResult(issueId: string, issueType: ReviewResult['issueTy
     issueId,
     issueType,
     passed: true,
+    autoPass: true,
     checks: [{ name: 'review_infrastructure', passed: true, details: `${reason}; auto-passing` }],
     reviewedAt: new Date().toISOString(),
   };

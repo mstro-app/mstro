@@ -15,6 +15,8 @@ export interface CoordinatorPromptOptions {
   issues: Issue[];
   workingDir: string;
   pmDir: string | null;
+  /** Board directory path when executing a board (e.g. /path/.pm/boards/BOARD-001). */
+  boardDir: string | null;
   existingDocs: string[];
   resolveOutputPath: (issue: Issue) => string;
 }
@@ -25,8 +27,8 @@ export interface CoordinatorPromptOptions {
  * its own context window and sends idle notifications when done.
  */
 export function buildCoordinatorPrompt(options: CoordinatorPromptOptions): string {
-  const { issues, workingDir, pmDir, existingDocs, resolveOutputPath } = options;
-  const outDir = pmDir ? join(pmDir, 'out') : join(workingDir, '.pm', 'out');
+  const { issues, workingDir, pmDir, boardDir, existingDocs, resolveOutputPath } = options;
+  const outDir = boardDir ? join(boardDir, 'out') : pmDir ? join(pmDir, 'out') : join(workingDir, '.mstro', 'pm', 'out');
 
   const issueBlocks = issues.map(issue => {
     const criteria = issue.acceptanceCriteria
@@ -86,7 +88,7 @@ ${files}${predecessorSection}
 
 ## Project Directory
 Working directory: ${workingDir}
-Plan directory: ${pmDir || '.pm/'}
+Plan directory: ${pmDir || '.mstro/pm/'}
 
 ## Issues to Execute
 

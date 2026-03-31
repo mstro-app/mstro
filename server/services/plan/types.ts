@@ -92,6 +92,8 @@ export interface Issue {
   children: string[];
   // Progress (for epics)
   progress: string | null;
+  // Review gate mode (none = skip review, auto = AI review, required = human review)
+  reviewGate: 'none' | 'auto' | 'required';
   // Planned output file path (from front matter output_file, relative to working dir)
   outputFile: string | null;
   // Full markdown body
@@ -203,6 +205,8 @@ export interface ReviewResult {
   issueId: string;
   issueType: 'code' | 'non-code';
   passed: boolean;
+  /** True when the review passed due to infrastructure failure, not genuine quality check */
+  autoPass?: boolean;
   checks: ReviewCheck[];
   reviewedAt: string;
 }

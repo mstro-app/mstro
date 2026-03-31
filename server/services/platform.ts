@@ -21,6 +21,16 @@ import { AnalyticsEvents, trackEvent } from './analytics.js'
 import { getClientId } from './client-id.js'
 import { captureException } from './sentry.js'
 
+// Read CLI version from package.json once at import time
+const CLI_VERSION = (() => {
+  try {
+    const pkg = JSON.parse(readFileSync(join(import.meta.dirname || '.', '..', 'package.json'), 'utf-8'))
+    return pkg.version || '0.0.0'
+  } catch {
+    return '0.0.0'
+  }
+})()
+
 const MSTRO_DIR = join(homedir(), '.mstro')
 const CREDENTIALS_FILE = join(MSTRO_DIR, 'credentials.json')
 
@@ -271,6 +281,7 @@ export class PlatformConnection {
       nodeVersion,
       osType,
       cpuArch,
+      cliVersion: CLI_VERSION,
       capabilities: JSON.stringify({})
     })
 

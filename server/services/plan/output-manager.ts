@@ -9,7 +9,7 @@
 
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { resolvePmDir } from './parser.js';
+import { defaultPmDir, resolvePmDir } from './parser.js';
 import type { Issue } from './types.js';
 
 /** Convert a title to a URL-friendly slug (max 60 chars). */
@@ -30,7 +30,7 @@ export function resolveOutputPath(issue: Issue, workingDir: string, sprintSandbo
     return join(sprintSandboxDir, 'out', `${issue.id}-${slugify(issue.title)}.md`);
   }
   const pmDir = resolvePmDir(workingDir);
-  const outDir = pmDir ? join(pmDir, 'out') : join(workingDir, '.pm', 'out');
+  const outDir = pmDir ? join(pmDir, 'out') : join(defaultPmDir(workingDir), 'out');
   return join(outDir, `${issue.id}-${slugify(issue.title)}.md`);
 }
 

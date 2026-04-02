@@ -29,6 +29,8 @@ export interface ReviewIssueOptions {
   pmDir: string;
   outputPath: string;
   onOutput?: (text: string) => void;
+  /** Board-scoped log directory for execution logs. Falls back to global ~/.mstro/logs/headless/ */
+  logDir?: string;
 }
 
 /**
@@ -36,7 +38,7 @@ export interface ReviewIssueOptions {
  * Returns auto-pass on infrastructure failures to avoid blocking execution.
  */
 export async function reviewIssue(options: ReviewIssueOptions): Promise<ReviewResult> {
-  const { workingDir, issue, pmDir, outputPath, onOutput } = options;
+  const { workingDir, issue, pmDir, outputPath, onOutput, logDir } = options;
   const isCodeTask = issue.filesToModify.length > 0;
   const issueType: ReviewResult['issueType'] = isCodeTask ? 'code' : 'non-code';
 
@@ -53,7 +55,7 @@ export async function reviewIssue(options: ReviewIssueOptions): Promise<ReviewRe
       outputCallback: onOutput ? (text: string) => onOutput(`Review: ${text}`) : undefined,
     });
 
-    const result = await runWithFileLogger('pm-review', () => runner.run());
+    const result = await runWithFileLogger('pm-review', () => runner.run(), logDir);
 
     if (result.completed && result.assistantResponse) {
       return parseReviewOutput(issue.id, issueType, result.assistantResponse);

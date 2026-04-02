@@ -9,110 +9,32 @@
  */
 
 import { EventEmitter } from 'node:events';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { AnalyticsEvents, trackEvent } from '../services/analytics.js';
-import { herror, hlog } from './headless/headless-logger.js';
-import { HeadlessRunner } from './headless/index.js';
-import { assessBestResult, assessContextLoss, assessPrematureCompletion, type ContextLossContext } from './headless/stall-assessor.js';
-import type { ExecutionCheckpoint } from './headless/types.js';
+import { herror } from './headless/headless-logger.js';
+import { cleanupAttachments, preparePromptAndAttachments } from './improvisation-attachments.js';
+import type { RetryCallbacks, RetrySessionState } from './improvisation-retry.js';
+import {applyToolTimeoutRetry, 
+  createExecutionRunner,detectNativeTimeoutContextLoss, detectResumeContextLoss, 
+  determineResumeStrategy,
+  selectBestResult,
+  shouldRetryContextLoss,
+  shouldRetryPrematureCompletion,
+  shouldRetrySignalCrash
+} from './improvisation-retry.js';
+import type { FileAttachment, HeadlessRunResult, ImprovisationOptions, MovementRecord, RetryLoopState, SessionHistory } from './improvisation-types.js';
+import { scoreRunResult } from './improvisation-types.js';
 
-export interface ImprovisationOptions {
-  workingDir: string;
-  sessionId: string;
-  tokenBudgetThreshold: number;
-  maxSessions: number;
-  verbose: boolean;
-  noColor: boolean;
-  /** Claude model for main execution (e.g., 'opus', 'sonnet'). 'default' = no --model flag. */
-  model?: string;
-}
+// Re-export types consumed by other packages
+export type { FileAttachment, ImprovisationOptions, MovementRecord, SessionHistory, ToolUseRecord } from './improvisation-types.js';
 
-// File attachment for multimodal prompts (images)
-export interface FileAttachment {
-  fileName: string;       // Display name (e.g., "screenshot.png")
-  filePath: string;       // Full path on disk (for context)
-  content: string;        // Base64 for images
-  isImage: boolean;       // True for image files
-  mimeType?: string;      // MIME type for images (e.g., "image/png")
-}
-
-export interface ToolUseRecord {
-  toolName: string;
-  toolId: string;
-  toolInput: Record<string, unknown>;
-  result?: string;
-  isError?: boolean;
-  duration?: number;
-}
-
-export interface MovementRecord {
-  id: string;
-  sequenceNumber: number;
-  userPrompt: string;
-  timestamp: string;
-  tokensUsed: number;
-  summary: string;
-  filesModified: string[];
-  // NEW: Persisted output fields
-  assistantResponse?: string;      // Claude's text output
-  thinkingOutput?: string;         // Extended thinking
-  toolUseHistory?: ToolUseRecord[];// Tool invocations + results
-  errorOutput?: string;            // Any errors
-  durationMs?: number;             // Execution duration in milliseconds
-  retryLog?: RetryLogEntry[];      // Auto-retry events during execution
-}
-
-export interface SessionHistory {
-  sessionId: string;
-  startedAt: string;
-  lastActivityAt: string;
-  totalTokens: number;
-  movements: MovementRecord[];
-  claudeSessionId?: string;
-}
-
-
-/** Entry in the retry log for debugging recovery paths */
-interface RetryLogEntry {
-  retryNumber: number;
-  path: string;
-  reason: string;
-  timestamp: number;
-  durationMs?: number;
-}
-
-/** Mutable state for the retry loop in executePrompt */
-interface RetryLoopState {
-  currentPrompt: string;
-  retryNumber: number;
-  checkpointRef: { value: ExecutionCheckpoint | null };
-  contextRecoverySessionId: string | undefined;
-  freshRecoveryMode: boolean;
-  accumulatedToolResults: ToolUseRecord[];
-  contextLost: boolean;
-  lastWatchdogCheckpoint: ExecutionCheckpoint | null;
-  timedOutTools: Array<{ toolName: string; input: Record<string, unknown>; timeoutMs: number }>;
-  bestResult: HeadlessRunResult | null;
-  retryLog: RetryLogEntry[];
-}
-
-/** Type alias for HeadlessRunner execution result */
-type HeadlessRunResult = Awaited<ReturnType<HeadlessRunner['run']>>;
-
-/** Score a run result for best-result tracking (higher = more productive) */
-function scoreRunResult(r: HeadlessRunResult): number {
-  const toolCount = r.toolUseHistory?.filter(t => t.result !== undefined && !t.isError).length ?? 0;
-  const responseLen = Math.min((r.assistantResponse?.length ?? 0) / 50, 100);
-  const hasThinking = r.thinkingOutput ? 20 : 0;
-  return toolCount * 10 + responseLen + hasThinking;
-}
 export class ImprovisationSessionManager extends EventEmitter {
   private sessionId: string;
   private improviseDir: string;
   private historyPath: string;
   private history: SessionHistory;
-  private currentRunner: HeadlessRunner | null = null;
+  private currentRunner: import('./headless/index.js').HeadlessRunner | null = null;
   private options: ImprovisationOptions;
   private pendingApproval?: {
     plan: unknown;
@@ -120,35 +42,21 @@ export class ImprovisationSessionManager extends EventEmitter {
   };
   private outputQueue: Array<{ text: string; timestamp: number }> = [];
   private queueTimer: NodeJS.Timeout | null = null;
-  private isFirstPrompt: boolean = true; // Track if this is the first prompt (no --resume needed)
-  private claudeSessionId: string | undefined; // Claude CLI session ID for tab isolation
-  private isResumedSession: boolean = false; // Track if this is a resumed historical session
+  private isFirstPrompt: boolean = true;
+  private claudeSessionId: string | undefined;
+  private isResumedSession: boolean = false;
   accumulatedKnowledge: string = '';
 
-  /** Whether a prompt is currently executing */
   private _isExecuting: boolean = false;
-  /** Timestamp when current execution started (for accurate elapsed time across reconnects) */
   private _executionStartTimestamp: number | undefined;
-  /** Buffered events during current execution, for replay on reconnect */
   private executionEventLog: Array<{ type: string; data: unknown; timestamp: number }> = [];
-  /** Set by cancel() to signal the retry loop to exit */
   private _cancelled: boolean = false;
-  /** True when cancel() has already emitted movementComplete (prevents double-emit) */
   private _cancelCompleteEmitted: boolean = false;
-  /** Current execution's user prompt (for cancel to build movement record) */
   private _currentUserPrompt: string = '';
-  /** Current execution's sequence number (for cancel to build movement record) */
   private _currentSequenceNumber: number = 0;
 
-  /**
-   * Resume from a historical session.
-   * Creates a new session manager that continues the conversation from a previous session.
-   * The first prompt will include context from the historical session.
-   */
   static resumeFromHistory(workingDir: string, historicalSessionId: string, overrides?: Partial<ImprovisationOptions>): ImprovisationSessionManager {
     const historyDir = join(workingDir, '.mstro', 'history');
-
-    // Extract timestamp from session ID (format: improv-1234567890123 or just 1234567890123)
     const timestamp = historicalSessionId.replace('improv-', '');
     const historyPath = join(historyDir, `${timestamp}.json`);
 
@@ -156,31 +64,21 @@ export class ImprovisationSessionManager extends EventEmitter {
       throw new Error(`Historical session not found: ${historicalSessionId}`);
     }
 
-    // Read the historical session
     const historyData = JSON.parse(readFileSync(historyPath, 'utf-8')) as SessionHistory;
-
-    // Create a new session manager with the SAME session ID
-    // This ensures we continue writing to the same history file
     const manager = new ImprovisationSessionManager({
       workingDir,
       sessionId: historyData.sessionId,
       ...overrides,
     });
 
-    // Load the historical data
     manager.history = historyData;
-
-    // Build accumulated knowledge from historical movements
     manager.accumulatedKnowledge = historyData.movements
       .filter(m => m.summary)
       .map(m => m.summary)
       .join('\n\n');
 
-    // Restore Claude session ID if available so we can --resume the actual conversation
-    // NOTE: Always mark as resumed session so historical context can be injected as fallback
-    // if the Claude CLI session has expired (e.g., client was restarted)
     manager.isResumedSession = true;
-    manager.isFirstPrompt = true; // Always true so historical context is injected on first prompt
+    manager.isFirstPrompt = true;
     if (historyData.claudeSessionId) {
       manager.claudeSessionId = historyData.claudeSessionId;
     }
@@ -205,132 +103,33 @@ export class ImprovisationSessionManager extends EventEmitter {
     this.improviseDir = join(this.options.workingDir, '.mstro', 'history');
     this.historyPath = join(this.improviseDir, `${this.sessionId.replace('improv-', '')}.json`);
 
-    // Ensure history directory exists
     if (!existsSync(this.improviseDir)) {
       mkdirSync(this.improviseDir, { recursive: true });
     }
 
-    // Load or initialize history
     this.history = this.loadHistory();
-
-    // Start output queue processor
     this.startQueueProcessor();
   }
 
-  /**
-   * Start background queue processor that flushes output immediately
-   */
+  // ========== Output Queue ==========
+
   private startQueueProcessor(): void {
-    this.queueTimer = setInterval(() => {
-      this.flushOutputQueue();
-    }, 10); // Process queue every 10ms for near-instant output
+    this.queueTimer = setInterval(() => { this.flushOutputQueue(); }, 10);
   }
 
-  /**
-   * Queue output for immediate processing
-   */
   private queueOutput(text: string): void {
     this.outputQueue.push({ text, timestamp: Date.now() });
   }
 
-  /**
-   * Flush all queued output immediately
-   */
   private flushOutputQueue(): void {
     while (this.outputQueue.length > 0) {
       const item = this.outputQueue.shift();
-      if (item) {
-        this.emit('onOutput', item.text);
-      }
+      if (item) this.emit('onOutput', item.text);
     }
   }
 
-  /**
-   * Build prompt with text file attachments prepended and disk path references
-   * Format: each text file is shown as @path followed by content in code block
-   */
-  private buildPromptWithAttachments(userPrompt: string, attachments?: FileAttachment[], diskPaths?: string[]): string {
-    if ((!attachments || attachments.length === 0) && (!diskPaths || diskPaths.length === 0)) {
-      return userPrompt;
-    }
+  // ========== Main Execution ==========
 
-    const parts: string[] = [];
-
-    // Filter to text files only (non-images)
-    if (attachments) {
-      const textFiles = attachments.filter(a => !a.isImage);
-      for (const file of textFiles) {
-        parts.push(`@${file.filePath}\n\`\`\`\n${file.content}\n\`\`\``);
-      }
-    }
-
-    // Add disk path references for all persisted files
-    if (diskPaths && diskPaths.length > 0) {
-      parts.push(`Attached files saved to disk:\n${diskPaths.map(p => `- ${p}`).join('\n')}`);
-    }
-
-    if (parts.length === 0) {
-      return userPrompt;
-    }
-
-    return `${parts.join('\n\n')}\n\n${userPrompt}`;
-  }
-
-  /**
-   * Write attachments to disk at .mstro/tmp/attachments/{sessionId}/
-   * Returns array of absolute file paths for each persisted attachment.
-   */
-  private persistAttachments(attachments: FileAttachment[]): string[] {
-    if (attachments.length === 0) return [];
-
-    const attachDir = join(this.options.workingDir, '.mstro', 'tmp', 'attachments', this.sessionId);
-    if (!existsSync(attachDir)) {
-      mkdirSync(attachDir, { recursive: true });
-    }
-
-    const paths: string[] = [];
-    for (const attachment of attachments) {
-      // Pre-uploaded files are already on disk from chunked upload
-      if ((attachment as FileAttachment & { _preUploaded?: boolean })._preUploaded) {
-        if (existsSync(attachment.filePath)) {
-          paths.push(attachment.filePath);
-        }
-        continue;
-      }
-      const filePath = join(attachDir, attachment.fileName);
-      try {
-        // All paste content arrives as base64 — decode to binary
-        writeFileSync(filePath, Buffer.from(attachment.content, 'base64'));
-        paths.push(filePath);
-      } catch (err) {
-        herror(`Failed to persist attachment ${attachment.fileName}:`, err);
-      }
-    }
-
-    return paths;
-  }
-
-  /**
-   * Clean up persisted attachments for this session
-   */
-  private cleanupAttachments(): void {
-    const attachDir = join(this.options.workingDir, '.mstro', 'tmp', 'attachments', this.sessionId);
-    if (existsSync(attachDir)) {
-      try {
-        rmSync(attachDir, { recursive: true, force: true });
-      } catch {
-        // Ignore cleanup errors
-      }
-    }
-  }
-
-
-  /**
-   * Execute a user prompt directly (Improvise mode - no score decomposition)
-   * Uses persistent Claude sessions via --resume <sessionId> for conversation continuity
-   * Each tab maintains its own claudeSessionId for proper isolation
-   * Supports file attachments: text files prepended to prompt, images via stream-json multimodal
-   */
   async executePrompt(userPrompt: string, attachments?: FileAttachment[], options?: { sandboxed?: boolean; workingDir?: string }): Promise<MovementRecord> {
     const _execStart = Date.now();
     this._isExecuting = true;
@@ -360,7 +159,10 @@ export class ImprovisationSessionManager extends EventEmitter {
         timestamp: Date.now(),
       });
 
-      const { prompt: promptWithAttachments, imageAttachments } = this.preparePromptAndAttachments(userPrompt, attachments);
+      const { prompt: promptWithAttachments, imageAttachments } = preparePromptAndAttachments(
+        userPrompt, attachments, this.options.workingDir, this.sessionId,
+        (msg) => { this.queueOutput(msg); this.flushOutputQueue(); },
+      );
       const state: RetryLoopState = {
         currentPrompt: promptWithAttachments,
         retryNumber: 0,
@@ -377,15 +179,12 @@ export class ImprovisationSessionManager extends EventEmitter {
 
       let result = await this.runRetryLoop(state, sequenceNumber, promptWithAttachments, imageAttachments, options?.sandboxed, options?.workingDir);
 
-      // If cancelled, emit a minimal movement and return early
       if (this._cancelled) {
         return this.handleCancelledExecution(result, userPrompt, sequenceNumber, _execStart);
       }
 
       if (state.contextLost) this.claudeSessionId = undefined;
-      // result is guaranteed assigned here: the loop always runs at least once (if _cancelled was
-      // true before the loop, we returned in the block above; otherwise runner.run() assigned it).
-      result = await this.selectBestResult(state, result!, userPrompt);
+      result = await selectBestResult(state, result!, userPrompt, this.options.verbose);
       this.captureSessionAndSurfaceErrors(result);
       this.isFirstPrompt = false;
 
@@ -421,7 +220,114 @@ export class ImprovisationSessionManager extends EventEmitter {
     }
   }
 
-  // ========== Extracted helpers for executePrompt ==========
+  // ========== Retry Loop ==========
+
+  private buildRetryCallbacks(): RetryCallbacks {
+    return {
+      isCancelled: () => this._cancelled,
+      queueOutput: (text) => this.queueOutput(text),
+      flushOutputQueue: () => this.flushOutputQueue(),
+      emit: (event, ...args) => this.emit(event, ...args),
+      addEventLog: (entry) => this.executionEventLog.push(entry),
+      setRunner: (runner) => { this.currentRunner = runner; },
+    };
+  }
+
+  private buildRetrySessionState(): RetrySessionState {
+    return {
+      options: this.options,
+      claudeSessionId: this.claudeSessionId,
+      isFirstPrompt: this.isFirstPrompt,
+      isResumedSession: this.isResumedSession,
+      history: this.history,
+      executionStartTimestamp: this._executionStartTimestamp,
+    };
+  }
+
+  private syncSessionStateBack(session: RetrySessionState): void {
+    if (session.claudeSessionId !== this.claudeSessionId) {
+      this.claudeSessionId = session.claudeSessionId;
+    }
+  }
+
+  private async runRetryLoop(
+    state: RetryLoopState,
+    sequenceNumber: number,
+    promptWithAttachments: string,
+    imageAttachments: FileAttachment[] | undefined,
+    sandboxed: boolean | undefined,
+    workingDirOverride: string | undefined,
+  ): Promise<HeadlessRunResult | undefined> {
+    const maxRetries = 3;
+    let result: HeadlessRunResult | undefined;
+    const callbacks = this.buildRetryCallbacks();
+
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      if (this._cancelled) break;
+      const iteration = await this.executeRetryIteration(state, callbacks, sequenceNumber, imageAttachments, sandboxed, workingDirOverride);
+      result = iteration.result;
+      if (this._cancelled) break;
+      if (await this.evaluateRetryStrategies(result, state, iteration.useResume, iteration.nativeTimeouts, maxRetries, promptWithAttachments, callbacks)) continue;
+      break;
+    }
+    return result;
+  }
+
+  /** Run a single iteration: spawn runner, execute, detect context loss */
+  private async executeRetryIteration(
+    state: RetryLoopState,
+    callbacks: RetryCallbacks,
+    sequenceNumber: number,
+    imageAttachments: FileAttachment[] | undefined,
+    sandboxed: boolean | undefined,
+    workingDirOverride: string | undefined,
+  ): Promise<{ result: HeadlessRunResult; useResume: boolean; nativeTimeouts: number }> {
+    if (state.checkpointRef.value) state.lastWatchdogCheckpoint = state.checkpointRef.value;
+    state.checkpointRef.value = null;
+    state.contextLost = false;
+
+    const session = this.buildRetrySessionState();
+    const { useResume, resumeSessionId } = determineResumeStrategy(state, session);
+    const runner = createExecutionRunner(state, session, callbacks, sequenceNumber, useResume, resumeSessionId, imageAttachments, sandboxed, workingDirOverride);
+    this.currentRunner = runner;
+    const result = await runner.run();
+    this.currentRunner = null;
+
+    if (!state.bestResult || scoreRunResult(result) > scoreRunResult(state.bestResult)) {
+      state.bestResult = result;
+    }
+    const nativeTimeouts = result.nativeTimeoutCount ?? 0;
+    detectResumeContextLoss(result, state, useResume, 3, nativeTimeouts, this.options.verbose);
+    await detectNativeTimeoutContextLoss(result, state, 3, nativeTimeouts, this.options.verbose);
+    if (!state.contextLost && result.postTimeoutOutput) {
+      this.queueOutput(result.postTimeoutOutput);
+      this.flushOutputQueue();
+    }
+    return { result, useResume, nativeTimeouts };
+  }
+
+  /** Evaluate all retry strategies. Returns true if the loop should continue. */
+  private async evaluateRetryStrategies(
+    result: HeadlessRunResult,
+    state: RetryLoopState,
+    useResume: boolean,
+    nativeTimeouts: number,
+    maxRetries: number,
+    promptWithAttachments: string,
+    callbacks: RetryCallbacks,
+  ): Promise<boolean> {
+    const session = this.buildRetrySessionState();
+
+    if (shouldRetrySignalCrash(result, state, session, maxRetries, promptWithAttachments, callbacks)) { this.syncSessionStateBack(session); return true; }
+    if (shouldRetryContextLoss(result, state, session, useResume, nativeTimeouts, maxRetries, promptWithAttachments, callbacks)) { this.syncSessionStateBack(session); return true; }
+    if (applyToolTimeoutRetry(state, maxRetries, promptWithAttachments, callbacks, this.options.model)) return true;
+    if (await shouldRetryPrematureCompletion(result, state, session, maxRetries, callbacks)) { this.syncSessionStateBack(session); return true; }
+    this.syncSessionStateBack(session);
+    return false;
+  }
+
+  // ========== Cancel Handling ==========
 
   private handleCancelledExecution(
     result: HeadlessRunResult | undefined,
@@ -434,8 +340,6 @@ export class ImprovisationSessionManager extends EventEmitter {
     this.executionEventLog = [];
     this.currentRunner = null;
 
-    // If cancel() already emitted movementComplete, just clean up state —
-    // don't double-emit or double-persist.
     if (this._cancelCompleteEmitted) {
       const existing = this.history.movements.find(m => m.sequenceNumber === sequenceNumber);
       if (existing) return existing;
@@ -452,9 +356,7 @@ export class ImprovisationSessionManager extends EventEmitter {
       assistantResponse: result?.assistantResponse,
       thinkingOutput: result?.thinkingOutput,
       toolUseHistory: result?.toolUseHistory?.map(t => ({
-        toolName: t.toolName,
-        toolId: t.toolId,
-        toolInput: t.toolInput,
+        toolName: t.toolName, toolId: t.toolId, toolInput: t.toolInput,
         result: t.result,
       })),
       errorOutput: 'Execution cancelled by user',
@@ -469,719 +371,8 @@ export class ImprovisationSessionManager extends EventEmitter {
     return cancelledMovement;
   }
 
-  private async runRetryLoop(
-    state: RetryLoopState,
-    sequenceNumber: number,
-    promptWithAttachments: string,
-    imageAttachments: FileAttachment[] | undefined,
-    sandboxed: boolean | undefined,
-    workingDirOverride: string | undefined,
-  ): Promise<HeadlessRunResult | undefined> {
-    const maxRetries = 3;
-    let result: HeadlessRunResult | undefined;
+  // ========== Post-Execution Helpers ==========
 
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
-      if (this._cancelled) break;
-      this.resetIterationState(state);
-
-      const { useResume, resumeSessionId } = this.determineResumeStrategy(state);
-      const runner = this.createExecutionRunner(state, sequenceNumber, useResume, resumeSessionId, imageAttachments, sandboxed, workingDirOverride);
-      this.currentRunner = runner;
-      result = await runner.run();
-      this.currentRunner = null;
-
-      if (this._cancelled) break;
-
-      this.updateBestResult(state, result);
-      const nativeTimeouts = result.nativeTimeoutCount ?? 0;
-      this.detectResumeContextLoss(result, state, useResume, maxRetries, nativeTimeouts);
-      await this.detectNativeTimeoutContextLoss(result, state, maxRetries, nativeTimeouts);
-      this.flushPostTimeoutOutput(result, state);
-
-      // Signal crashes checked first: they use --resume (lighter), and context loss
-      // recovery would clear the session ID, preventing future --resume attempts.
-      if (this.shouldRetrySignalCrash(result, state, maxRetries, promptWithAttachments)) continue;
-      if (this.shouldRetryContextLoss(result, state, useResume, nativeTimeouts, maxRetries, promptWithAttachments)) continue;
-      if (this.applyToolTimeoutRetry(state, maxRetries, promptWithAttachments)) continue;
-      // Premature completion: model exited normally but task appears incomplete
-      if (await this.shouldRetryPrematureCompletion(result, state, maxRetries)) continue;
-      break;
-    }
-    return result;
-  }
-
-  /** MIME types that the Claude API can accept as image content blocks */
-  private static readonly SUPPORTED_IMAGE_MIMES = new Set([
-    'image/jpeg', 'image/png', 'image/gif', 'image/webp',
-  ]);
-
-  /** Hydrate pre-uploaded images from disk and downgrade unsupported formats */
-  private hydrateAndFilterAttachments(attachments: FileAttachment[]): void {
-    for (const attachment of attachments) {
-      // Pre-uploaded images need their content read from disk
-      const preUploaded = (attachment as FileAttachment & { _preUploaded?: boolean })._preUploaded;
-      if (preUploaded && attachment.isImage && !attachment.content && existsSync(attachment.filePath)) {
-        try {
-          attachment.content = readFileSync(attachment.filePath).toString('base64');
-        } catch (err) {
-          herror(`Failed to read pre-uploaded image ${attachment.filePath}:`, err);
-          attachment.isImage = false;
-        }
-      }
-
-      // Downgrade unsupported image formats (SVG, BMP, TIFF, ICO, etc.) to text attachments
-      if (attachment.isImage) {
-        const mime = (attachment.mimeType || '').toLowerCase();
-        if (mime && !ImprovisationSessionManager.SUPPORTED_IMAGE_MIMES.has(mime)) {
-          attachment.isImage = false;
-        }
-      }
-    }
-  }
-
-  /** Prepare prompt with attachments and limit image count */
-  private preparePromptAndAttachments(
-    userPrompt: string,
-    attachments: FileAttachment[] | undefined,
-  ): { prompt: string; imageAttachments: FileAttachment[] | undefined } {
-    if (attachments) {
-      this.hydrateAndFilterAttachments(attachments);
-    }
-
-    const diskPaths = attachments ? this.persistAttachments(attachments) : [];
-    const prompt = this.buildPromptWithAttachments(userPrompt, attachments, diskPaths);
-
-    const MAX_IMAGE_ATTACHMENTS = 20;
-    // Only include images that have valid content
-    const allImages = attachments?.filter(a => a.isImage && a.content);
-    let imageAttachments = allImages;
-    if (allImages && allImages.length > MAX_IMAGE_ATTACHMENTS) {
-      imageAttachments = allImages.slice(-MAX_IMAGE_ATTACHMENTS);
-      this.queueOutput(
-        `\n[[MSTRO_ERROR:TOO_MANY_IMAGES]] ${allImages.length} images attached, limit is ${MAX_IMAGE_ATTACHMENTS}. Using the ${MAX_IMAGE_ATTACHMENTS} most recent.\n`
-      );
-      this.flushOutputQueue();
-    }
-
-    return { prompt, imageAttachments };
-  }
-
-  /** Determine whether to use --resume and which session ID */
-  private determineResumeStrategy(state: RetryLoopState): { useResume: boolean; resumeSessionId: string | undefined } {
-    if (state.freshRecoveryMode) {
-      state.freshRecoveryMode = false;
-      return { useResume: false, resumeSessionId: undefined };
-    }
-    if (state.contextRecoverySessionId) {
-      const id = state.contextRecoverySessionId;
-      state.contextRecoverySessionId = undefined;
-      return { useResume: true, resumeSessionId: id };
-    }
-    if (state.retryNumber === 0) {
-      return { useResume: !this.isFirstPrompt, resumeSessionId: this.claudeSessionId };
-    }
-    if (state.lastWatchdogCheckpoint?.inProgressTools.length === 0 && state.lastWatchdogCheckpoint.claudeSessionId) {
-      return { useResume: true, resumeSessionId: state.lastWatchdogCheckpoint.claudeSessionId };
-    }
-    return { useResume: false, resumeSessionId: undefined };
-  }
-
-  /** Create HeadlessRunner for one retry iteration */
-  private createExecutionRunner(
-    state: RetryLoopState,
-    sequenceNumber: number,
-    useResume: boolean,
-    resumeSessionId: string | undefined,
-    imageAttachments: FileAttachment[] | undefined,
-    sandboxed: boolean | undefined,
-    workingDirOverride?: string,
-  ): HeadlessRunner {
-    return new HeadlessRunner({
-      workingDir: workingDirOverride || this.options.workingDir,
-      tokenBudgetThreshold: this.options.tokenBudgetThreshold,
-      maxSessions: this.options.maxSessions,
-      verbose: this.options.verbose,
-      noColor: this.options.noColor,
-      model: this.options.model,
-      improvisationMode: true,
-      movementNumber: sequenceNumber,
-      continueSession: useResume,
-      claudeSessionId: resumeSessionId,
-      outputCallback: (text: string) => {
-        this.executionEventLog.push({ type: 'output', data: { text, timestamp: Date.now() }, timestamp: Date.now() });
-        this.queueOutput(text);
-        this.flushOutputQueue();
-      },
-      thinkingCallback: (text: string) => {
-        this.executionEventLog.push({ type: 'thinking', data: { text }, timestamp: Date.now() });
-        this.emit('onThinking', text);
-        this.flushOutputQueue();
-      },
-      toolUseCallback: (event) => {
-        this.executionEventLog.push({ type: 'toolUse', data: { ...event, timestamp: Date.now() }, timestamp: Date.now() });
-        this.emit('onToolUse', event);
-        this.flushOutputQueue();
-      },
-      tokenUsageCallback: (usage) => {
-        this.emit('onTokenUsage', usage);
-      },
-      directPrompt: state.currentPrompt,
-      imageAttachments,
-      promptContext: (state.retryNumber === 0 && this.isResumedSession && this.isFirstPrompt)
-        ? { accumulatedKnowledge: this.buildHistoricalContext(), filesModified: [] }
-        : undefined,
-      onToolTimeout: (checkpoint: ExecutionCheckpoint) => {
-        state.checkpointRef.value = checkpoint;
-      },
-      sandboxed,
-    });
-  }
-
-  /** Save checkpoint and reset per-iteration state before each retry loop pass. */
-  private resetIterationState(state: RetryLoopState): void {
-    if (state.checkpointRef.value) state.lastWatchdogCheckpoint = state.checkpointRef.value;
-    state.checkpointRef.value = null;
-    state.contextLost = false;
-  }
-
-  /** Update best result tracking */
-  private updateBestResult(state: RetryLoopState, result: HeadlessRunResult): void {
-    if (!state.bestResult || scoreRunResult(result) > scoreRunResult(state.bestResult)) {
-      state.bestResult = result;
-    }
-  }
-
-  /** Detect resume context loss (Path 1): session expired on --resume */
-  private detectResumeContextLoss(
-    result: HeadlessRunResult,
-    state: RetryLoopState,
-    useResume: boolean,
-    maxRetries: number,
-    nativeTimeouts: number,
-  ): void {
-    if (!useResume || state.checkpointRef.value || state.retryNumber >= maxRetries || nativeTimeouts > 0) {
-      return;
-    }
-    if (!result.assistantResponse || result.assistantResponse.trim().length === 0) {
-      state.contextLost = true;
-      if (this.options.verbose) hlog('[CONTEXT-RECOVERY] Resume context loss: null/empty response');
-    } else if (result.resumeBufferedOutput !== undefined) {
-      state.contextLost = true;
-      if (this.options.verbose) hlog('[CONTEXT-RECOVERY] Resume context loss: buffer never flushed (no thinking/tools)');
-    } else if (
-      (!result.toolUseHistory || result.toolUseHistory.length === 0) &&
-      !result.thinkingOutput &&
-      result.assistantResponse.length < 500
-    ) {
-      state.contextLost = true;
-      if (this.options.verbose) hlog('[CONTEXT-RECOVERY] Resume context loss: no tools, no thinking, short response');
-    }
-  }
-
-  /** Detect native timeout context loss (Path 2): tool timeouts caused confusion */
-  private async detectNativeTimeoutContextLoss(
-    result: HeadlessRunResult,
-    state: RetryLoopState,
-    maxRetries: number,
-    nativeTimeouts: number,
-  ): Promise<void> {
-    if (state.contextLost) return;
-
-    // Deduplicate by toolId: if a toolId has at least one entry with a result,
-    // its orphaned duplicates are Claude Code internal retries, not actual timeouts.
-    const succeededIds = new Set<string>();
-    const allIds = new Set<string>();
-    for (const t of result.toolUseHistory ?? []) {
-      allIds.add(t.toolId);
-      if (t.result !== undefined) succeededIds.add(t.toolId);
-    }
-    const toolsWithoutResult = [...allIds].filter(id => !succeededIds.has(id)).length;
-    const effectiveTimeouts = Math.max(nativeTimeouts, toolsWithoutResult);
-
-    if (effectiveTimeouts === 0 || !result.assistantResponse || state.checkpointRef.value || state.retryNumber >= maxRetries) {
-      return;
-    }
-
-    const writeToolNames = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
-    const contextLossCtx: ContextLossContext = {
-      assistantResponse: result.assistantResponse,
-      effectiveTimeouts,
-      nativeTimeoutCount: nativeTimeouts,
-      successfulToolCalls: result.toolUseHistory?.filter(t => t.result !== undefined && !t.isError).length ?? 0,
-      thinkingOutputLength: result.thinkingOutput?.length ?? 0,
-      hasSuccessfulWrite: result.toolUseHistory?.some(
-        t => writeToolNames.has(t.toolName) && t.result !== undefined && !t.isError
-      ) ?? false,
-    };
-
-    const claudeCmd = process.env.CLAUDE_COMMAND || 'claude';
-    const verdict = await assessContextLoss(contextLossCtx, claudeCmd, this.options.verbose);
-    state.contextLost = verdict.contextLost;
-    if (this.options.verbose) {
-      hlog(`[CONTEXT-RECOVERY] Haiku verdict: ${state.contextLost ? 'LOST' : 'OK'} — ${verdict.reason}`);
-    }
-  }
-
-  /** Flush post-timeout output if context wasn't lost */
-  private flushPostTimeoutOutput(result: HeadlessRunResult, state: RetryLoopState): void {
-    if (!state.contextLost && result.postTimeoutOutput) {
-      this.queueOutput(result.postTimeoutOutput);
-      this.flushOutputQueue();
-    }
-  }
-
-  /** Check if context loss recovery should trigger a retry. Returns true if loop should continue. */
-  private shouldRetryContextLoss(
-    result: HeadlessRunResult,
-    state: RetryLoopState,
-    useResume: boolean,
-    nativeTimeouts: number,
-    maxRetries: number,
-    promptWithAttachments: string,
-  ): boolean {
-    if (state.checkpointRef.value || state.retryNumber >= maxRetries || !state.contextLost) {
-      return false;
-    }
-    this.accumulateToolResults(result, state);
-    state.retryNumber++;
-    const path = (useResume && nativeTimeouts === 0) ? 'InterMovementRecovery' : 'NativeTimeoutRecovery';
-    state.retryLog.push({
-      retryNumber: state.retryNumber,
-      path,
-      reason: `Context lost (${nativeTimeouts} timeouts, ${state.accumulatedToolResults.length} tools preserved)`,
-      timestamp: Date.now(),
-    });
-    if (useResume && nativeTimeouts === 0) {
-      this.applyInterMovementRecovery(state, promptWithAttachments);
-    } else {
-      this.applyNativeTimeoutRecovery(result, state, promptWithAttachments);
-    }
-    return true;
-  }
-
-  /** Accumulate completed tool results from a run into the retry state.
-   *  Caps at MAX_ACCUMULATED_RESULTS to prevent recovery prompts from exceeding context limits.
-   *  When the cap is reached, older results are evicted (FIFO) to make room for newer ones. */
-  private static readonly MAX_ACCUMULATED_RESULTS = 50;
-
-  private accumulateToolResults(result: HeadlessRunResult, state: RetryLoopState): void {
-    if (!result.toolUseHistory) return;
-    for (const t of result.toolUseHistory) {
-      if (t.result !== undefined) {
-        state.accumulatedToolResults.push({
-          toolName: t.toolName,
-          toolId: t.toolId,
-          toolInput: t.toolInput,
-          result: t.result,
-          isError: t.isError,
-          duration: t.duration,
-        });
-      }
-    }
-    // Evict oldest results if over the cap
-    const cap = ImprovisationSessionManager.MAX_ACCUMULATED_RESULTS;
-    if (state.accumulatedToolResults.length > cap) {
-      state.accumulatedToolResults = state.accumulatedToolResults.slice(-cap);
-    }
-  }
-
-  /** Handle inter-movement context loss recovery (resume session expired) */
-  private applyInterMovementRecovery(state: RetryLoopState, promptWithAttachments: string): void {
-    // Preserve session ID so --resume remains available on subsequent retries.
-    // The fresh recovery prompt will be used, but if this attempt also fails,
-    // the next retry can still try --resume via shouldRetrySignalCrash.
-    const historicalResults = this.extractHistoricalToolResults();
-    const allResults = [...historicalResults, ...state.accumulatedToolResults];
-
-    this.emit('onAutoRetry', {
-      retryNumber: state.retryNumber,
-      maxRetries: 3,
-      toolName: 'InterMovementRecovery',
-      completedCount: allResults.length,
-    });
-    this.queueOutput(
-      `\n[[MSTRO_CONTEXT_RECOVERY]] Session context expired — continuing with ${allResults.length} preserved results from prior work (retry ${state.retryNumber}/3).\n`
-    );
-    this.flushOutputQueue();
-
-    state.freshRecoveryMode = true;
-    state.currentPrompt = this.buildInterMovementRecoveryPrompt(promptWithAttachments, allResults);
-  }
-
-  /** Handle native-timeout context loss recovery (tool timeouts caused confusion) */
-  private applyNativeTimeoutRecovery(
-    result: HeadlessRunResult,
-    state: RetryLoopState,
-    promptWithAttachments: string,
-  ): void {
-    const completedCount = state.accumulatedToolResults.length;
-
-    this.emit('onAutoRetry', {
-      retryNumber: state.retryNumber,
-      maxRetries: 3,
-      toolName: 'ContextRecovery',
-      completedCount,
-    });
-
-    if (result.claudeSessionId && state.retryNumber === 1) {
-      this.queueOutput(
-        `\n[[MSTRO_CONTEXT_RECOVERY]] Context loss detected — resuming session with ${completedCount} preserved results (retry ${state.retryNumber}/3).\n`
-      );
-      this.flushOutputQueue();
-      state.contextRecoverySessionId = result.claudeSessionId;
-      this.claudeSessionId = result.claudeSessionId;
-      state.currentPrompt = this.buildContextRecoveryPrompt(promptWithAttachments);
-    } else {
-      this.queueOutput(
-        `\n[[MSTRO_CONTEXT_RECOVERY]] Continuing with fresh context — ${completedCount} preserved results injected (retry ${state.retryNumber}/3).\n`
-      );
-      this.flushOutputQueue();
-      state.freshRecoveryMode = true;
-      state.currentPrompt = this.buildFreshRecoveryPrompt(promptWithAttachments, state.accumulatedToolResults, state.timedOutTools);
-    }
-  }
-
-  /** Handle tool timeout checkpoint. Returns true if loop should continue. */
-  private applyToolTimeoutRetry(
-    state: RetryLoopState,
-    maxRetries: number,
-    promptWithAttachments: string,
-  ): boolean {
-    if (!state.checkpointRef.value || state.retryNumber >= maxRetries) {
-      return false;
-    }
-
-    const cp: ExecutionCheckpoint = state.checkpointRef.value;
-    state.retryNumber++;
-
-    state.timedOutTools.push({
-      toolName: cp.hungTool.toolName,
-      input: cp.hungTool.input ?? {},
-      timeoutMs: cp.hungTool.timeoutMs,
-    });
-
-    const canResumeSession = cp.inProgressTools.length === 0 && !!cp.claudeSessionId;
-    state.retryLog.push({
-      retryNumber: state.retryNumber,
-      path: 'ToolTimeout',
-      reason: `${cp.hungTool.toolName} timed out after ${cp.hungTool.timeoutMs}ms, ${cp.completedTools.length} tools completed, ${canResumeSession ? 'resuming' : 'fresh start'}`,
-      timestamp: Date.now(),
-    });
-    this.emit('onAutoRetry', {
-      retryNumber: state.retryNumber,
-      maxRetries,
-      toolName: cp.hungTool.toolName,
-      url: cp.hungTool.url,
-      completedCount: cp.completedTools.length,
-    });
-
-    trackEvent(AnalyticsEvents.IMPROVISE_AUTO_RETRY, {
-      retry_number: state.retryNumber,
-      hung_tool: cp.hungTool.toolName,
-      hung_url: cp.hungTool.url?.slice(0, 200),
-      completed_tools: cp.completedTools.length,
-      elapsed_ms: cp.elapsedMs,
-      resume_attempted: canResumeSession,
-    });
-
-    state.currentPrompt = canResumeSession
-      ? this.buildResumeRetryPrompt(cp, state.timedOutTools)
-      : this.buildRetryPrompt(cp, promptWithAttachments, state.timedOutTools);
-
-    this.queueOutput(
-      `\n[[MSTRO_AUTO_RETRY]] Auto-retry ${state.retryNumber}/${maxRetries}: ${canResumeSession ? 'Resuming session' : 'Continuing'} with ${cp.completedTools.length} successful results, skipping failed ${cp.hungTool.toolName}.\n`
-    );
-    this.flushOutputQueue();
-
-    return true;
-  }
-
-  /**
-   * Detect and retry after a signal crash (e.g., SIGTERM exit code 143).
-   * When the Claude process is killed externally (OOM, system signal, internal timeout
-   * that bypasses our watchdog), no existing recovery path catches it because contextLost
-   * is never set and no checkpoint is created. This adds a dedicated recovery path.
-   */
-  private shouldRetrySignalCrash(
-    result: HeadlessRunResult,
-    state: RetryLoopState,
-    maxRetries: number,
-    promptWithAttachments: string,
-  ): boolean {
-    // Only trigger for signal-killed processes (exit code 128+) that weren't already
-    // handled by context-loss or tool-timeout recovery paths.
-    // Must have an actual signal name — regular errors (e.g., auth failures, exit code 1)
-    // should NOT be retried as signal crashes.
-    const isSignalCrash = !!result.signalName;
-    const exitCodeSignal = !result.completed && !result.signalName && result.error?.match(/exited with code (1[2-9]\d|[2-9]\d{2})/);
-    if ((!isSignalCrash && !exitCodeSignal) || state.retryNumber >= maxRetries) {
-      return false;
-    }
-    // Don't re-trigger if tool timeout watchdog already handled this iteration
-    // (contextLost is NOT checked here — signal crash takes priority over context loss
-    // because it uses --resume which is lighter and avoids re-sending accumulated results)
-    if (state.checkpointRef.value) {
-      return false;
-    }
-
-    this.accumulateToolResults(result, state);
-    state.retryNumber++;
-
-    const completedCount = state.accumulatedToolResults.length;
-    const signalInfo = result.signalName || 'unknown signal';
-    const useResume = !!result.claudeSessionId && state.retryNumber === 1;
-
-    state.retryLog.push({
-      retryNumber: state.retryNumber,
-      path: 'SignalCrash',
-      reason: `Process killed (${signalInfo}), ${completedCount} tools preserved, ${useResume ? 'resuming' : 'fresh start'}`,
-      timestamp: Date.now(),
-    });
-
-    this.emit('onAutoRetry', {
-      retryNumber: state.retryNumber,
-      maxRetries,
-      toolName: `SignalCrash(${signalInfo})`,
-      completedCount,
-    });
-
-    trackEvent(AnalyticsEvents.IMPROVISE_AUTO_RETRY, {
-      retry_number: state.retryNumber,
-      hung_tool: `signal_crash:${signalInfo}`,
-      completed_tools: completedCount,
-      resume_attempted: useResume,
-    });
-
-    // If we have a session ID, try resuming first (preserves full context)
-    if (useResume) {
-      this.queueOutput(
-        `\n[[MSTRO_SIGNAL_RECOVERY]] Process killed (${signalInfo}) — resuming session with ${completedCount} preserved results (retry ${state.retryNumber}/${maxRetries}).\n`
-      );
-      this.flushOutputQueue();
-      state.contextRecoverySessionId = result.claudeSessionId;
-      this.claudeSessionId = result.claudeSessionId;
-      state.currentPrompt = this.buildSignalCrashRecoveryPrompt(promptWithAttachments, true);
-    } else {
-      // Fresh start with accumulated results injected
-      this.queueOutput(
-        `\n[[MSTRO_SIGNAL_RECOVERY]] Process killed (${signalInfo}) — restarting with ${completedCount} preserved results (retry ${state.retryNumber}/${maxRetries}).\n`
-      );
-      this.flushOutputQueue();
-      state.freshRecoveryMode = true;
-      const allResults = [...this.extractHistoricalToolResults(), ...state.accumulatedToolResults];
-      state.currentPrompt = this.buildSignalCrashRecoveryPrompt(promptWithAttachments, false, allResults);
-    }
-
-    return true;
-  }
-
-  /** Build a recovery prompt after signal crash */
-  private buildSignalCrashRecoveryPrompt(
-    originalPrompt: string,
-    isResume: boolean,
-    toolResults?: ToolUseRecord[],
-  ): string {
-    const parts: string[] = [];
-
-    if (isResume) {
-      parts.push('Your previous execution was interrupted by a system signal (the process was killed externally).');
-      parts.push('Your full conversation history is preserved — including all successful tool results.');
-      parts.push('');
-      parts.push('Review your conversation history above and continue from where you left off.');
-    } else {
-      parts.push('## AUTOMATIC RETRY — Previous Execution Interrupted');
-      parts.push('');
-      parts.push('The previous execution was interrupted by a system signal (process killed).');
-      if (toolResults && toolResults.length > 0) {
-        parts.push(`${toolResults.length} tool results were preserved from prior work.`);
-        parts.push('');
-        parts.push('### Preserved results:');
-        for (const t of toolResults.slice(-20)) {
-          const inputSummary = JSON.stringify(t.toolInput).slice(0, 120);
-          const resultPreview = (t.result ?? '').slice(0, 200);
-          parts.push(`- **${t.toolName}**(${inputSummary}): ${resultPreview}`);
-        }
-      }
-    }
-
-    parts.push('');
-    parts.push('### Original task:');
-    parts.push(originalPrompt);
-    parts.push('');
-    parts.push('INSTRUCTIONS:');
-    parts.push('1. Use the results above -- do not re-fetch content you already have');
-    parts.push('2. Continue from where you left off');
-    parts.push('3. Prefer multiple small, focused tool calls over single large ones');
-    parts.push('4. Do NOT spawn Task subagents — do work inline to avoid further interruptions');
-
-    return parts.join('\n');
-  }
-
-  /**
-   * Detect premature completion: Claude exited normally (exit code 0, end_turn) but the
-   * response indicates more work was planned. This happens when the model "context-fatigues"
-   * during long multi-step tasks and produces end_turn after completing a subset of the work.
-   *
-   * Two paths:
-   * - max_tokens: always retry (model was forcibly stopped mid-generation)
-   * - end_turn: Haiku assessment determines if the response looks incomplete
-   */
-  private async shouldRetryPrematureCompletion(
-    result: HeadlessRunResult,
-    state: RetryLoopState,
-    maxRetries: number,
-  ): Promise<boolean> {
-    if (!this.isPrematureCompletionCandidate(result, state, maxRetries)) {
-      return false;
-    }
-
-    const stopReason = result.stopReason!;
-    const isMaxTokens = stopReason === 'max_tokens';
-    const isIncomplete = isMaxTokens || await this.assessEndTurnCompletion(result);
-
-    if (!isIncomplete) return false;
-
-    this.applyPrematureCompletionRetry(result, state, maxRetries, stopReason, isMaxTokens);
-    return true;
-  }
-
-  /** Guard checks for premature completion — must pass all to proceed with assessment */
-  private isPrematureCompletionCandidate(
-    result: HeadlessRunResult,
-    state: RetryLoopState,
-    maxRetries: number,
-  ): boolean {
-    // Only trigger for clean exits with a known stop reason
-    if (!result.completed || result.signalName || state.retryNumber >= maxRetries) return false;
-    // Don't re-trigger if other recovery paths already handled this iteration
-    if (state.checkpointRef.value || state.contextLost) return false;
-    // Must have a session ID to resume, and a stop reason to classify
-    if (!result.claudeSessionId || !result.stopReason) return false;
-    // Only act on max_tokens or end_turn
-    return result.stopReason === 'max_tokens' || result.stopReason === 'end_turn';
-  }
-
-  /** Use Haiku to assess whether an end_turn response is genuinely complete */
-  private async assessEndTurnCompletion(result: HeadlessRunResult): Promise<boolean> {
-    if (!result.assistantResponse) return false;
-
-    const claudeCmd = process.env.CLAUDE_COMMAND || 'claude';
-    const verdict = await assessPrematureCompletion({
-      responseTail: result.assistantResponse.slice(-800),
-      successfulToolCalls: result.toolUseHistory?.filter(t => t.result !== undefined && !t.isError).length ?? 0,
-      hasThinking: !!result.thinkingOutput,
-      responseLength: result.assistantResponse.length,
-    }, claudeCmd, this.options.verbose);
-
-    if (this.options.verbose) {
-      hlog(`[PREMATURE-COMPLETION] Haiku verdict: ${verdict.isIncomplete ? 'INCOMPLETE' : 'COMPLETE'} — ${verdict.reason}`);
-    }
-    return verdict.isIncomplete;
-  }
-
-  /** Apply the retry: emit events, update state, set continuation prompt */
-  private applyPrematureCompletionRetry(
-    result: HeadlessRunResult,
-    state: RetryLoopState,
-    maxRetries: number,
-    stopReason: string,
-    isMaxTokens: boolean,
-  ): void {
-    state.retryNumber++;
-    const reason = isMaxTokens ? 'Output limit reached' : 'Task appears unfinished (AI assessment)';
-
-    state.retryLog.push({
-      retryNumber: state.retryNumber,
-      path: 'PrematureCompletion',
-      reason,
-      timestamp: Date.now(),
-    });
-
-    this.emit('onAutoRetry', {
-      retryNumber: state.retryNumber,
-      maxRetries,
-      toolName: `PrematureCompletion(${stopReason})`,
-      completedCount: result.toolUseHistory?.length ?? 0,
-    });
-
-    trackEvent(AnalyticsEvents.IMPROVISE_AUTO_RETRY, {
-      retry_number: state.retryNumber,
-      hung_tool: `premature_completion:${stopReason}`,
-      completed_tools: result.toolUseHistory?.length ?? 0,
-      resume_attempted: true,
-    });
-
-    this.queueOutput(
-      `\n${reason} — resuming session (retry ${state.retryNumber}/${maxRetries}).\n`
-    );
-    this.flushOutputQueue();
-
-    state.contextRecoverySessionId = result.claudeSessionId;
-    this.claudeSessionId = result.claudeSessionId;
-    state.currentPrompt = 'continue';
-  }
-
-  /** Select the best result across retries using Haiku assessment */
-  private async selectBestResult(
-    state: RetryLoopState,
-    result: HeadlessRunResult,
-    userPrompt: string,
-  ): Promise<HeadlessRunResult> {
-    if (!state.bestResult || state.bestResult === result || state.retryNumber === 0) {
-      return result;
-    }
-
-    const claudeCmd = process.env.CLAUDE_COMMAND || 'claude';
-    const bestToolCount = state.bestResult.toolUseHistory?.filter(t => t.result !== undefined && !t.isError).length ?? 0;
-    const currentToolCount = result.toolUseHistory?.filter(t => t.result !== undefined && !t.isError).length ?? 0;
-
-    try {
-      const verdict = await assessBestResult({
-        originalPrompt: userPrompt,
-        resultA: {
-          successfulToolCalls: bestToolCount,
-          responseLength: state.bestResult.assistantResponse?.length ?? 0,
-          hasThinking: !!state.bestResult.thinkingOutput,
-          responseTail: (state.bestResult.assistantResponse ?? '').slice(-500),
-        },
-        resultB: {
-          successfulToolCalls: currentToolCount,
-          responseLength: result.assistantResponse?.length ?? 0,
-          hasThinking: !!result.thinkingOutput,
-          responseTail: (result.assistantResponse ?? '').slice(-500),
-        },
-      }, claudeCmd, this.options.verbose);
-
-      if (verdict.winner === 'A') {
-        if (this.options.verbose) hlog(`[BEST-RESULT] Haiku picked earlier attempt: ${verdict.reason}`);
-        return this.mergeResultSessionId(state.bestResult, result.claudeSessionId);
-      }
-      if (this.options.verbose) hlog(`[BEST-RESULT] Haiku picked final attempt: ${verdict.reason}`);
-      return result;
-    } catch {
-      return this.fallbackBestResult(state.bestResult, result);
-    }
-  }
-
-  /** Fallback best result selection using numeric scoring */
-  private fallbackBestResult(bestResult: HeadlessRunResult, result: HeadlessRunResult): HeadlessRunResult {
-    if (scoreRunResult(bestResult) > scoreRunResult(result)) {
-      if (this.options.verbose) {
-        hlog(`[BEST-RESULT] Haiku unavailable, numeric fallback: earlier attempt (score ${scoreRunResult(bestResult)} vs ${scoreRunResult(result)})`);
-      }
-      return this.mergeResultSessionId(bestResult, result.claudeSessionId);
-    }
-    return result;
-  }
-
-  /** Replace a result's claudeSessionId with a newer one */
-  private mergeResultSessionId(result: HeadlessRunResult, sessionId: string | undefined): HeadlessRunResult {
-    if (sessionId) return { ...result, claudeSessionId: sessionId };
-    return result;
-  }
-
-  /** Capture Claude session ID and surface execution failures */
   private captureSessionAndSurfaceErrors(result: HeadlessRunResult): void {
     if (result.claudeSessionId) {
       this.claudeSessionId = result.claudeSessionId;
@@ -1193,13 +384,12 @@ export class ImprovisationSessionManager extends EventEmitter {
     }
   }
 
-  /** Build a MovementRecord from execution result */
   private buildMovementRecord(
     result: HeadlessRunResult,
     userPrompt: string,
     sequenceNumber: number,
     execStart: number,
-    retryLog?: RetryLogEntry[],
+    retryLog?: import('./improvisation-types.js').RetryLogEntry[],
   ): MovementRecord {
     return {
       id: `prompt-${sequenceNumber}`,
@@ -1212,12 +402,8 @@ export class ImprovisationSessionManager extends EventEmitter {
       assistantResponse: result.assistantResponse,
       thinkingOutput: result.thinkingOutput,
       toolUseHistory: result.toolUseHistory?.map(t => ({
-        toolName: t.toolName,
-        toolId: t.toolId,
-        toolInput: t.toolInput,
-        result: t.result,
-        isError: t.isError,
-        duration: t.duration
+        toolName: t.toolName, toolId: t.toolId, toolInput: t.toolInput,
+        result: t.result, isError: t.isError, duration: t.duration,
       })),
       errorOutput: result.error,
       durationMs: Date.now() - execStart,
@@ -1225,33 +411,23 @@ export class ImprovisationSessionManager extends EventEmitter {
     };
   }
 
-  /** Handle file conflicts from execution result */
   private handleConflicts(result: HeadlessRunResult): void {
     if (!result.conflicts || result.conflicts.length === 0) return;
     this.queueOutput(`\n⚠ File conflicts detected: ${result.conflicts.length}`);
     result.conflicts.forEach(c => {
       this.queueOutput(`  - ${c.filePath} (modified by: ${c.modifiedBy.join(', ')})`);
-      if (c.backupPath) {
-        this.queueOutput(`    Backup created: ${c.backupPath}`);
-      }
+      if (c.backupPath) this.queueOutput(`    Backup created: ${c.backupPath}`);
     });
     this.flushOutputQueue();
   }
 
-  /** Persist movement to history */
   private persistMovement(movement: MovementRecord): void {
     this.history.movements.push(movement);
     this.history.totalTokens += movement.tokensUsed;
     this.saveHistory();
   }
 
-  /** Emit movement completion events and analytics */
-  private emitMovementComplete(
-    movement: MovementRecord,
-    result: HeadlessRunResult,
-    execStart: number,
-    sequenceNumber: number,
-  ): void {
+  private emitMovementComplete(movement: MovementRecord, result: HeadlessRunResult, execStart: number, sequenceNumber: number): void {
     this.emit('onMovementComplete', movement);
     trackEvent(AnalyticsEvents.IMPROVISE_MOVEMENT_COMPLETED, {
       tokens_used: movement.tokensUsed,
@@ -1263,341 +439,8 @@ export class ImprovisationSessionManager extends EventEmitter {
     this.emit('onSessionUpdate', this.getHistory());
   }
 
-  /**
-   * Build historical context for resuming a session.
-   * This creates a summary of the previous conversation that will be injected
-   * into the first prompt of a resumed session.
-   */
-  private buildHistoricalContext(): string {
-    if (this.history.movements.length === 0) {
-      return '';
-    }
+  // ========== History I/O ==========
 
-    const contextParts: string[] = [
-      '--- CONVERSATION HISTORY (for context, do not repeat these responses) ---',
-      ''
-    ];
-
-    // Include each movement as context
-    for (const movement of this.history.movements) {
-      contextParts.push(`[User Prompt ${movement.sequenceNumber}]:`);
-      contextParts.push(movement.userPrompt);
-      contextParts.push('');
-
-      if (movement.assistantResponse) {
-        contextParts.push(`[Your Response ${movement.sequenceNumber}]:`);
-        // Truncate very long responses to save tokens
-        const response = movement.assistantResponse.length > 2000
-          ? `${movement.assistantResponse.slice(0, 2000)}\n... (response truncated for context)`
-          : movement.assistantResponse;
-        contextParts.push(response);
-        contextParts.push('');
-      }
-
-      if (movement.toolUseHistory && movement.toolUseHistory.length > 0) {
-        contextParts.push(`[Tools Used in Prompt ${movement.sequenceNumber}]:`);
-        for (const tool of movement.toolUseHistory) {
-          contextParts.push(`- ${tool.toolName}`);
-        }
-        contextParts.push('');
-      }
-    }
-
-    contextParts.push('--- END OF CONVERSATION HISTORY ---');
-    contextParts.push('');
-    contextParts.push('Continue the conversation from where we left off. The user is now asking:');
-    contextParts.push('');
-
-    return contextParts.join('\n');
-  }
-
-  /**
-   * Build a retry prompt from a tool timeout checkpoint.
-   * Injects completed tool results and instructs Claude to skip the failed resource.
-   */
-  private buildRetryPrompt(
-    checkpoint: ExecutionCheckpoint,
-    originalPrompt: string,
-    allTimedOut?: Array<{ toolName: string; input: Record<string, unknown>; timeoutMs: number }>,
-  ): string {
-    const urlSuffix = checkpoint.hungTool.url ? ` while fetching: ${checkpoint.hungTool.url}` : '';
-    const parts: string[] = [
-      '## AUTOMATIC RETRY -- Previous Execution Interrupted',
-      '',
-      `The previous execution was interrupted because ${checkpoint.hungTool.toolName} timed out after ${Math.round(checkpoint.hungTool.timeoutMs / 1000)}s${urlSuffix}.`,
-      '',
-    ];
-
-    if (allTimedOut && allTimedOut.length > 0) {
-      parts.push(...this.formatTimedOutTools(allTimedOut), '');
-    } else {
-      parts.push('This URL/resource is unreachable. DO NOT retry the same URL or query.', '');
-    }
-
-    if (checkpoint.completedTools.length > 0) {
-      parts.push(...this.formatCompletedTools(checkpoint.completedTools), '');
-    }
-
-    if (checkpoint.inProgressTools && checkpoint.inProgressTools.length > 0) {
-      parts.push(...this.formatInProgressTools(checkpoint.inProgressTools), '');
-    }
-
-    if (checkpoint.assistantText) {
-      const preview = checkpoint.assistantText.length > 8000
-        ? `${checkpoint.assistantText.slice(0, 8000)}...\n(truncated — full response was ${checkpoint.assistantText.length} chars)`
-        : checkpoint.assistantText;
-      parts.push('### Your response before interruption:', preview, '');
-    }
-
-    parts.push('### Original task (continue from where you left off):');
-    parts.push(originalPrompt);
-    parts.push('');
-    parts.push('INSTRUCTIONS:');
-    parts.push('1. Use the results above -- do not re-fetch content you already have');
-    parts.push('2. Find ALTERNATIVE sources for the content that timed out (different URL, different approach)');
-    parts.push('3. Re-run any in-progress tools that were lost (listed above) if their results are needed');
-    parts.push('4. If no alternative exists, proceed with the results you have and note what was unavailable');
-
-    return parts.join('\n');
-  }
-
-  /**
-   * Build a short retry prompt for --resume sessions.
-   * The session already has full conversation context, so we only need to
-   * explain what timed out and instruct Claude to continue.
-   */
-  private buildResumeRetryPrompt(
-    checkpoint: ExecutionCheckpoint,
-    allTimedOut?: Array<{ toolName: string; input: Record<string, unknown>; timeoutMs: number }>,
-  ): string {
-    const parts: string[] = [];
-
-    parts.push(
-      `Your previous ${checkpoint.hungTool.toolName} call timed out after ${Math.round(checkpoint.hungTool.timeoutMs / 1000)}s${checkpoint.hungTool.url ? ` fetching: ${checkpoint.hungTool.url}` : ''}.`
-    );
-
-    // List all timed-out tools across retries so Claude avoids repeating them
-    if (allTimedOut && allTimedOut.length > 1) {
-      parts.push('');
-      parts.push('All timed-out tools/resources (DO NOT retry any of these):');
-      for (const t of allTimedOut) {
-        const inputSummary = this.summarizeToolInput(t.input);
-        parts.push(`- ${t.toolName}(${inputSummary})`);
-      }
-    } else {
-      parts.push('This URL/resource is unreachable. DO NOT retry the same URL or query.');
-    }
-    parts.push('Continue your task — find an alternative source or proceed with the results you already have.');
-
-    return parts.join('\n');
-  }
-
-  // Context loss detection is now handled by assessContextLoss() in stall-assessor.ts
-  // using Haiku assessment instead of brittle regex patterns.
-
-  /**
-   * Build a recovery prompt for --resume after context loss.
-   * Since we're resuming the same session, Claude has full conversation history
-   * (including all preserved tool results). We just need to redirect it back to the task.
-   */
-  private buildContextRecoveryPrompt(originalPrompt: string): string {
-    const parts: string[] = [];
-
-    parts.push('Your previous response indicated you lost context due to tool timeouts, but your full conversation history is preserved — including all successful tool results.');
-    parts.push('');
-    parts.push('Review your conversation history above. You already have results from many successful tool calls. Use those results to continue the task.');
-    parts.push('');
-    parts.push('Original task:');
-    parts.push(originalPrompt);
-    parts.push('');
-    parts.push('INSTRUCTIONS:');
-    parts.push('1. Review your conversation history — all your previous tool results are still available');
-    parts.push('2. Continue from where you left off using the results you already gathered');
-    parts.push('3. If specific tool calls timed out, skip those and work with what you have');
-    parts.push('4. Do NOT start over — build on the work already done');
-    parts.push('5. Do NOT spawn Task subagents for work that previously timed out — do it inline instead');
-    parts.push('6. Prefer multiple small, focused tool calls over single large ones to avoid further timeouts');
-
-    return parts.join('\n');
-  }
-
-  /**
-   * Build a recovery prompt for a fresh session (no --resume) after repeated context loss.
-   * Injects all accumulated tool results from previous attempts so Claude can continue
-   * the task without re-fetching data it already gathered.
-   */
-  private buildFreshRecoveryPrompt(
-    originalPrompt: string,
-    toolResults: ToolUseRecord[],
-    timedOutTools?: Array<{ toolName: string; input: Record<string, unknown>; timeoutMs: number }>,
-  ): string {
-    const parts: string[] = [
-      '## CONTINUING LONG-RUNNING TASK',
-      '',
-      'The previous execution encountered tool timeouts and lost context.',
-      'Below are all results gathered before the interruption. Continue the task using these results.',
-      '',
-    ];
-
-    if (timedOutTools && timedOutTools.length > 0) {
-      parts.push(...this.formatTimedOutTools(timedOutTools), '');
-    }
-
-    parts.push(...this.formatToolResults(toolResults));
-
-    parts.push('### Original task:');
-    parts.push(originalPrompt);
-    parts.push('');
-    parts.push('INSTRUCTIONS:');
-    parts.push('1. Use the preserved results above \u2014 do NOT re-fetch data you already have');
-    parts.push('2. Continue the task from where it was interrupted');
-    parts.push('3. If you need additional data, fetch it (but try alternative sources if the original timed out)');
-    parts.push('4. Complete the original task fully');
-    parts.push('5. Do NOT spawn Task subagents for work that previously timed out \u2014 do it inline instead');
-    parts.push('6. Prefer multiple small, focused tool calls over single large ones to avoid further timeouts');
-
-    return parts.join('\n');
-  }
-
-  /**
-   * Extract tool results from the last N movements in history.
-   * Used for inter-movement recovery to provide context from prior work
-   * when a resume session is corrupted/expired.
-   */
-  private extractHistoricalToolResults(maxMovements = 3): ToolUseRecord[] {
-    const results: ToolUseRecord[] = [];
-    const recentMovements = this.history.movements.slice(-maxMovements);
-
-    for (const movement of recentMovements) {
-      if (!movement.toolUseHistory) continue;
-      for (const tool of movement.toolUseHistory) {
-        if (tool.result !== undefined && !tool.isError) {
-          results.push({
-            toolName: tool.toolName,
-            toolId: tool.toolId,
-            toolInput: tool.toolInput,
-            result: tool.result,
-            isError: tool.isError,
-            duration: tool.duration,
-          });
-        }
-      }
-    }
-
-    return results;
-  }
-
-  /**
-   * Build a recovery prompt for inter-movement context loss.
-   * The Claude session expired between movements (not due to native timeouts).
-   * Includes prior conversation summary + preserved tool results + anti-timeout guidance.
-   */
-  private buildInterMovementRecoveryPrompt(originalPrompt: string, toolResults: ToolUseRecord[]): string {
-    const parts: string[] = [
-      '## SESSION RECOVERY — Prior Session Expired',
-      '',
-      'Your previous session expired between prompts. Below is a summary of the conversation so far and all preserved tool results.',
-      '',
-    ];
-
-    parts.push(...this.formatConversationHistory(this.history.movements));
-    parts.push(...this.formatToolResults(toolResults));
-
-    parts.push('### Current user prompt:');
-    parts.push(originalPrompt);
-    parts.push('');
-    parts.push('INSTRUCTIONS:');
-    parts.push('1. Use the preserved results above — do NOT re-fetch data you already have');
-    parts.push('2. Continue the conversation naturally based on the history above');
-    parts.push('3. If you need additional data, fetch it with small focused tool calls');
-    parts.push('4. Do NOT spawn Task subagents — do work inline to avoid further timeouts');
-    parts.push('5. Prefer multiple small, focused tool calls over single large ones');
-
-    return parts.join('\n');
-  }
-
-  /** Summarize a tool input for display in retry prompts */
-  private summarizeToolInput(input: Record<string, unknown>): string {
-    if (input.url) return String(input.url).slice(0, 100);
-    if (input.query) return String(input.query).slice(0, 100);
-    if (input.command) return String(input.command).slice(0, 100);
-    if (input.prompt) return String(input.prompt).slice(0, 100);
-    return JSON.stringify(input).slice(0, 100);
-  }
-
-  /** Format a list of timed-out tools for retry prompts */
-  private formatTimedOutTools(tools: Array<{ toolName: string; input: Record<string, unknown>; timeoutMs: number }>): string[] {
-    const lines: string[] = [];
-    lines.push('### Tools/resources that have timed out (DO NOT retry these):');
-    for (const t of tools) {
-      const inputSummary = this.summarizeToolInput(t.input);
-      lines.push(`- **${t.toolName}**(${inputSummary}) — timed out after ${Math.round(t.timeoutMs / 1000)}s`);
-    }
-    return lines;
-  }
-
-  /** Format completed checkpoint tools for retry prompts */
-  private formatCompletedTools(tools: Array<{ toolName: string; input: Record<string, unknown>; result: string }>, maxLen = 2000): string[] {
-    const lines: string[] = [];
-    lines.push('### Results already obtained:');
-    for (const tool of tools) {
-      const inputSummary = this.summarizeToolInput(tool.input);
-      const preview = tool.result.length > maxLen ? `${tool.result.slice(0, maxLen)}...` : tool.result;
-      lines.push(`- **${tool.toolName}**(${inputSummary}): ${preview}`);
-    }
-    return lines;
-  }
-
-  /** Format in-progress tools for retry prompts */
-  private formatInProgressTools(tools: Array<{ toolName: string; input: Record<string, unknown> }>): string[] {
-    const lines: string[] = [];
-    lines.push('### Tools that were still running (lost when process was killed):');
-    for (const tool of tools) {
-      const inputSummary = this.summarizeToolInput(tool.input);
-      lines.push(`- **${tool.toolName}**(${inputSummary}) — was in progress, may need re-running`);
-    }
-    return lines;
-  }
-
-  /** Format tool results from ToolUseRecord[] for recovery prompts */
-  private formatToolResults(toolResults: ToolUseRecord[], maxLen = 3000): string[] {
-    const completed = toolResults.filter(t => t.result !== undefined && !t.isError);
-    if (completed.length === 0) return [];
-    const lines: string[] = [`### ${completed.length} preserved results from prior work:`, ''];
-    for (const tool of completed) {
-      const inputSummary = this.summarizeToolInput(tool.toolInput);
-      const preview = tool.result && tool.result.length > maxLen
-        ? `${tool.result.slice(0, maxLen)}...\n(truncated, ${tool.result.length} chars total)`
-        : tool.result || '';
-      lines.push(`**${tool.toolName}**(${inputSummary}):`);
-      lines.push(preview);
-      lines.push('');
-    }
-    return lines;
-  }
-
-  /** Format conversation history for recovery prompts */
-  private formatConversationHistory(movements: MovementRecord[], maxMovements = 5): string[] {
-    const recent = movements.slice(-maxMovements);
-    if (recent.length === 0) return [];
-    const lines: string[] = ['### Conversation so far:'];
-    for (const movement of recent) {
-      const promptText = movement.userPrompt.length > 300 ? `${movement.userPrompt.slice(0, 300)}...` : movement.userPrompt;
-      lines.push(`**User (prompt ${movement.sequenceNumber}):** ${promptText}`);
-      if (movement.assistantResponse) {
-        const response = movement.assistantResponse.length > 1000
-          ? `${movement.assistantResponse.slice(0, 1000)}...\n(truncated, ${movement.assistantResponse.length} chars)`
-          : movement.assistantResponse;
-        lines.push(`**Your response:** ${response}`);
-      }
-      lines.push('');
-    }
-    return lines;
-  }
-
-  /**
-   * Load history from disk
-   */
   private loadHistory(): SessionHistory {
     if (existsSync(this.historyPath)) {
       try {
@@ -1607,35 +450,26 @@ export class ImprovisationSessionManager extends EventEmitter {
         herror('Failed to load history:', error);
       }
     }
-
     return {
       sessionId: this.sessionId,
       startedAt: new Date().toISOString(),
       lastActivityAt: new Date().toISOString(),
       totalTokens: 0,
-      movements: []
+      movements: [],
     };
   }
 
-  /**
-   * Save history to disk
-   */
   private saveHistory(): void {
     this.history.lastActivityAt = new Date().toISOString();
     writeFileSync(this.historyPath, JSON.stringify(this.history, null, 2));
   }
 
-  /**
-   * Get session history
-   */
   getHistory(): SessionHistory {
     return this.history;
   }
 
-  /**
-   * Cancel current execution — immediately emits movementComplete so the web
-   * gets instant feedback, then cleans up the process tree in the background.
-   */
+  // ========== Lifecycle ==========
+
   cancel(): void {
     this._cancelled = true;
 
@@ -1644,8 +478,6 @@ export class ImprovisationSessionManager extends EventEmitter {
       this.currentRunner = null;
     }
 
-    // Emit movementComplete immediately so the web UI updates without waiting
-    // for the process tree to fully die (SIGTERM → SIGKILL can take up to 5s).
     if (this._isExecuting && !this._cancelCompleteEmitted) {
       this._cancelCompleteEmitted = true;
       const execStart = this._executionStartTimestamp || Date.now();
@@ -1672,40 +504,28 @@ export class ImprovisationSessionManager extends EventEmitter {
       this.emitMovementComplete(cancelledMovement, fallbackResult, execStart, this._currentSequenceNumber);
     }
 
-    this.queueOutput('\n⚠ Execution cancelled\n');
     this.flushOutputQueue();
   }
 
-  /**
-   * Cleanup queue processor on shutdown
-   */
   destroy(): void {
     if (this.queueTimer) {
       clearInterval(this.queueTimer);
       this.queueTimer = null;
     }
-    this.flushOutputQueue(); // Final flush
+    this.flushOutputQueue();
   }
 
-  /**
-   * Clear session history and reset to fresh Claude session
-   * This resets the isFirstPrompt flag and claudeSessionId so the next prompt starts a new session
-   */
   clearHistory(): void {
     this.history.movements = [];
     this.history.totalTokens = 0;
     this.accumulatedKnowledge = '';
-    this.isFirstPrompt = true; // Reset to start fresh Claude session
-    this.claudeSessionId = undefined; // Clear Claude session ID to start new conversation
-    this.cleanupAttachments();
+    this.isFirstPrompt = true;
+    this.claudeSessionId = undefined;
+    cleanupAttachments(this.options.workingDir, this.sessionId);
     this.saveHistory();
     this.emit('onSessionUpdate', this.getHistory());
   }
 
-  /**
-   * Request user approval for a plan
-   * Returns a promise that resolves when the user approves/rejects
-   */
   async requestApproval(plan: unknown): Promise<boolean> {
     return new Promise((resolve) => {
       this.pendingApproval = { plan, resolve };
@@ -1713,9 +533,6 @@ export class ImprovisationSessionManager extends EventEmitter {
     });
   }
 
-  /**
-   * Respond to approval request
-   */
   respondToApproval(approved: boolean): void {
     if (this.pendingApproval) {
       this.pendingApproval.resolve(approved);
@@ -1723,9 +540,6 @@ export class ImprovisationSessionManager extends EventEmitter {
     }
   }
 
-  /**
-   * Get session metadata
-   */
   getSessionInfo() {
     return {
       sessionId: this.sessionId,
@@ -1733,51 +547,28 @@ export class ImprovisationSessionManager extends EventEmitter {
       workingDir: this.options.workingDir,
       totalTokens: this.history.totalTokens,
       tokenBudgetThreshold: this.options.tokenBudgetThreshold,
-      movementCount: this.history.movements.length
+      movementCount: this.history.movements.length,
     };
   }
 
-  /**
-   * Whether a prompt is currently executing
-   */
   get isExecuting(): boolean {
     return this._isExecuting;
   }
 
-  /**
-   * Timestamp when current execution started (undefined when not executing)
-   */
   get executionStartTimestamp(): number | undefined {
     return this._executionStartTimestamp;
   }
 
-  /**
-   * Get buffered execution events for replay on reconnect.
-   * Only meaningful while isExecuting is true.
-   */
   getExecutionEventLog(): Array<{ type: string; data: unknown; timestamp: number }> {
     return this.executionEventLog;
   }
 
-  /**
-   * Start a new session with fresh context
-   * Creates a completely new session manager with isFirstPrompt=true and no claudeSessionId,
-   * ensuring the next prompt starts a fresh Claude conversation (proper tab isolation)
-   */
   startNewSession(overrides?: Partial<ImprovisationOptions>): ImprovisationSessionManager {
-    // Save current session
     this.saveHistory();
-
-    // Create new session manager - the new instance has:
-    // - isFirstPrompt=true by default
-    // - claudeSessionId=undefined by default
-    // This means the first prompt will start a completely fresh Claude conversation
-    const newSession = new ImprovisationSessionManager({
+    return new ImprovisationSessionManager({
       ...this.options,
       sessionId: `improv-${Date.now()}`,
       ...overrides,
     });
-
-    return newSession;
   }
 }

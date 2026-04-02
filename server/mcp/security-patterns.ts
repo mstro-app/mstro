@@ -12,9 +12,15 @@
  * - Only truly catastrophic operations (rm -rf /, fork bombs) are auto-denied
  * - Sensitive operations (system paths, credentials) get AI review with context
  * - The question is: "Does this operation make sense given user intent?"
+ *
+ * Analysis logic (requiresAIReview, classifyRisk) lives in security-analysis.ts
+ * and is re-exported here for backward compatibility.
  */
 
 import { resolve } from 'node:path';
+
+// Re-export analysis functions for backward compatibility
+export { classifyRisk, isSensitivePath, requiresAIReview } from './security-analysis.js';
 
 export interface SecurityPattern {
   pattern: RegExp;
@@ -56,8 +62,6 @@ export const SENSITIVE_PATHS: SecurityPattern[] = [
  * for context review. Only truly never-legitimate commands are here.
  */
 export const CRITICAL_THREATS: SecurityPattern[] = [
-  // Deleting root or home - no legitimate dev task requires this
-  // If user really wants this, they can run it manually outside Claude
   {
     pattern: /rm\s+-rf\s+(\/|~)($|\s)/i,
     reason: 'Deleting root (/) or home (~) directory is never a legitimate dev task'
@@ -86,7 +90,6 @@ export const CRITICAL_THREATS: SecurityPattern[] = [
     pattern: /chmod\s+000\s+\//i,
     reason: 'Attempting to make system directories inaccessible'
   },
-  // Reverse shells - never legitimate in a dev workflow
   {
     pattern: /\/dev\/tcp\//i,
     reason: 'Reverse shell via /dev/tcp - classic backdoor technique'
@@ -95,8 +98,6 @@ export const CRITICAL_THREATS: SecurityPattern[] = [
     pattern: /\bnc\b.*-[elp].*\b\d+\b/i,
     reason: 'Netcat listener/reverse shell - common backdoor technique'
   },
-  // NOTE: curl|bash is NOT here - it goes to Haiku for context review
-  // The question is "did a bad actor inject this?" not "is curl|bash dangerous?"
 ];
 
 /**
@@ -109,15 +110,13 @@ export const SAFE_OPERATIONS: SecurityPattern[] = [
   { pattern: /^Glob:/i },
   { pattern: /^Grep:/i },
 
-  // Write/Edit to user home directory or subdirectories - user requested, allow it
-  // Excludes system paths which go through critical threats check
-  { pattern: /^Write:\s*\/Users\/[^/]+\//i },  // macOS home dirs - Write
-  { pattern: /^Edit:\s*\/Users\/[^/]+\//i },   // macOS home dirs - Edit
-  { pattern: /^Write:\s*\/home\/[^/]+\//i },   // Linux home dirs - Write
-  { pattern: /^Edit:\s*\/home\/[^/]+\//i },    // Linux home dirs - Edit
+  // Write/Edit to user home directory or subdirectories
+  { pattern: /^Write:\s*\/Users\/[^/]+\//i },
+  { pattern: /^Edit:\s*\/Users\/[^/]+\//i },
+  { pattern: /^Write:\s*\/home\/[^/]+\//i },
+  { pattern: /^Edit:\s*\/home\/[^/]+\//i },
 
   // Safe bash commands - common development workflows
-  // NOTE: curl|bash goes to Haiku for context review, not auto-allowed
   { pattern: /^Bash:\s*(npm|yarn|pnpm|bun)\s+(install|ci|run|test|build|dev|start|lint|format)($|\s)/i },
   { pattern: /^Bash:\s*git\s+(status|log|diff|show|branch|clone|pull|fetch|add|stash|checkout)($|\s)/i },
   { pattern: /^Bash:\s*docker\s+(build|run|ps|logs|compose|images)($|\s)/i },
@@ -133,22 +132,42 @@ export const SAFE_OPERATIONS: SecurityPattern[] = [
   { pattern: /^Bash:\s*rm\s+-rf\s+(\.\/)?target($|\s)/i },
   { pattern: /^Bash:\s*rm\s+-rf\s+(\.\/)?__pycache__($|\s)/i },
 
-  // Write/Edit to temp directories - ephemeral, low risk
+  // Write/Edit to temp directories
   { pattern: /^(Write|Edit):\s*\/tmp\//i },
   { pattern: /^(Write|Edit):\s*\/var\/tmp\//i },
 
-  // Side-effect-free tools - no dangerous operations possible
+  // Side-effect-free tools
   { pattern: /^(ExitPlanMode|EnterPlanMode|TodoWrite|AskUserQuestion):/i },
+
+  // Additional common dev commands
+  { pattern: /^Bash:\s*(tsc|tsx|node|bun|deno|npx|bunx)\s/i },
+  { pattern: /^Bash:\s*(vitest|jest|mocha|tap)\s/i },
+  { pattern: /^Bash:\s*(biome|eslint|prettier|tslint)\s+(check|lint|format)/i },
+  { pattern: /^Bash:\s*(make|cmake|ninja|meson)($|\s)/i },
+  { pattern: /^Bash:\s*git\s+(commit|push|tag|remote|rebase|merge|cherry-pick|reset|revert)($|\s)/i },
+  { pattern: /^Bash:\s*git\s+(worktree|submodule|config|clean|gc)($|\s)/i },
+  { pattern: /^Bash:\s*(uname|hostname|whoami|id|groups|uptime|df|du|free|top|ps|lsof|stat|file|readlink)($|\s)/i },
+  { pattern: /^Bash:\s*(mv|cp|touch|ln|basename|dirname|realpath|mktemp|xargs|tee|tr|cut|paste|comm|diff|patch)($|\s)/i },
+  { pattern: /^Bash:\s*(tar|gzip|gunzip|zip|unzip|bzip2)\s/i },
+  { pattern: /^Bash:\s*(ruby|python3?|php|java|javac|scala|kotlinc|swift|rustc|gcc|g\+\+|clang)\s/i },
+  { pattern: /^Bash:\s*(pip|pip3|gem|bundle|composer|maven|gradle|sbt|cargo|rustup)\s/i },
+  { pattern: /^Bash:\s*(gh|hub)\s+(pr|issue|repo|release|run|api)\s/i },
+  { pattern: /^Bash:\s*(flyctl|fly)\s+(status|logs|ssh|deploy|apps|machines|secrets)($|\s)/i },
+  { pattern: /^Bash:\s*(terraform|tofu)\s+(init|plan|apply|validate|fmt|show|output)($|\s)/i },
+  { pattern: /^Bash:\s*wc($|\s)/i },
+
+  // WebFetch/WebSearch are inherently read-only
+  { pattern: /^WebFetch:/i },
+  { pattern: /^WebSearch:/i },
+
+  // Agent and NotebookEdit are orchestration-only
+  { pattern: /^Agent:/i },
+  { pattern: /^NotebookEdit:/i },
 ];
 
 /**
  * Patterns that trigger AI context review
  * These operations need context analysis to determine if they align with user intent
- *
- * The AI should consider:
- * 1. Did the user explicitly request this operation?
- * 2. Does it make sense given the task at hand?
- * 3. Is the content/action appropriate for the target?
  */
 export const NEEDS_AI_REVIEW: SecurityPattern[] = [
   // Remote code execution patterns
@@ -158,103 +177,57 @@ export const NEEDS_AI_REVIEW: SecurityPattern[] = [
   },
 
   // Elevated privileges
-  {
-    pattern: /sudo/i,
-    reason: 'Elevated privileges - verify user intended this action'
-  },
+  { pattern: /sudo/i, reason: 'Elevated privileges - verify user intended this action' },
 
   // Destructive operations (except safe build artifact cleanup)
-  {
-    pattern: /rm\s+-rf/i,
-    reason: 'Recursive deletion - verify target matches user intent'
-  },
+  { pattern: /rm\s+-rf/i, reason: 'Recursive deletion - verify target matches user intent' },
 
-  // Data exfiltration patterns — piping data to network tools
-  {
-    pattern: /\|\s*(nc|netcat|ncat)\b/i,
-    reason: 'Pipe to netcat - potential data exfiltration'
-  },
-  {
-    pattern: /\bscp\b.*@/i,
-    reason: 'SCP to remote host - potential data exfiltration'
-  },
-  {
-    pattern: /\|\s*curl\b/i,
-    reason: 'Pipe to curl - potential data exfiltration'
-  },
-  {
-    pattern: /curl\b.*-d\s*@/i,
-    reason: 'Curl with file upload - potential data exfiltration'
-  },
+  // Data exfiltration patterns
+  { pattern: /\|\s*(nc|netcat|ncat)\b/i, reason: 'Pipe to netcat - potential data exfiltration' },
+  { pattern: /\bscp\b.*@/i, reason: 'SCP to remote host - potential data exfiltration' },
+  { pattern: /\|\s*curl\b/i, reason: 'Pipe to curl - potential data exfiltration' },
+  { pattern: /curl\b.*-d\s*@/i, reason: 'Curl with file upload - potential data exfiltration' },
 
   // ALL Write/Edit operations that aren't to /tmp go through context review
-  // This is the key change: we review based on context, not blanket allow/deny
   {
     pattern: /^(Write|Edit):\s*(?!\/tmp\/|\/var\/tmp\/)/i,
     reason: 'File modification - verify aligns with user request'
   },
 
-  // Reverse shells and bind shells — network-connected interactive shells
-  {
-    pattern: /\/dev\/tcp\//i,
-    reason: 'Potential reverse shell via /dev/tcp'
-  },
-  {
-    pattern: /\b(nc|netcat|ncat)\b.*-e\s/i,
-    reason: 'Netcat with -e flag - potential reverse shell'
-  },
+  // Reverse shells and bind shells
+  { pattern: /\/dev\/tcp\//i, reason: 'Potential reverse shell via /dev/tcp' },
+  { pattern: /\b(nc|netcat|ncat)\b.*-e\s/i, reason: 'Netcat with -e flag - potential reverse shell' },
   {
     pattern: /\bsocket\b.*\bconnect\b.*\b(dup2|subprocess|exec)\b/i,
     reason: 'Programmatic reverse shell pattern (socket+connect+exec)'
   },
-  {
-    pattern: /\bperl\b.*\bsocket\b.*\bexec\b/i,
-    reason: 'Perl reverse shell pattern'
-  },
+  { pattern: /\bperl\b.*\bsocket\b.*\bexec\b/i, reason: 'Perl reverse shell pattern' },
 
   // Encoded/obfuscated payloads piped to shell or eval
   {
     pattern: /\b(base64|base32)\b.*-d.*\|\s*(bash|sh)\b/i,
     reason: 'Decoded payload piped to shell - obfuscated command execution'
   },
-  {
-    pattern: /\\x[0-9a-f]{2}.*\|\s*(bash|sh)\b/i,
-    reason: 'Hex-encoded payload piped to shell'
-  },
-  {
-    pattern: /\bexec\b.*\b(base64|b64decode)\b/i,
-    reason: 'Exec with base64 decoding - obfuscated code execution'
-  },
+  { pattern: /\\x[0-9a-f]{2}.*\|\s*(bash|sh)\b/i, reason: 'Hex-encoded payload piped to shell' },
+  { pattern: /\bexec\b.*\b(base64|b64decode)\b/i, reason: 'Exec with base64 decoding - obfuscated code execution' },
   {
     pattern: /\bprintf\b.*\\x[0-9a-f].*\|\s*(bash|sh)\b/i,
     reason: 'Printf hex payload piped to shell'
   },
 
-  // Cloud metadata / SSRF — accessing cloud instance credentials
-  {
-    pattern: /169\.254\.169\.254/i,
-    reason: 'AWS/Azure IMDS access - potential credential theft'
-  },
-  {
-    pattern: /metadata\.google\.internal/i,
-    reason: 'GCP metadata access - potential credential theft'
-  },
+  // Cloud metadata / SSRF
+  { pattern: /169\.254\.169\.254/i, reason: 'AWS/Azure IMDS access - potential credential theft' },
+  { pattern: /metadata\.google\.internal/i, reason: 'GCP metadata access - potential credential theft' },
 
-  // Persistence — writing to shell profiles, cron, authorized_keys via echo/append
+  // Persistence mechanisms
   {
     pattern: />>\s*~?\/?.*\/(authorized_keys|\.bashrc|\.bash_profile|\.zshrc|\.profile)/i,
     reason: 'Appending to sensitive file - potential persistence mechanism'
   },
-  {
-    pattern: /\bld\.so\.preload\b/i,
-    reason: 'LD_PRELOAD injection - shared library hijacking'
-  },
+  { pattern: /\bld\.so\.preload\b/i, reason: 'LD_PRELOAD injection - shared library hijacking' },
 
   // wget with file upload
-  {
-    pattern: /wget\b.*--post-file/i,
-    reason: 'wget file upload - potential data exfiltration'
-  },
+  { pattern: /wget\b.*--post-file/i, reason: 'wget file upload - potential data exfiltration' },
 
   // pip install from custom index (supply chain attack)
   {
@@ -263,11 +236,10 @@ export const NEEDS_AI_REVIEW: SecurityPattern[] = [
   },
 
   // MCP server manipulation
-  {
-    pattern: /\bclaude\b.*\bmcp\b.*\badd\b/i,
-    reason: 'Adding MCP server - verify source is trusted'
-  },
+  { pattern: /\bclaude\b.*\bmcp\b.*\badd\b/i, reason: 'Adding MCP server - verify source is trusted' },
 ];
+
+// ── Utility functions ─────────────────────────────────────────
 
 /**
  * Check if operation matches any pattern in array
@@ -294,199 +266,4 @@ export function normalizeOperation(operation: string): string {
     return `${tool}: ${normalizedPath}`;
   }
   return operation;
-}
-
-/** Check if a Bash command contains chain operators that could hide dangerous ops after a safe prefix. */
-function containsChainOperators(operation: string): boolean {
-  const commandPart = operation.replace(/^Bash:\s*/i, '');
-  return /;|&&|\|\||\n/.test(commandPart);
-}
-
-/** Check if a Bash command pipes output to known exfiltration/network tools or shells. */
-function containsDangerousPipe(operation: string): boolean {
-  const commandPart = operation.replace(/^Bash:\s*/i, '');
-  return /\|\s*(nc|netcat|ncat|curl|wget|scp|bash|sh)\b/i.test(commandPart);
-}
-
-/** Check if a Bash command redirects output to sensitive paths (append or overwrite). */
-function containsSensitiveRedirect(operation: string): boolean {
-  const commandPart = operation.replace(/^Bash:\s*/i, '');
-  return />>?\s*~?\/?.*\/(authorized_keys|\.bashrc|\.bash_profile|\.zshrc|\.profile|\.ssh\/|\.aws\/|\.gnupg\/|ld\.so\.preload|crontab|sudoers)/i.test(commandPart)
-    || />>?\s*\/etc\//i.test(commandPart);
-}
-
-/** Check if a Bash command contains subshell or backtick expansion (not simple ${VAR}). */
-function containsBashExpansion(operation: string): boolean {
-  const commandPart = operation.replace(/^Bash:\s*/i, '');
-  return /`[^`]+`/.test(commandPart) || /\$\([^)]+\)/.test(commandPart);
-}
-
-/** Check if a Bash command contains any form of shell expansion: ${VAR}, $(...), or backticks. */
-function containsAnyExpansion(operation: string): boolean {
-  const cmd = operation.replace(/^Bash:\s*/i, '');
-  return /\$\{[^}]+\}/.test(cmd) || /\$\([^)]+\)/.test(cmd) || /`[^`]+`/.test(cmd);
-}
-
-/** Check if expansion is safely used as an argument to a known-safe command prefix.
- *  e.g., "echo ${HOME}" or "cat ${FILE}" — the expansion can't change the command itself. */
-function isSafeExpansionUse(operation: string): boolean {
-  const cmd = operation.replace(/^Bash:\s*/i, '').trim();
-  // If the expansion IS the command (first token), it's never safe
-  if (/^(\$\{|\$\(|`)/.test(cmd)) return false;
-  // Safe command prefixes where expansion as an argument is harmless
-  const safePrefix = /^(echo|printf|cat|ls|pwd|whoami|date|env|printenv|test|true|false)\s/i;
-  return safePrefix.test(cmd);
-}
-
-/**
- * Determine if operation requires AI context review
- *
- * The philosophy here is:
- * - SENSITIVE_PATHS: Always require review (credentials, system configs)
- * - SAFE_OPERATIONS: No review needed, UNLESS the bash command contains
- *   chain operators, dangerous pipes, or subshell/backtick expansion
- * - CRITICAL_THREATS: Auto-deny, no review (catastrophic operations)
- * - Everything else: AI reviews context to determine if it matches user intent
- */
-const SAFE_RM_PATTERNS = [
-  /rm\s+-rf\s+(\.\/)?node_modules($|\s)/i,
-  /rm\s+-rf\s+(\.\/)?dist($|\s)/i,
-  /rm\s+-rf\s+(\.\/)?build($|\s)/i,
-  /rm\s+-rf\s+(\.\/)?\.cache($|\s)/i,
-  /rm\s+-rf\s+(\.\/)?\.next($|\s)/i,
-  /rm\s+-rf\s+(\.\/)?target($|\s)/i,
-  /rm\s+-rf\s+(\.\/)?__pycache__($|\s)/i,
-];
-
-export function requiresAIReview(operation: string): boolean {
-  // Normalize paths to prevent .. traversal bypass
-  const op = normalizeOperation(operation);
-
-  // Check sensitive paths BEFORE safe operations — prevents home-dir
-  // safe pattern from masking .ssh, .aws, .bashrc, etc.
-  if (matchesPattern(op, SENSITIVE_PATHS)) return true;
-
-  // Bash commands with any shell expansion (${VAR}, $(...), backticks) are
-  // opaque — the bouncer can't predict what they expand to at runtime.
-  // Route to AI review BEFORE checking CRITICAL_THREATS or SAFE_OPERATIONS,
-  // UNLESS the command is clearly safe (expansion is just an argument to a
-  // known-safe prefix like "echo ${HOME}").
-  if (/^Bash:/i.test(op) && containsAnyExpansion(op) && !isSafeExpansionUse(op)) {
-    return true;
-  }
-
-  if (matchesPattern(op, SAFE_OPERATIONS)) {
-    // Safe bash commands must not contain chain operators, dangerous pipes,
-    // or subshell/backtick expansion that could hide dangerous operations.
-    // A safe prefix (e.g., "git clone") with chain operators (&&, ;, ||)
-    // means the full command isn't necessarily safe — route to AI review.
-    if (/^Bash:/i.test(op) && (
-      containsChainOperators(op) ||
-      containsDangerousPipe(op) ||
-      containsBashExpansion(op) ||
-      containsSensitiveRedirect(op)
-    )) {
-      return true;
-    }
-    return false;
-  }
-
-  if (matchesPattern(op, CRITICAL_THREATS)) return false;
-
-  if (matchesPattern(op, NEEDS_AI_REVIEW)) {
-    return !SAFE_RM_PATTERNS.some(p => p.test(op));
-  }
-
-  // Glob patterns and script execution are concerning in Bash commands
-  if (/^Bash:/.test(op)) {
-    if (/\*\*?/.test(op)) return true;
-    if (/^Bash:\s*\.\//.test(op)) return true;
-  }
-
-  return false;
-}
-
-/**
- * Check if operation targets a sensitive path
- * Used to provide additional context to AI reviewer
- */
-export function isSensitivePath(operation: string): SecurityPattern | null {
-  return matchesPattern(operation, SENSITIVE_PATHS);
-}
-
-/**
- * Classify operation risk level for context-aware review
- *
- * Risk levels indicate how much scrutiny the AI should apply:
- * - critical: Catastrophic if wrong (rm -rf /, fork bombs) - auto-deny
- * - high: Needs clear user intent (sudo, sensitive paths, credentials)
- * - medium: Normal file operations - verify matches user request
- * - low: Safe operations - minimal review needed
- */
-export function classifyRisk(operation: string): {
-  isDestructive: boolean;
-  riskLevel: 'low' | 'medium' | 'high' | 'critical';
-  reasons: string[];
-} {
-  // Critical threats are auto-denied
-  const criticalThreat = matchesPattern(operation, CRITICAL_THREATS);
-  if (criticalThreat) {
-    return {
-      isDestructive: true,
-      riskLevel: 'critical',
-      reasons: [criticalThreat.reason || 'Critical threat detected']
-    };
-  }
-
-  // Sensitive paths need high scrutiny but aren't auto-denied
-  const sensitivePath = matchesPattern(operation, SENSITIVE_PATHS);
-  if (sensitivePath) {
-    return {
-      isDestructive: false, // Not inherently destructive, just sensitive
-      riskLevel: 'high',
-      reasons: [sensitivePath.reason || 'Sensitive path - requires clear user intent']
-    };
-  }
-
-  // Other patterns that need elevated review
-  const elevatedPatterns: SecurityPattern[] = [
-    { pattern: /sudo/i, reason: 'Elevated privileges requested' },
-    { pattern: /DROP\s+(TABLE|DATABASE)/i, reason: 'Database deletion' },
-    { pattern: /chmod\s+777/i, reason: 'Dangerous permissions' },
-    { pattern: /(curl|wget).*\|.*(bash|sh)/i, reason: 'Remote code execution' },
-    { pattern: /pkill|killall/i, reason: 'Process termination' },
-    { pattern: /\|\s*(nc|netcat|ncat)\b/i, reason: 'Data exfiltration via netcat' },
-    { pattern: /\bscp\b.*@/i, reason: 'Data exfiltration via SCP' },
-    { pattern: /curl\b.*-d\s*@/i, reason: 'Data exfiltration via curl file upload' },
-  ];
-
-  for (const pattern of elevatedPatterns) {
-    if (pattern.pattern.test(operation)) {
-      return {
-        isDestructive: true,
-        riskLevel: 'high',
-        reasons: [pattern.reason || 'Elevated risk operation']
-      };
-    }
-  }
-
-  // Medium risk: only recursive deletions outside safe dirs
-  // NOTE: Write/Edit are NOT flagged as risky - they're normal dev operations
-  if (/rm\s+-rf/i.test(operation)) {
-    // Check if it's actually safe (build artifacts, temp)
-    if (matchesPattern(operation, SAFE_OPERATIONS)) {
-      return { isDestructive: false, riskLevel: 'low', reasons: [] };
-    }
-    return {
-      isDestructive: true,
-      riskLevel: 'medium',
-      reasons: ['Recursive deletion']
-    };
-  }
-
-  return {
-    isDestructive: false,
-    riskLevel: 'low',
-    reasons: []
-  };
 }

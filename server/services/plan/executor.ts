@@ -211,7 +211,8 @@ export class PlanExecutor extends EventEmitter {
         },
       });
 
-      const result = await runWithFileLogger('pm-execute-wave', () => runner.run());
+      const boardLogDir = this.boardDir ? join(this.boardDir, 'logs') : undefined;
+      const result = await runWithFileLogger('pm-execute-wave', () => runner.run(), boardLogDir);
 
       if (!result.completed || result.error) {
         this.emit('waveError', {
@@ -338,6 +339,7 @@ export class PlanExecutor extends EventEmitter {
       pmDir,
       outputPath,
       onOutput: (text) => this.emit('output', { issueId: issue.id, text }),
+      logDir: this.boardDir ? join(this.boardDir, 'logs') : undefined,
     });
     persistReviewResult(reviewDir, issue, result);
 

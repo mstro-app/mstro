@@ -8,7 +8,7 @@
  */
 
 import { existsSync, readdirSync, readFileSync, type Stats, statSync } from 'node:fs';
-import { extname, join, relative, sep } from 'node:path';
+import { extname, join, relative, resolve, sep } from 'node:path';
 import type { CacheEntry, } from './types.js';
 
 // Directories always excluded from autocomplete scanning
@@ -286,8 +286,8 @@ function readTextContent(fullPath: string, filePath: string, fileName: string, s
 }
 
 function validateFileAccess(fullPath: string, filePath: string, fileName: string, workingDir: string): FileContentResult | null {
-  const normalizedPath = join(fullPath);
-  if (!normalizedPath.startsWith(join(workingDir)) && !isPathInSafeLocation(normalizedPath)) {
+  const normalizedPath = resolve(fullPath);
+  if (!normalizedPath.startsWith(resolve(workingDir)) && !isPathInSafeLocation(normalizedPath)) {
     return { path: filePath, fileName, content: '', error: 'Access denied: path outside allowed locations' };
   }
   if (!existsSync(fullPath)) {

@@ -226,6 +226,8 @@ export interface BoardArtifacts {
   progressLog: string;
   outputFiles: string[];
   reviewResults: ReviewResult[];
+  /** Log file names from boards/BOARD-NNN/logs/ (wave execution + review logs) */
+  executionLogs: string[];
 }
 
 /** @deprecated Use BoardArtifacts — kept for migration compatibility */

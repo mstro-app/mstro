@@ -1,11 +1,8 @@
 // Copyright (c) 2025-present Mstro, Inc. All rights reserved.
 // Licensed under the MIT License. See LICENSE file for details.
 
-import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { getPrBaseBranch, setPrBaseBranch } from '../settings.js';
-import { detectGitProvider, executeGitCommand, spawnCheck, spawnWithOutput, stripCoauthorLines } from './git-handlers.js';
+import { detectGitProvider, executeGitCommand, spawnCheck, spawnHaikuWithPrompt, spawnWithOutput, stripCoauthorLines, truncateDiff } from './git-handlers.js';
 import type { HandlerContext } from './handler-context.js';
 import type { WebSocketMessage, WSContext } from './types.js';
 
@@ -273,20 +270,7 @@ async function handleGitGeneratePRDescription(ctx: HandlerContext, ws: WSContext
     }
 
     const diffResult = await executeGitCommand(['diff', `${compareRef}...HEAD`], workingDir);
-    const diff = diffResult.exitCode === 0 ? diffResult.stdout : '';
-
     const statResult = await executeGitCommand(['diff', `${compareRef}...HEAD`, '--stat'], workingDir);
-    const stat = statResult.exitCode === 0 ? statResult.stdout.trim() : '';
-
-    let truncatedDiff = diff;
-    if (diff.length > 8000) {
-      truncatedDiff = `${diff.slice(0, 4000)}\n\n... [diff truncated] ...\n\n${diff.slice(-3500)}`;
-    }
-
-    const tempDir = join(workingDir, '.mstro', 'tmp');
-    if (!existsSync(tempDir)) {
-      mkdirSync(tempDir, { recursive: true });
-    }
 
     const prompt = `You are generating a pull request title and description for the following changes.
 
@@ -294,10 +278,10 @@ COMMITS (${baseBranch}..HEAD):
 ${commits}
 
 FILES CHANGED:
-${stat}
+${statResult.exitCode === 0 ? statResult.stdout.trim() : ''}
 
 DIFF:
-${truncatedDiff}
+${truncateDiff(diffResult.exitCode === 0 ? diffResult.stdout : '')}
 
 Generate a pull request title and description following these rules:
 1. TITLE: First line must be the PR title — imperative mood, under 70 characters
@@ -310,53 +294,24 @@ Generate a pull request title and description following these rules:
 
 Respond with ONLY the title and description, nothing else.`;
 
-    const promptFile = join(tempDir, `pr-desc-${Date.now()}.txt`);
-    writeFileSync(promptFile, prompt);
+    const result = await spawnHaikuWithPrompt(
+      prompt,
+      'You are a pull request description assistant. Respond with only the PR title and description, no preamble or explanation.',
+      workingDir,
+    );
 
-    const systemPrompt = 'You are a pull request description assistant. Respond with only the PR title and description, no preamble or explanation.';
-
-    const args = [
-      '--print',
-      '--model', 'haiku',
-      '--system-prompt', systemPrompt,
-      promptFile
-    ];
-
-    const claude = spawn('claude', args, {
-      cwd: workingDir,
-      stdio: ['ignore', 'pipe', 'pipe']
-    });
-
-    let stdout = '';
-    let stderr = '';
-
-    claude.stdout?.on('data', (data: Buffer) => { stdout += data.toString(); });
-    claude.stderr?.on('data', (data: Buffer) => { stderr += data.toString(); });
-
-    claude.on('close', (code: number | null) => {
-      try { unlinkSync(promptFile); } catch { /* ignore */ }
-
-      if (code !== 0 || !stdout.trim()) {
-        console.error('[WebSocketImproviseHandler] Claude PR description error:', stderr || 'No output');
-        ctx.send(ws, { type: 'gitError', tabId, data: { error: 'Failed to generate PR description' } });
-        return;
-      }
-
-      const output = stripCoauthorLines(stdout.trim());
-      const lines = output.split('\n');
-      const title = lines[0].trim();
-      const body = lines.slice(1).join('\n').trim();
-
-      ctx.send(ws, { type: 'gitPRDescription', tabId, data: { title, body } });
-    });
-
-    claude.on('error', (err: Error) => {
-      console.error('[WebSocketImproviseHandler] Failed to spawn Claude for PR description:', err);
+    if (result.exitCode !== 0 || !result.stdout.trim()) {
+      console.error('[WebSocketImproviseHandler] Claude PR description error:', result.stderr || 'No output');
       ctx.send(ws, { type: 'gitError', tabId, data: { error: 'Failed to generate PR description' } });
-    });
+      return;
+    }
 
-    setTimeout(() => { claude.kill(); }, 30000);
+    const output = stripCoauthorLines(result.stdout.trim());
+    const lines = output.split('\n');
+    const title = lines[0].trim();
+    const body = lines.slice(1).join('\n').trim();
 
+    ctx.send(ws, { type: 'gitPRDescription', tabId, data: { title, body } });
   } catch (error: unknown) {
     ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
   }

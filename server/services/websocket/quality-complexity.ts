@@ -238,38 +238,55 @@ async function complexityFromRadon(dirPath: string): Promise<QualityFinding[] | 
   }
 }
 
+async function analyzeNodeComplexity(
+  dirPath: string,
+  installed: Set<string> | null,
+): Promise<QualityFinding[] | null> {
+  const hasCapableTool = !installed || installed.has('biome') || installed.has('eslint');
+  if (!hasCapableTool) return null;
+
+  const hasBiomeConfig = existsSync(join(dirPath, 'biome.json')) || existsSync(join(dirPath, 'biome.jsonc'));
+  if (hasBiomeConfig) {
+    const findings = await complexityFromBiome(dirPath);
+    if (findings) return findings;
+  }
+  return complexityFromEslint(dirPath);
+}
+
+async function analyzePythonComplexity(
+  dirPath: string,
+  installed: Set<string> | null,
+): Promise<QualityFinding[] | null> {
+  const hasRadon = !installed || installed.has('radon');
+  if (!hasRadon) return null;
+  return complexityFromRadon(dirPath);
+}
+
 export async function analyzeComplexity(
   dirPath: string,
   ecosystems: Ecosystem[],
+  installedToolNames?: string[],
 ): Promise<{ score: number; findings: QualityFinding[]; issueCount: number; available: boolean }> {
   const allFindings: QualityFinding[] = [];
-  let anyRan = false;
+  const installed = installedToolNames ? new Set(installedToolNames) : null;
+  let canAnalyze = false;
 
-  if (ecosystems.includes('node')) {
-    const hasBiome = existsSync(join(dirPath, 'biome.json')) || existsSync(join(dirPath, 'biome.jsonc'));
-    const findings = hasBiome
-      ? await complexityFromBiome(dirPath)
-      : await complexityFromEslint(dirPath);
+  for (const ecosystem of ecosystems) {
+    const analyze = ecosystem === 'node' ? analyzeNodeComplexity : ecosystem === 'python' ? analyzePythonComplexity : null;
+    if (!analyze) continue;
+    const findings = await analyze(dirPath, installed);
     if (findings) {
-      anyRan = true;
+      canAnalyze = true;
       allFindings.push(...findings);
     }
   }
 
-  if (ecosystems.includes('python')) {
-    const findings = await complexityFromRadon(dirPath);
-    if (findings) {
-      anyRan = true;
-      allFindings.push(...findings);
-    }
-  }
-
-  if (!anyRan) {
+  if (!canAnalyze) {
     return { score: 0, findings: [], issueCount: 0, available: false };
   }
 
   return {
-    score: computeComplexityScore(allFindings),
+    score: allFindings.length > 0 ? computeComplexityScore(allFindings) : 100,
     findings: allFindings.slice(0, 50),
     issueCount: allFindings.length,
     available: true,

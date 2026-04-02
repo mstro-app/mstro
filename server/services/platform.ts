@@ -7,92 +7,23 @@
  * Handles WebSocket connection to the Mstro platform.
  * Requires token-based authentication from `mstro login`.
  *
- * Flow:
- * 1. Client reads token from ~/.mstro/credentials.json
- * 2. Client connects to platform WebSocket with auth token
- * 3. Platform validates token and auto-pairs to user's account
- * 4. Client becomes an "orchestra" visible in user's web dashboard
+ * Credential management lives in platform-credentials.ts.
  */
 
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { arch, homedir, hostname, type } from 'node:os'
-import { basename, join } from 'node:path'
+import { arch, hostname, type } from 'node:os'
+import { basename } from 'node:path'
 import { AnalyticsEvents, trackEvent } from './analytics.js'
 import { getClientId } from './client-id.js'
+import {
+  CLI_VERSION,
+  getCredentials,
+  shouldRefreshToken,
+  updateCredentials,
+} from './platform-credentials.js'
 import { captureException } from './sentry.js'
-
-// Read CLI version from package.json once at import time
-const CLI_VERSION = (() => {
-  try {
-    const pkg = JSON.parse(readFileSync(join(import.meta.dirname || '.', '..', 'package.json'), 'utf-8'))
-    return pkg.version || '0.0.0'
-  } catch {
-    return '0.0.0'
-  }
-})()
-
-const MSTRO_DIR = join(homedir(), '.mstro')
-const CREDENTIALS_FILE = join(MSTRO_DIR, 'credentials.json')
-
-// Refresh token every 30 days
-const TOKEN_REFRESH_INTERVAL_MS = 30 * 24 * 60 * 60 * 1000
-
-interface StoredCredentials {
-  token: string
-  userId: string
-  email: string
-  name?: string
-  clientId: string
-  lastRefreshedAt?: string
-}
-
-/**
- * Get stored credentials from ~/.mstro/credentials.json
- */
-function getCredentials(): StoredCredentials | null {
-  if (!existsSync(CREDENTIALS_FILE)) {
-    return null
-  }
-  try {
-    const content = readFileSync(CREDENTIALS_FILE, 'utf-8')
-    const creds = JSON.parse(content)
-    if (creds.token && creds.userId && creds.email) {
-      return creds
-    }
-    return null
-  } catch {
-    return null
-  }
-}
-
-/**
- * Update stored credentials (for token refresh)
- */
-function updateCredentials(updates: Partial<StoredCredentials>): void {
-  const creds = getCredentials()
-  if (!creds) return
-
-  writeFileSync(CREDENTIALS_FILE, JSON.stringify({ ...creds, ...updates }, null, 2), {
-    mode: 0o600
-  })
-}
-
-/**
- * Check if token should be refreshed
- */
-function shouldRefreshToken(creds: StoredCredentials): boolean {
-  if (!creds.lastRefreshedAt) {
-    return true // Never refreshed
-  }
-
-  const lastRefreshed = new Date(creds.lastRefreshedAt).getTime()
-  const now = Date.now()
-  return now - lastRefreshed > TOKEN_REFRESH_INTERVAL_MS
-}
 
 /**
  * Get machine identification string
- * Format: "hostname @ node-vX.X.X platform (arch)"
  * Example: "Jessica @ node-v22.21.1 linux (arm64)"
  */
 export function getMachineIdentifier(): string {
@@ -124,9 +55,6 @@ interface ConnectionCallbacks {
   onRelayedMessage?: (message: unknown) => void
 }
 
-/**
- * Platform WebSocket connection with token-based authentication
- */
 /** Number of missed pongs before treating connection as dead */
 const MAX_MISSED_PONGS = 2
 
@@ -144,6 +72,7 @@ export class PlatformConnection {
   private tokenRefreshInterval: ReturnType<typeof setInterval> | null = null
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null
   private missedPongs = 0
+  private readonly startedAt: string
 
   constructor(
     workingDirectory: string,
@@ -153,16 +82,12 @@ export class PlatformConnection {
     this.workingDirectory = workingDirectory
     this.platformUrl = platformUrl || DEFAULT_PLATFORM_URL
     this.callbacks = callbacks
+    this.startedAt = new Date().toISOString()
   }
 
-  /**
-   * Refresh the device token if needed
-   */
   private async maybeRefreshToken(): Promise<void> {
     const creds = getCredentials()
-    if (!creds || !shouldRefreshToken(creds)) {
-      return
-    }
+    if (!creds || !shouldRefreshToken(creds)) return
 
     try {
       const response = await fetch(`${this.platformUrl}/api/auth/device/refresh`, {
@@ -187,25 +112,14 @@ export class PlatformConnection {
     }
   }
 
-  /**
-   * Start periodic token refresh check
-   */
   private startTokenRefreshCheck(): void {
-    // Check every 24 hours
     this.tokenRefreshInterval = setInterval(() => {
       this.maybeRefreshToken()
     }, 24 * 60 * 60 * 1000)
   }
 
-  /**
-   * Start heartbeat to keep connection alive and refresh server-side TTL.
-   * Tracks missed pongs — if the server doesn't respond to MAX_MISSED_PONGS
-   * consecutive pings, the connection is considered dead and force-closed
-   * to trigger reconnection.
-   */
   private startHeartbeat(): void {
     this.missedPongs = 0
-    // Send ping every 2 minutes (server TTL is 5 minutes)
     this.heartbeatInterval = setInterval(() => this.heartbeatTick(), 2 * 60 * 1000)
   }
 
@@ -227,9 +141,6 @@ export class PlatformConnection {
     }
   }
 
-  /**
-   * Stop heartbeat
-   */
   private stopHeartbeat(): void {
     if (this.heartbeatInterval) {
       clearInterval(this.heartbeatInterval)
@@ -237,9 +148,6 @@ export class PlatformConnection {
     }
   }
 
-  /**
-   * Stop periodic token refresh check
-   */
   private stopTokenRefreshCheck(): void {
     if (this.tokenRefreshInterval) {
       clearInterval(this.tokenRefreshInterval)
@@ -247,9 +155,6 @@ export class PlatformConnection {
     }
   }
 
-  /**
-   * Connect to platform WebSocket
-   */
   connect(): void {
     this.isIntentionallyClosed = false
     const name = basename(this.workingDirectory)
@@ -260,7 +165,6 @@ export class PlatformConnection {
     const osType = type().toLowerCase()
     const cpuArch = arch()
 
-    // Get auth token from credentials
     const credentials = getCredentials()
     const authToken = credentials?.token
 
@@ -270,8 +174,6 @@ export class PlatformConnection {
       return
     }
 
-    // Build URL params WITHOUT the auth token — token is sent post-connection
-    // to avoid leaking it in proxy logs, browser history, and server access logs
     const params = new URLSearchParams({
       name,
       workingDirectory: this.workingDirectory,
@@ -282,7 +184,8 @@ export class PlatformConnection {
       osType,
       cpuArch,
       cliVersion: CLI_VERSION,
-      capabilities: JSON.stringify({})
+      capabilities: JSON.stringify({}),
+      startedAt: this.startedAt,
     })
 
     const wsUrl = `${this.platformUrl.replace(/^http/, 'ws')}/ws/client?${params}`
@@ -297,10 +200,9 @@ export class PlatformConnection {
       return
     }
 
-    // Connection timeout - if not connected within 10 seconds, show helpful error
     const connectionTimeout = setTimeout(() => {
       const state = this.ws?.readyState
-      if (this.ws && (state === 0 || state === undefined)) { // CONNECTING or unknown
+      if (this.ws && (state === 0 || state === undefined)) {
         console.error('\n❌ Connection timeout. The platform may have rejected your credentials.')
         console.error('   Run `mstro login --force` to re-authenticate.\n')
         this.ws.close()
@@ -310,14 +212,8 @@ export class PlatformConnection {
 
     this.ws.onopen = () => {
       clearTimeout(connectionTimeout)
-      // Platform WebSocket open — auth will follow
-
-      // Send auth token as first message instead of URL param
       this.ws!.send(JSON.stringify({ type: 'auth', token: authToken }))
-
-      // Check if token needs refresh on connect
       this.maybeRefreshToken()
-      // Start periodic refresh checks
       this.startTokenRefreshCheck()
       this.reconnectAttempts = 0
       trackEvent(AnalyticsEvents.PLATFORM_CONNECTED)
@@ -332,7 +228,6 @@ export class PlatformConnection {
       }
     }
 
-    // Track if we ever successfully connected (received 'paired' message)
     let everConnected = false
     const originalOnConnected = this.callbacks.onConnected
     this.callbacks.onConnected = (connectionId) => {
@@ -341,12 +236,10 @@ export class PlatformConnection {
     }
 
     this.ws.onclose = (event) => {
-      // Stop heartbeat on any close
       this.stopHeartbeat()
       this.isConnected = false
 
       if (!this.isIntentionallyClosed) {
-        // Check if we were rejected due to auth (code 4001 or 1006 before ever connecting)
         const isAuthFailure = event.code === 4001 ||
           event.reason?.includes('Unauthorized') ||
           (event.code === 1006 && !everConnected)
@@ -375,29 +268,21 @@ export class PlatformConnection {
       case 'paired':
         this.isConnected = true
         this.connectionId = message.connectionId as string
-        // Connection status printed by onConnected callback
-        // Start heartbeat to keep server-side TTL refreshed
         this.startHeartbeat()
         this.callbacks.onConnected?.(message.connectionId as string)
         break
-
       case 'web_connected':
         this.callbacks.onWebConnected?.()
         trackEvent(AnalyticsEvents.WEB_CLIENT_CONNECTED)
         break
-
       case 'web_disconnected':
         this.callbacks.onWebDisconnected?.()
         trackEvent(AnalyticsEvents.WEB_CLIENT_DISCONNECTED)
         break
-
       case 'pong':
         this.missedPongs = 0
         break
-
       default:
-        // Relay message from web to wsHandler
-        // These are messages like 'execute', 'initTab', 'autocomplete', etc.
         this.callbacks.onRelayedMessage?.(message)
         break
     }
@@ -420,29 +305,18 @@ export class PlatformConnection {
     }, delay)
   }
 
-  /**
-   * Send message to platform (will be relayed to web if connected)
-   */
   send(message: unknown): void {
     if (this.ws && this.ws.readyState === WebSocketImpl.OPEN) {
       this.ws.send(JSON.stringify(message))
     }
   }
 
-  /**
-   * Check if connected to platform
-   */
   isConnectedToPlatform(): boolean {
     return this.isConnected && this.ws?.readyState === WebSocketImpl.OPEN
   }
 
-  /**
-   * Disconnect from platform
-   */
   disconnect(): void {
     this.isIntentionallyClosed = true
-
-    // Stop heartbeat and token refresh checks
     this.stopHeartbeat()
     this.stopTokenRefreshCheck()
 

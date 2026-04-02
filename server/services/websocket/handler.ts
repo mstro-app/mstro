@@ -118,7 +118,30 @@ export class WebSocketImproviseHandler implements HandlerContext {
     }
   }
 
+  /** Dispatch table mapping message types to domain handlers. Built once, looked up per message. */
+  private static readonly DISPATCH: Record<string, 'session' | 'history' | 'file' | 'terminal' | 'fileExplorer' | 'git' | 'quality' | 'plan' | 'fileUpload'> = {
+    // Session
+    execute: 'session', cancel: 'session', getHistory: 'session', new: 'session', approve: 'session', reject: 'session',
+    // History
+    getSessions: 'history', getSessionsCount: 'history', getSessionById: 'history', deleteSession: 'history', clearHistory: 'history', searchHistory: 'history',
+    // File autocomplete/read
+    autocomplete: 'file', readFile: 'file', recordSelection: 'file',
+    // Terminal
+    terminalInit: 'terminal', terminalReconnect: 'terminal', terminalList: 'terminal', terminalInput: 'terminal', terminalResize: 'terminal', terminalClose: 'terminal',
+    // File explorer
+    listDirectory: 'fileExplorer', writeFile: 'fileExplorer', createFile: 'fileExplorer', createDirectory: 'fileExplorer', deleteFile: 'fileExplorer', renameFile: 'fileExplorer', notifyFileOpened: 'fileExplorer', searchFileContents: 'fileExplorer', cancelSearch: 'fileExplorer', findDefinition: 'fileExplorer',
+    // Git
+    gitStatus: 'git', gitStage: 'git', gitUnstage: 'git', gitCommit: 'git', gitCommitWithAI: 'git', gitPush: 'git', gitPull: 'git', gitLog: 'git', gitDiscoverRepos: 'git', gitSetDirectory: 'git', gitGetRemoteInfo: 'git', gitCreatePR: 'git', gitGeneratePRDescription: 'git', gitListBranches: 'git', gitCheckout: 'git', gitCreateBranch: 'git', gitDeleteBranch: 'git', gitDiff: 'git', gitShowCommit: 'git', gitCommitDiff: 'git', gitListTags: 'git', gitCreateTag: 'git', gitPushTag: 'git', gitWorktreeList: 'git', gitWorktreeCreate: 'git', gitWorktreeCreateAndAssign: 'git', gitWorktreeRemove: 'git', tabWorktreeSwitch: 'git', gitWorktreePush: 'git', gitWorktreeCreatePR: 'git', gitMergePreview: 'git', gitWorktreeMerge: 'git', gitMergeAbort: 'git', gitMergeComplete: 'git',
+    // Quality
+    qualityDetectTools: 'quality', qualityScan: 'quality', qualityInstallTools: 'quality', qualityCodeReview: 'quality', qualityFixIssues: 'quality', qualityLoadState: 'quality', qualitySaveDirectories: 'quality',
+    // Plan + boards + sprints
+    planInit: 'plan', planGetState: 'plan', planListIssues: 'plan', planGetIssue: 'plan', planGetSprint: 'plan', planGetMilestone: 'plan', planCreateIssue: 'plan', planUpdateIssue: 'plan', planDeleteIssue: 'plan', planScaffold: 'plan', planPrompt: 'plan', planExecute: 'plan', planExecuteEpic: 'plan', planPause: 'plan', planStop: 'plan', planResume: 'plan', planCreateBoard: 'plan', planUpdateBoard: 'plan', planArchiveBoard: 'plan', planGetBoard: 'plan', planGetBoardState: 'plan', planReorderBoards: 'plan', planSetActiveBoard: 'plan', planGetBoardArtifacts: 'plan', planCreateSprint: 'plan', planActivateSprint: 'plan', planCompleteSprint: 'plan', planGetSprintArtifacts: 'plan',
+    // File upload
+    fileUploadStart: 'fileUpload', fileUploadChunk: 'fileUpload', fileUploadComplete: 'fileUpload', fileUploadCancel: 'fileUpload',
+  };
+
   private async dispatchMessage(ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string, permission?: 'control' | 'view'): Promise<void> {
+    // Handle messages with custom inline logic first
     switch (msg.type) {
       case 'ping':
         this.send(ws, { type: 'pong', tabId });
@@ -128,86 +151,9 @@ export class WebSocketImproviseHandler implements HandlerContext {
       case 'resumeSession':
         if (!msg.data?.historicalSessionId) throw new Error('Historical session ID is required');
         return void await resumeHistoricalSession(this, ws, tabId, workingDir, msg.data.historicalSessionId);
-      // Session messages
-      case 'execute':
-      case 'cancel':
-      case 'getHistory':
-      case 'new':
-      case 'approve':
-      case 'reject':
-        return handleSessionMessage(this, ws, msg, tabId, permission);
-      // History messages
-      case 'getSessions':
-      case 'getSessionsCount':
-      case 'getSessionById':
-      case 'deleteSession':
-      case 'clearHistory':
-      case 'searchHistory':
-        return handleHistoryMessage(this, ws, msg, tabId, workingDir);
-      // File autocomplete/read
-      case 'autocomplete':
-      case 'readFile':
-      case 'recordSelection':
-        return handleFileMessage(this, ws, msg, tabId, workingDir, permission);
-      // Notification summary
       case 'requestNotificationSummary':
         if (!msg.data?.prompt || !msg.data?.output) throw new Error('Prompt and output are required for notification summary');
         return void await generateNotificationSummary(this, ws, tabId, msg.data.prompt, msg.data.output, workingDir);
-      // Terminal messages
-      case 'terminalInit':
-      case 'terminalReconnect':
-      case 'terminalList':
-      case 'terminalInput':
-      case 'terminalResize':
-      case 'terminalClose':
-        return handleTerminalMessage(this, ws, msg, tabId, workingDir, permission);
-      // File explorer messages
-      case 'listDirectory':
-      case 'writeFile':
-      case 'createFile':
-      case 'createDirectory':
-      case 'deleteFile':
-      case 'renameFile':
-      case 'notifyFileOpened':
-      case 'searchFileContents':
-      case 'cancelSearch':
-      case 'findDefinition':
-        return handleFileExplorerMessage(this, ws, msg, tabId, workingDir, permission);
-      // Git messages
-      case 'gitStatus':
-      case 'gitStage':
-      case 'gitUnstage':
-      case 'gitCommit':
-      case 'gitCommitWithAI':
-      case 'gitPush':
-      case 'gitPull':
-      case 'gitLog':
-      case 'gitDiscoverRepos':
-      case 'gitSetDirectory':
-      case 'gitGetRemoteInfo':
-      case 'gitCreatePR':
-      case 'gitGeneratePRDescription':
-      case 'gitListBranches':
-      case 'gitCheckout':
-      case 'gitCreateBranch':
-      case 'gitDeleteBranch':
-      case 'gitDiff':
-      case 'gitListTags':
-      case 'gitCreateTag':
-      case 'gitPushTag':
-      case 'gitWorktreeList':
-      case 'gitWorktreeCreate':
-      case 'gitWorktreeCreateAndAssign':
-      case 'gitWorktreeRemove':
-      case 'tabWorktreeSwitch':
-      case 'gitWorktreePush':
-      case 'gitWorktreeCreatePR':
-      case 'gitMergePreview':
-      case 'gitWorktreeMerge':
-      case 'gitMergeAbort':
-      case 'gitMergeComplete':
-        return handleGitMessage(this, ws, msg, tabId, workingDir);
-      // Tab sync messages
       case 'getActiveTabs':
         return handleGetActiveTabs(this, ws, workingDir);
       case 'createTab':
@@ -222,59 +168,26 @@ export class WebSocketImproviseHandler implements HandlerContext {
         return handleRemoveTab(this, ws, tabId, workingDir);
       case 'markTabViewed':
         return handleMarkTabViewed(this, ws, tabId, workingDir);
-      // Quality messages
-      case 'qualityDetectTools':
-      case 'qualityScan':
-      case 'qualityInstallTools':
-      case 'qualityCodeReview':
-      case 'qualityFixIssues':
-      case 'qualityLoadState':
-      case 'qualitySaveDirectories':
-        return handleQualityMessage(this, ws, msg, tabId, workingDir);
-      // Plan messages
-      case 'planInit':
-      case 'planGetState':
-      case 'planListIssues':
-      case 'planGetIssue':
-      case 'planGetSprint':
-      case 'planGetMilestone':
-      case 'planCreateIssue':
-      case 'planUpdateIssue':
-      case 'planDeleteIssue':
-      case 'planScaffold':
-      case 'planPrompt':
-      case 'planExecute':
-      case 'planPause':
-      case 'planStop':
-      case 'planResume':
-      // Board lifecycle messages
-      case 'planCreateBoard':
-      case 'planUpdateBoard':
-      case 'planArchiveBoard':
-      case 'planGetBoard':
-      case 'planGetBoardState':
-      case 'planReorderBoards':
-      case 'planSetActiveBoard':
-      case 'planGetBoardArtifacts':
-      // Sprint lifecycle messages (legacy)
-      case 'planCreateSprint':
-      case 'planActivateSprint':
-      case 'planCompleteSprint':
-      case 'planGetSprintArtifacts':
-        return handlePlanMessage(this, ws, msg, tabId, workingDir, permission);
-      // Settings messages
       case 'getSettings':
         return handleGetSettings(this, ws);
       case 'updateSettings':
         return handleUpdateSettings(this, ws, msg);
-      // File upload messages (chunked remote uploads)
-      case 'fileUploadStart':
-      case 'fileUploadChunk':
-      case 'fileUploadComplete':
-      case 'fileUploadCancel':
-        return this.handleFileUploadMessage(ws, msg, tabId, workingDir);
-      default:
-        throw new Error(`Unknown message type: ${msg.type}`);
+    }
+
+    // Dispatch table lookup for domain handlers
+    const domain = WebSocketImproviseHandler.DISPATCH[msg.type];
+    if (!domain) throw new Error(`Unknown message type: ${msg.type}`);
+
+    switch (domain) {
+      case 'session':    return handleSessionMessage(this, ws, msg, tabId, permission);
+      case 'history':    return handleHistoryMessage(this, ws, msg, tabId, workingDir);
+      case 'file':       return handleFileMessage(this, ws, msg, tabId, workingDir, permission);
+      case 'terminal':   return handleTerminalMessage(this, ws, msg, tabId, workingDir, permission);
+      case 'fileExplorer': return handleFileExplorerMessage(this, ws, msg, tabId, workingDir, permission);
+      case 'git':        return handleGitMessage(this, ws, msg, tabId, workingDir);
+      case 'quality':    return handleQualityMessage(this, ws, msg, tabId, workingDir);
+      case 'plan':       return handlePlanMessage(this, ws, msg, tabId, workingDir, permission);
+      case 'fileUpload': return this.handleFileUploadMessage(ws, msg, tabId, workingDir);
     }
   }
 

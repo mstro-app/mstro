@@ -13,7 +13,7 @@ import { join } from 'node:path';
 // Default log subdirectory inside .mstro/
 const DEFAULT_LOG_SUBDIR = '.mstro/logs';
 
-export type BouncerLayer = 'pattern-critical' | 'pattern-safe' | 'pattern-default' | 'haiku-ai' | 'ai-disabled' | 'ai-error';
+export type BouncerLayer = 'pattern-critical' | 'pattern-safe' | 'pattern-default' | 'pattern-noop' | 'haiku-ai' | 'haiku-timeout' | 'ai-disabled' | 'ai-error';
 
 export interface AuditLogEntry {
   timestamp: string;

@@ -2,184 +2,20 @@
 // Licensed under the MIT License. See LICENSE file for details.
 
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { handleGitCheckout, handleGitCreateBranch, handleGitDeleteBranch, handleGitListBranches } from './git-branch-handlers.js';
+import { handleGitCommitDiff, handleGitDiff, handleGitShowCommit } from './git-diff-handlers.js';
+import { handleGitDiscoverRepos, handleGitLog, handleGitSetDirectory } from './git-log-handlers.js';
 import { handleGitPRMessage } from './git-pr-handlers.js';
+import { handleGitCreateTag, handleGitListTags, handleGitPushTag } from './git-tag-handlers.js';
+import { executeGitCommand, parseGitStatus, sendGitError, stripCoauthorLines } from './git-utils.js';
 import { handleGitWorktreeMessage } from './git-worktree-handlers.js';
 import type { HandlerContext } from './handler-context.js';
-import type { GitBranchEntry, GitDirectorySetResponse, GitFileStatus, GitLogEntry, GitRepoInfo, GitReposDiscoveredResponse, GitStatusResponse, GitTagEntry, WebSocketMessage, WSContext } from './types.js';
+import type { GitStatusResponse, WebSocketMessage, WSContext } from './types.js';
 
-/** Detect git provider from remote URL */
-export function detectGitProvider(remoteUrl: string): 'github' | 'gitlab' | 'unknown' {
-  if (remoteUrl.includes('github.com')) return 'github';
-  if (remoteUrl.includes('gitlab.com') || remoteUrl.includes('gitlab')) return 'gitlab';
-  return 'unknown';
-}
-
-/** Execute a git command and return stdout */
-export function executeGitCommand(args: string[], workingDir: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  return new Promise((resolve) => {
-    const git = spawn('git', args, {
-      cwd: workingDir,
-      stdio: ['ignore', 'pipe', 'pipe']
-    });
-
-    let stdout = '';
-    let stderr = '';
-
-    git.stdout?.on('data', (data: Buffer) => {
-      stdout += data.toString();
-    });
-
-    git.stderr?.on('data', (data: Buffer) => {
-      stderr += data.toString();
-    });
-
-    git.on('close', (code: number | null) => {
-      resolve({ stdout, stderr, exitCode: code ?? 1 });
-    });
-
-    git.on('error', (err: Error) => {
-      resolve({ stdout: '', stderr: err.message, exitCode: 1 });
-    });
-  });
-}
-
-/** Map of simple escape sequences to their character values */
-const ESCAPE_CHARS: Record<string, string> = {
-  '\\': '\\',
-  '"': '"',
-  'n': '\n',
-  't': '\t',
-  'r': '\r',
-};
-
-/** Check if position i starts an octal escape sequence (\nnn) */
-function isOctalEscape(str: string, i: number): boolean {
-  return i + 3 < str.length &&
-    /[0-7]/.test(str[i + 1]) &&
-    /[0-7]{2}/.test(str.slice(i + 2, i + 4));
-}
-
-/**
- * Unquote a git-quoted path (C-style quoting)
- */
-export function unquoteGitPath(path: string): string {
-  if (!path.startsWith('"') || !path.endsWith('"')) {
-    return path;
-  }
-
-  const inner = path.slice(1, -1);
-  let result = '';
-  let i = 0;
-
-  while (i < inner.length) {
-    if (inner[i] !== '\\' || i + 1 >= inner.length) {
-      result += inner[i];
-      i++;
-      continue;
-    }
-
-    const next = inner[i + 1];
-    const escaped = ESCAPE_CHARS[next];
-
-    if (escaped !== undefined) {
-      result += escaped;
-      i += 2;
-    } else if (isOctalEscape(inner, i)) {
-      result += String.fromCharCode(parseInt(inner.slice(i + 1, i + 4), 8));
-      i += 4;
-    } else {
-      result += inner[i];
-      i++;
-    }
-  }
-
-  return result;
-}
-
-/** Parse git status --porcelain output into structured format */
-export function parseGitStatus(porcelainOutput: string): { staged: GitFileStatus[]; unstaged: GitFileStatus[]; untracked: GitFileStatus[] } {
-  const staged: GitFileStatus[] = [];
-  const unstaged: GitFileStatus[] = [];
-  const untracked: GitFileStatus[] = [];
-
-  const lines = porcelainOutput.split('\n').filter(line => line.length >= 4);
-
-  for (const line of lines) {
-    const indexStatus = line[0];
-    const workTreeStatus = line[1];
-    const rawPath = line.slice(3);
-
-    const path = unquoteGitPath(rawPath);
-
-    let filePath = path;
-    let originalPath: string | undefined;
-    if (rawPath.includes(' -> ')) {
-      const parts = rawPath.split(' -> ');
-      originalPath = unquoteGitPath(parts[0]);
-      filePath = unquoteGitPath(parts[1]);
-    }
-
-    if (indexStatus === '?' && workTreeStatus === '?') {
-      untracked.push({ path: filePath, status: '?', staged: false });
-      continue;
-    }
-
-    if (indexStatus !== ' ' && indexStatus !== '?') {
-      staged.push({ path: filePath, status: indexStatus as GitFileStatus['status'], staged: true, originalPath });
-    }
-
-    if (workTreeStatus !== ' ' && workTreeStatus !== '?') {
-      unstaged.push({ path: filePath, status: workTreeStatus as GitFileStatus['status'], staged: false, originalPath });
-    }
-  }
-
-  return { staged, unstaged, untracked };
-}
-
-/** Check if a binary runs successfully (exit code 0) */
-export function spawnCheck(bin: string, args: string[]): Promise<boolean> {
-  return new Promise((resolve) => {
-    const proc = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    proc.on('close', (code) => resolve(code === 0));
-    proc.on('error', () => resolve(false));
-  });
-}
-
-/** Spawn a process and capture stdout/stderr */
-export function spawnWithOutput(bin: string, args: string[], cwd: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  return new Promise((resolve) => {
-    const proc = spawn(bin, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
-    proc.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
-    proc.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
-    proc.on('close', (code) => resolve({ stdout, stderr, exitCode: code ?? 1 }));
-    proc.on('error', (err: Error) => resolve({ stdout: '', stderr: err.message, exitCode: 1 }));
-  });
-}
-
-/**
- * Strip injected coauthor/attribution lines from a commit message.
- */
-export function stripCoauthorLines(message: string): string {
-  const lines = message.split('\n');
-  const markers = ['co-authored', 'authored-by', 'haiku', 'noreply@anthropic.com'];
-  const result: string[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    const lower = lines[i].toLowerCase();
-    if (markers.some(m => lower.includes(m))) {
-      if (result.length > 0 && result[result.length - 1].trim() === '') {
-        result.pop();
-      }
-      continue;
-    }
-    result.push(lines[i]);
-  }
-  if (result.length === 0) return '';
-  return result.join('\n').trimEnd();
-}
+// Re-export utilities for backward compatibility (git-pr-handlers, git-worktree-handlers import from here)
+export { detectGitProvider, executeGitCommand, parseGitStatus, sendGitError, spawnCheck, spawnWithOutput, stripCoauthorLines, unquoteGitPath } from './git-utils.js';
 
 // PR message types that route to git-pr-handlers
 const GIT_PR_TYPES = new Set([
@@ -222,6 +58,8 @@ export async function handleGitMessage(ctx: HandlerContext, ws: WSContext, msg: 
     gitCreateBranch: () => handleGitCreateBranch(ctx, ws, msg, tabId, gitDir),
     gitDeleteBranch: () => handleGitDeleteBranch(ctx, ws, msg, tabId, gitDir),
     gitDiff: () => handleGitDiff(ctx, ws, msg, tabId, gitDir),
+    gitShowCommit: () => handleGitShowCommit(ctx, ws, msg, tabId, gitDir),
+    gitCommitDiff: () => handleGitCommitDiff(ctx, ws, msg, tabId, gitDir),
     gitListTags: () => handleGitListTags(ctx, ws, tabId, gitDir),
     gitCreateTag: () => handleGitCreateTag(ctx, ws, msg, tabId, gitDir),
     gitPushTag: () => handleGitPushTag(ctx, ws, msg, tabId, gitDir),
@@ -271,7 +109,7 @@ export async function handleGitStatus(ctx: HandlerContext, ws: WSContext, tabId:
 
     ctx.send(ws, { type: 'gitStatus', tabId, data: response });
   } catch (error: unknown) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
+    sendGitError(ctx, ws, tabId, error);
   }
 }
 
@@ -294,7 +132,7 @@ async function handleGitStage(ctx: HandlerContext, ws: WSContext, msg: WebSocket
 
     ctx.send(ws, { type: 'gitStaged', tabId, data: { paths: paths || [] } });
   } catch (error: unknown) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
+    sendGitError(ctx, ws, tabId, error);
   }
 }
 
@@ -314,7 +152,7 @@ async function handleGitUnstage(ctx: HandlerContext, ws: WSContext, msg: WebSock
 
     ctx.send(ws, { type: 'gitUnstaged', tabId, data: { paths } });
   } catch (error: unknown) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
+    sendGitError(ctx, ws, tabId, error);
   }
 }
 
@@ -343,7 +181,7 @@ async function handleGitCommit(ctx: HandlerContext, ws: WSContext, msg: WebSocke
     ctx.send(ws, { type: 'gitCommitted', tabId, data: { hash, message } });
     handleGitStatus(ctx, ws, tabId, workingDir);
   } catch (error: unknown) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
+    sendGitError(ctx, ws, tabId, error);
   }
 }
 
@@ -464,7 +302,7 @@ Respond with ONLY the commit message, nothing else.`;
     }, 30000);
 
   } catch (error: unknown) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
+    sendGitError(ctx, ws, tabId, error);
   }
 }
 
@@ -540,7 +378,7 @@ async function handleGitPush(ctx: HandlerContext, ws: WSContext, tabId: string, 
 
     ctx.send(ws, { type: 'gitPushed', tabId, data: { output: result.stdout || result.stderr } });
   } catch (error: unknown) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
+    sendGitError(ctx, ws, tabId, error);
   }
 }
 
@@ -554,371 +392,6 @@ async function handleGitPull(ctx: HandlerContext, ws: WSContext, tabId: string, 
 
     ctx.send(ws, { type: 'gitPulled', tabId, data: { output: result.stdout || result.stderr } });
   } catch (error: unknown) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
-  }
-}
-
-async function handleGitLog(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): Promise<void> {
-  const limit = msg.data?.limit ?? 10;
-
-  try {
-    const result = await executeGitCommand([
-      'log',
-      `-${limit}`,
-      '--format=%H|%h|%s|%an|%aI'
-    ], workingDir);
-
-    if (result.exitCode !== 0) {
-      ctx.send(ws, { type: 'gitError', tabId, data: { error: result.stderr || result.stdout || 'Failed to get log' } });
-      return;
-    }
-
-    const entries: GitLogEntry[] = result.stdout.trim().split('\n').filter(Boolean).map(line => {
-      const [hash, shortHash, subject, author, date] = line.split('|');
-      const cleanSubject = stripCoauthorLines(subject || '') || subject || '';
-      return { hash, shortHash, subject: cleanSubject, author, date };
-    });
-
-    ctx.send(ws, { type: 'gitLog', tabId, data: { entries } });
-  } catch (error: unknown) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
-  }
-}
-
-/** Directories to skip when scanning for git repos */
-const SKIP_DIRS = ['node_modules', 'vendor', '.git'];
-
-function shouldSkipDir(name: string): boolean {
-  return name.startsWith('.') || SKIP_DIRS.includes(name);
-}
-
-async function getRepoBranch(repoPath: string): Promise<string | undefined> {
-  const result = await executeGitCommand(['rev-parse', '--abbrev-ref', 'HEAD'], repoPath);
-  return result.exitCode === 0 ? result.stdout.trim() : undefined;
-}
-
-async function scanForGitRepos(dir: string, depth: number, maxDepth: number, repos: GitRepoInfo[]): Promise<void> {
-  if (depth > maxDepth) return;
-
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return;
-  }
-
-  for (const name of entries) {
-    if (shouldSkipDir(name)) continue;
-
-    const fullPath = join(dir, name);
-    const gitPath = join(fullPath, '.git');
-
-    if (existsSync(gitPath)) {
-      repos.push({ path: fullPath, name, branch: await getRepoBranch(fullPath) });
-    } else {
-      await scanForGitRepos(fullPath, depth + 1, maxDepth, repos);
-    }
-  }
-}
-
-async function handleGitDiscoverRepos(ctx: HandlerContext, ws: WSContext, tabId: string, workingDir: string): Promise<void> {
-  try {
-    const repos: GitRepoInfo[] = [];
-    const rootIsGitRepo = existsSync(join(workingDir, '.git'));
-
-    if (rootIsGitRepo) {
-      repos.push({
-        path: workingDir,
-        name: workingDir.split('/').pop() || workingDir,
-        branch: await getRepoBranch(workingDir),
-      });
-    } else {
-      await scanForGitRepos(workingDir, 1, 3, repos);
-    }
-
-    const response: GitReposDiscoveredResponse = {
-      repos,
-      rootIsGitRepo,
-      selectedDirectory: ctx.gitDirectories.get(tabId) || null,
-    };
-
-    ctx.send(ws, { type: 'gitReposDiscovered', tabId, data: response });
-  } catch (error: unknown) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
-  }
-}
-
-async function handleGitSetDirectory(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): Promise<void> {
-  const directory = msg.data?.directory as string | undefined;
-
-  if (!directory) {
-    ctx.gitDirectories.delete(tabId);
-    const response: GitDirectorySetResponse = {
-      directory: workingDir,
-      isValid: existsSync(join(workingDir, '.git')),
-    };
-    ctx.send(ws, { type: 'gitDirectorySet', tabId, data: response });
-    handleGitStatus(ctx, ws, tabId, workingDir);
-    return;
-  }
-
-  const gitPath = join(directory, '.git');
-  const isValid = existsSync(gitPath);
-
-  if (isValid) {
-    ctx.gitDirectories.set(tabId, directory);
-  }
-
-  const response: GitDirectorySetResponse = {
-    directory,
-    isValid,
-  };
-
-  ctx.send(ws, { type: 'gitDirectorySet', tabId, data: response });
-
-  if (isValid) {
-    handleGitStatus(ctx, ws, tabId, directory);
-    handleGitLog(ctx, ws, { type: 'gitLog', data: { limit: 5 } }, tabId, directory);
-  }
-}
-
-async function handleGitListBranches(ctx: HandlerContext, ws: WSContext, tabId: string, workingDir: string): Promise<void> {
-  try {
-    const result = await executeGitCommand(
-      ['branch', '-a', '--format=%(refname:short)|%(objectname:short)|%(upstream:short)|%(HEAD)'],
-      workingDir
-    );
-    if (result.exitCode !== 0) {
-      ctx.send(ws, { type: 'gitError', tabId, data: { error: result.stderr || 'Failed to list branches' } });
-      return;
-    }
-
-    const currentBranchResult = await executeGitCommand(['rev-parse', '--abbrev-ref', 'HEAD'], workingDir);
-    const currentBranch = currentBranchResult.stdout.trim() || 'HEAD';
-
-    const branches: GitBranchEntry[] = result.stdout.trim().split('\n')
-      .filter(line => line.trim())
-      .map(line => {
-        const [name, shortHash, upstream, head] = line.split('|');
-        const isRemote = name.includes('/') && (name.startsWith('origin/') || name.includes('remotes/'));
-        return {
-          name: name.trim(),
-          shortHash: shortHash?.trim() || '',
-          isRemote,
-          isCurrent: head?.trim() === '*',
-          upstream: upstream?.trim() || undefined,
-        };
-      })
-      .filter(b => b.name !== 'origin/HEAD');
-
-    ctx.send(ws, { type: 'gitBranchList', tabId, data: { branches, current: currentBranch } });
-  } catch (error: unknown) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
-  }
-}
-
-async function handleGitCheckout(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): Promise<void> {
-  try {
-    const { branch, create, startPoint } = msg.data || {};
-    if (!branch) {
-      ctx.send(ws, { type: 'gitError', tabId, data: { error: 'Branch name is required' } });
-      return;
-    }
-
-    const statusResult = await executeGitCommand(['status', '--porcelain'], workingDir);
-    if (statusResult.stdout.trim()) {
-      ctx.send(ws, { type: 'gitError', tabId, data: { error: 'Commit or stash changes before switching branches' } });
-      return;
-    }
-
-    const prevResult = await executeGitCommand(['rev-parse', '--abbrev-ref', 'HEAD'], workingDir);
-    const previous = prevResult.stdout.trim();
-
-    const args = create
-      ? ['checkout', '-b', branch, ...(startPoint ? [startPoint] : [])]
-      : ['checkout', branch];
-
-    const result = await executeGitCommand(args, workingDir);
-    if (result.exitCode !== 0) {
-      ctx.send(ws, { type: 'gitError', tabId, data: { error: result.stderr || 'Failed to checkout branch' } });
-      return;
-    }
-
-    ctx.send(ws, { type: 'gitCheckedOut', tabId, data: { branch, previous } });
-    handleGitStatus(ctx, ws, tabId, workingDir);
-  } catch (error: unknown) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
-  }
-}
-
-async function handleGitCreateBranch(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): Promise<void> {
-  try {
-    const { name, startPoint, checkout } = msg.data || {};
-    if (!name) {
-      ctx.send(ws, { type: 'gitError', tabId, data: { error: 'Branch name is required' } });
-      return;
-    }
-
-    const args = ['branch', name, ...(startPoint ? [startPoint] : [])];
-    const result = await executeGitCommand(args, workingDir);
-    if (result.exitCode !== 0) {
-      ctx.send(ws, { type: 'gitError', tabId, data: { error: result.stderr || 'Failed to create branch' } });
-      return;
-    }
-
-    const hashResult = await executeGitCommand(['rev-parse', '--short', name], workingDir);
-
-    if (checkout) {
-      await executeGitCommand(['checkout', name], workingDir);
-    }
-
-    ctx.send(ws, { type: 'gitBranchCreated', tabId, data: { name, hash: hashResult.stdout.trim() } });
-  } catch (error: unknown) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
-  }
-}
-
-async function handleGitDeleteBranch(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): Promise<void> {
-  try {
-    const { name, force } = msg.data || {};
-    if (!name) {
-      ctx.send(ws, { type: 'gitError', tabId, data: { error: 'Branch name is required' } });
-      return;
-    }
-
-    const currentResult = await executeGitCommand(['rev-parse', '--abbrev-ref', 'HEAD'], workingDir);
-    if (currentResult.stdout.trim() === name) {
-      ctx.send(ws, { type: 'gitError', tabId, data: { error: 'Cannot delete the currently checked out branch' } });
-      return;
-    }
-
-    const result = await executeGitCommand(['branch', force ? '-D' : '-d', name], workingDir);
-    if (result.exitCode !== 0) {
-      ctx.send(ws, { type: 'gitError', tabId, data: { error: result.stderr || 'Failed to delete branch' } });
-      return;
-    }
-
-    ctx.send(ws, { type: 'gitBranchDeleted', tabId, data: { name } });
-  } catch (error: unknown) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
-  }
-}
-
-async function handleGitDiff(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): Promise<void> {
-  try {
-    const { path, staged } = msg.data || {};
-    if (!path) {
-      ctx.send(ws, { type: 'gitError', tabId, data: { error: 'File path is required' } });
-      return;
-    }
-
-    const originalResult = await executeGitCommand(['show', `HEAD:${path}`], workingDir);
-    const original = originalResult.exitCode === 0 ? originalResult.stdout : '';
-
-    let modified: string;
-    if (staged) {
-      const indexResult = await executeGitCommand(['show', `:${path}`], workingDir);
-      modified = indexResult.exitCode === 0 ? indexResult.stdout : '';
-    } else {
-      const fullPath = join(workingDir, path);
-      try {
-        modified = readFileSync(fullPath, 'utf-8');
-      } catch {
-        modified = '';
-      }
-    }
-
-    ctx.send(ws, {
-      type: 'gitDiffResult',
-      tabId,
-      data: { path, original, modified, staged: !!staged },
-    });
-  } catch (error: unknown) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
-  }
-}
-
-async function handleGitListTags(ctx: HandlerContext, ws: WSContext, tabId: string, workingDir: string): Promise<void> {
-  try {
-    const result = await executeGitCommand(
-      ['tag', '-l', '--sort=-creatordate', '--format=%(refname:short)|%(objectname:short)|%(creatordate:iso-strict)|%(subject)'],
-      workingDir
-    );
-    if (result.exitCode !== 0) {
-      ctx.send(ws, { type: 'gitError', tabId, data: { error: result.stderr || 'Failed to list tags' } });
-      return;
-    }
-
-    const tags: GitTagEntry[] = result.stdout.trim().split('\n')
-      .filter(line => line.trim())
-      .slice(0, 50)
-      .map(line => {
-        const parts = line.split('|');
-        return {
-          name: parts[0]?.trim() || '',
-          shortHash: parts[1]?.trim() || '',
-          date: parts[2]?.trim() || '',
-          message: parts[3]?.trim() || '',
-        };
-      });
-
-    ctx.send(ws, { type: 'gitTagList', tabId, data: { tags } });
-  } catch (error: unknown) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
-  }
-}
-
-async function handleGitCreateTag(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): Promise<void> {
-  try {
-    const { name, message, commit } = msg.data || {};
-    if (!name) {
-      ctx.send(ws, { type: 'gitError', tabId, data: { error: 'Tag name is required' } });
-      return;
-    }
-
-    if (/\s/.test(name) || name.includes('..')) {
-      ctx.send(ws, { type: 'gitError', tabId, data: { error: 'Invalid tag name: no spaces or ".." allowed' } });
-      return;
-    }
-
-    const args = message
-      ? ['tag', '-a', name, '-m', message, ...(commit ? [commit] : [])]
-      : ['tag', name, ...(commit ? [commit] : [])];
-
-    const result = await executeGitCommand(args, workingDir);
-    if (result.exitCode !== 0) {
-      ctx.send(ws, { type: 'gitError', tabId, data: { error: result.stderr || 'Failed to create tag' } });
-      return;
-    }
-
-    const hashResult = await executeGitCommand(['rev-parse', '--short', name], workingDir);
-    ctx.send(ws, { type: 'gitTagCreated', tabId, data: { name, hash: hashResult.stdout.trim() } });
-  } catch (error: unknown) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
-  }
-}
-
-async function handleGitPushTag(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): Promise<void> {
-  try {
-    const { name, all } = msg.data || {};
-
-    const args = all
-      ? ['push', 'origin', '--tags']
-      : ['push', 'origin', name];
-
-    if (!all && !name) {
-      ctx.send(ws, { type: 'gitError', tabId, data: { error: 'Tag name is required' } });
-      return;
-    }
-
-    const result = await executeGitCommand(args, workingDir);
-    if (result.exitCode !== 0) {
-      ctx.send(ws, { type: 'gitError', tabId, data: { error: result.stderr || 'Failed to push tag' } });
-      return;
-    }
-
-    ctx.send(ws, { type: 'gitTagPushed', tabId, data: { name: name || 'all', output: result.stderr || result.stdout } });
-  } catch (error: unknown) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
+    sendGitError(ctx, ws, tabId, error);
   }
 }

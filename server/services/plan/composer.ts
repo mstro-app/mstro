@@ -273,7 +273,8 @@ User request: ${userPrompt}`;
       data: { message: 'Claude is planning your project...' },
     });
 
-    const result = await runWithFileLogger('pm-compose', () => runner.run());
+    const boardLogDir = cc.effectiveBoardId ? join(pmDir, 'boards', cc.effectiveBoardId, 'logs') : undefined;
+    const result = await runWithFileLogger('pm-compose', () => runner.run(), boardLogDir);
 
     ctx.broadcastToAll({
       type: 'planPromptProgress',

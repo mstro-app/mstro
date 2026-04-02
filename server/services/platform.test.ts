@@ -25,6 +25,8 @@ const mockOs = {
 const mockPath = {
   join: vi.fn((...args: string[]) => args.join('/')),
   basename: vi.fn((path: string) => path.split('/').pop() || ''),
+  dirname: vi.fn((path: string) => path.split('/').slice(0, -1).join('/') || '/'),
+  resolve: vi.fn((...args: string[]) => args.join('/')),
 }
 
 const mockClientId = {

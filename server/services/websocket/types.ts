@@ -79,6 +79,9 @@ export interface WebSocketMessage {
     | 'gitDeleteBranch'
     // Diff operations
     | 'gitDiff'
+    // Commit detail operations
+    | 'gitShowCommit'
+    | 'gitCommitDiff'
     // Tag operations
     | 'gitListTags'
     | 'gitCreateTag'
@@ -229,6 +232,9 @@ export interface WebSocketResponse {
     | 'gitBranchDeleted'
     // Diff response types
     | 'gitDiffResult'
+    // Commit detail response types
+    | 'gitCommitDetail'
+    | 'gitCommitDiffResult'
     // Tag response types
     | 'gitTagList'
     | 'gitTagCreated'
@@ -495,6 +501,17 @@ export interface GitLogEntry {
   author: string;
   /** Commit date (ISO string) */
   date: string;
+}
+
+/**
+ * File changed in a commit
+ */
+export interface GitCommitFile {
+  path: string;
+  status: string;
+  additions: number;
+  deletions: number;
+  oldPath?: string;
 }
 
 /**

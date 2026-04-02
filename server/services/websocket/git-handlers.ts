@@ -1,21 +1,18 @@
 // Copyright (c) 2025-present Mstro, Inc. All rights reserved.
 // Licensed under the MIT License. See LICENSE file for details.
 
-import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { handleGitCheckout, handleGitCreateBranch, handleGitDeleteBranch, handleGitListBranches } from './git-branch-handlers.js';
 import { handleGitCommitDiff, handleGitDiff, handleGitShowCommit } from './git-diff-handlers.js';
 import { handleGitDiscoverRepos, handleGitLog, handleGitSetDirectory } from './git-log-handlers.js';
 import { handleGitPRMessage } from './git-pr-handlers.js';
 import { handleGitCreateTag, handleGitListTags, handleGitPushTag } from './git-tag-handlers.js';
-import { executeGitCommand, parseGitStatus, sendGitError, stripCoauthorLines } from './git-utils.js';
+import { executeGitCommand, parseGitStatus, sendGitError, spawnHaikuWithPrompt, stripCoauthorLines, truncateDiff } from './git-utils.js';
 import { handleGitWorktreeMessage } from './git-worktree-handlers.js';
 import type { HandlerContext } from './handler-context.js';
 import type { GitStatusResponse, WebSocketMessage, WSContext } from './types.js';
 
 // Re-export utilities for backward compatibility (git-pr-handlers, git-worktree-handlers import from here)
-export { detectGitProvider, executeGitCommand, parseGitStatus, sendGitError, spawnCheck, spawnWithOutput, stripCoauthorLines, unquoteGitPath } from './git-utils.js';
+export { detectGitProvider, executeGitCommand, parseGitStatus, sendGitError, spawnCheck, spawnHaikuWithPrompt, spawnWithOutput, stripCoauthorLines, truncateDiff, unquoteGitPath } from './git-utils.js';
 
 // PR message types that route to git-pr-handlers
 const GIT_PR_TYPES = new Set([
@@ -196,31 +193,18 @@ async function handleGitCommitWithAI(ctx: HandlerContext, ws: WSContext, msg: We
     }
 
     const diffResult = await executeGitCommand(['diff', '--cached'], workingDir);
-    const diff = diffResult.stdout;
-
     const logResult = await executeGitCommand(['log', '--oneline', '-5'], workingDir);
-    const recentCommits = logResult.stdout.trim();
-
-    const tempDir = join(workingDir, '.mstro', 'tmp');
-    if (!existsSync(tempDir)) {
-      mkdirSync(tempDir, { recursive: true });
-    }
-
-    let truncatedDiff = diff;
-    if (diff.length > 8000) {
-      truncatedDiff = `${diff.slice(0, 4000)}\n\n... [diff truncated] ...\n\n${diff.slice(-3500)}`;
-    }
 
     const prompt = `You are generating a git commit message for the following staged changes.
 
 RECENT COMMIT MESSAGES (for style reference):
-${recentCommits || 'No recent commits'}
+${logResult.stdout.trim() || 'No recent commits'}
 
 STAGED FILES:
 ${staged.map(f => `${f.status} ${f.path}`).join('\n')}
 
 DIFF OF STAGED CHANGES:
-${truncatedDiff}
+${truncateDiff(diffResult.stdout)}
 
 Generate a commit message following these rules:
 1. First line: imperative mood, max 72 characters (e.g., "Add user authentication", "Fix memory leak in parser")
@@ -231,76 +215,34 @@ Generate a commit message following these rules:
 
 Respond with ONLY the commit message, nothing else.`;
 
-    const promptFile = join(tempDir, `commit-msg-${Date.now()}.txt`);
-    writeFileSync(promptFile, prompt);
+    const result = await spawnHaikuWithPrompt(
+      prompt,
+      'You are a commit message assistant. Respond with only the commit message, no preamble or explanation.',
+      workingDir,
+    );
 
-    const systemPrompt = 'You are a commit message assistant. Respond with only the commit message, no preamble or explanation.';
+    if (result.exitCode !== 0 || !result.stdout.trim()) {
+      console.error('[WebSocketImproviseHandler] Claude commit message error:', result.stderr || 'No output');
+      ctx.send(ws, { type: 'gitError', tabId, data: { error: 'Failed to generate commit message' } });
+      return;
+    }
 
-    const args = [
-      '--print',
-      '--model', 'haiku',
-      '--system-prompt', systemPrompt,
-      promptFile
-    ];
+    const commitMessage = extractCommitMessage(result.stdout.trim());
+    const autoCommit = !!msg.data?.autoCommit;
 
-    const claude = spawn('claude', args, {
-      cwd: workingDir,
-      stdio: ['ignore', 'pipe', 'pipe']
-    });
+    ctx.send(ws, { type: 'gitCommitMessage', tabId, data: { message: commitMessage, autoCommit } });
 
-    let stdout = '';
-    let stderr = '';
-
-    claude.stdout?.on('data', (data: Buffer) => {
-      stdout += data.toString();
-    });
-
-    claude.stderr?.on('data', (data: Buffer) => {
-      stderr += data.toString();
-    });
-
-    claude.on('close', async (code: number | null) => {
-      try {
-        unlinkSync(promptFile);
-      } catch {
-        // Ignore cleanup errors
-      }
-
-      if (code !== 0 || !stdout.trim()) {
-        console.error('[WebSocketImproviseHandler] Claude commit message error:', stderr || 'No output');
-        ctx.send(ws, { type: 'gitError', tabId, data: { error: 'Failed to generate commit message' } });
+    if (autoCommit) {
+      const commitResult = await executeGitCommand(['commit', '-m', commitMessage], workingDir);
+      if (commitResult.exitCode !== 0) {
+        ctx.send(ws, { type: 'gitError', tabId, data: { error: commitResult.stderr || commitResult.stdout || 'Failed to commit' } });
         return;
       }
 
-      const commitMessage = extractCommitMessage(stdout.trim());
-      const autoCommit = !!msg.data?.autoCommit;
-
-      ctx.send(ws, { type: 'gitCommitMessage', tabId, data: { message: commitMessage, autoCommit } });
-
-      if (msg.data?.autoCommit) {
-        const commitResult = await executeGitCommand(['commit', '-m', commitMessage], workingDir);
-        if (commitResult.exitCode !== 0) {
-          ctx.send(ws, { type: 'gitError', tabId, data: { error: commitResult.stderr || commitResult.stdout || 'Failed to commit' } });
-          return;
-        }
-
-        const hashResult = await executeGitCommand(['rev-parse', '--short', 'HEAD'], workingDir);
-        const hash = hashResult.stdout.trim();
-
-        ctx.send(ws, { type: 'gitCommitted', tabId, data: { hash, message: commitMessage } });
-        handleGitStatus(ctx, ws, tabId, workingDir);
-      }
-    });
-
-    claude.on('error', (err: Error) => {
-      console.error('[WebSocketImproviseHandler] Failed to spawn Claude for commit:', err);
-      ctx.send(ws, { type: 'gitError', tabId, data: { error: 'Failed to generate commit message' } });
-    });
-
-    setTimeout(() => {
-      claude.kill();
-    }, 30000);
-
+      const hashResult = await executeGitCommand(['rev-parse', '--short', 'HEAD'], workingDir);
+      ctx.send(ws, { type: 'gitCommitted', tabId, data: { hash: hashResult.stdout.trim(), message: commitMessage } });
+      handleGitStatus(ctx, ws, tabId, workingDir);
+    }
   } catch (error: unknown) {
     sendGitError(ctx, ws, tabId, error);
   }

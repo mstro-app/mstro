@@ -207,7 +207,7 @@ export async function runQualityScan(
 
   // Step 4: Analyze complexity (using real tools: Biome, ESLint, radon)
   progress('Analyzing complexity', 4);
-  const complexityResult = await analyzeComplexity(dirPath, ecosystems);
+  const complexityResult = await analyzeComplexity(dirPath, ecosystems, installedToolNames);
 
   // Step 5: Check file lengths
   progress('Checking file lengths', 5);

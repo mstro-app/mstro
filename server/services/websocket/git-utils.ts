@@ -2,6 +2,8 @@
 // Licensed under the MIT License. See LICENSE file for details.
 
 import { spawn } from 'node:child_process';
+import { existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { HandlerContext } from './handler-context.js';
 import type { GitFileStatus, WSContext } from './types.js';
 
@@ -158,6 +160,51 @@ export function spawnWithOutput(bin: string, args: string[], cwd: string): Promi
     proc.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
     proc.on('close', (code) => resolve({ stdout, stderr, exitCode: code ?? 1 }));
     proc.on('error', (err: Error) => resolve({ stdout: '', stderr: err.message, exitCode: 1 }));
+  });
+}
+
+/** Truncate a diff to stay within token limits. */
+export function truncateDiff(diff: string, maxLength = 8000): string {
+  if (diff.length <= maxLength) return diff;
+  const headSize = Math.floor(maxLength / 2);
+  const tailSize = Math.floor(maxLength * 0.44);
+  return `${diff.slice(0, headSize)}\n\n... [diff truncated] ...\n\n${diff.slice(-tailSize)}`;
+}
+
+/** Spawn Claude Haiku with a prompt file and return captured output. */
+export function spawnHaikuWithPrompt(
+  prompt: string,
+  systemPrompt: string,
+  workingDir: string,
+  timeoutMs = 30000,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  return new Promise((resolve) => {
+    const tempDir = join(workingDir, '.mstro', 'tmp');
+    if (!existsSync(tempDir)) mkdirSync(tempDir, { recursive: true });
+    const promptFile = join(tempDir, `haiku-${Date.now()}.txt`);
+    writeFileSync(promptFile, prompt);
+
+    const args = ['--print', '--model', 'haiku', '--system-prompt', systemPrompt, promptFile];
+    const proc = spawn('claude', args, { cwd: workingDir, stdio: ['ignore', 'pipe', 'pipe'] });
+
+    let stdout = '';
+    let stderr = '';
+    proc.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
+    proc.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
+
+    const timer = setTimeout(() => proc.kill(), timeoutMs);
+
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      try { unlinkSync(promptFile); } catch { /* ignore cleanup errors */ }
+      resolve({ stdout, stderr, exitCode: code ?? 1 });
+    });
+
+    proc.on('error', (err: Error) => {
+      clearTimeout(timer);
+      try { unlinkSync(promptFile); } catch { /* ignore cleanup errors */ }
+      resolve({ stdout: '', stderr: err.message, exitCode: 1 });
+    });
   });
 }
 

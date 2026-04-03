@@ -23,6 +23,9 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           cache: npm
 
+      - name: Update npm for trusted publishing
+        run: npm install -g npm@latest
+
       - name: Check if version changed
         id: version
         run: |
@@ -57,9 +60,7 @@ jobs:
 
       - name: Publish to npm
         if: steps.version.outputs.changed == 'true'
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance
 
       - name: Summary
         run: |

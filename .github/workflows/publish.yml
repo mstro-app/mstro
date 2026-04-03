@@ -20,11 +20,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          registry-url: 'https://registry.npmjs.org'
           cache: npm
-
-      - name: Update npm for trusted publishing
-        run: npm install -g npm@latest
 
       - name: Check if version changed
         id: version
@@ -38,9 +34,6 @@ jobs:
           else
             echo "changed=true" >> $GITHUB_OUTPUT
           fi
-
-      - name: Clear deprecated npm config
-        run: npm config delete always-auth || true
 
       - name: Install dependencies
         if: steps.version.outputs.changed == 'true'
@@ -60,7 +53,7 @@ jobs:
 
       - name: Publish to npm
         if: steps.version.outputs.changed == 'true'
-        run: npm publish --access public --provenance
+        run: npm publish --provenance --access public
 
       - name: Summary
         run: |

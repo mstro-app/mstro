@@ -119,6 +119,8 @@ export interface Board {
   completedAt: string | null;
   goal: string;
   executionSummary: BoardExecutionSummary | null;
+  /** Max parallel headless Claude Code instances per execution wave (default: 3) */
+  maxParallelAgents: number;
   path: string;
 }
 

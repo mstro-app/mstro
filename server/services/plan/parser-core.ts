@@ -208,6 +208,13 @@ function optionalNumber(val: unknown): number | null {
   return val != null ? Number(val) : null;
 }
 
+function clampParallelAgents(val: unknown): number {
+  if (val == null) return 3;
+  const n = Number(val);
+  if (!Number.isFinite(n) || n < 1) return 3;
+  return Math.min(Math.round(n), 10);
+}
+
 export function parseProjectConfig(content: string): ProjectConfig {
   const { frontMatter, body } = parseFrontMatter(content);
   const sections = extractSections(body);
@@ -389,6 +396,7 @@ export function parseBoard(content: string, filePath: string): Board {
     completedAt: optionalString(fm.completed_at),
     goal: String(fm.goal || sections.get('Goal') || ''),
     executionSummary,
+    maxParallelAgents: clampParallelAgents(fm.max_parallel_agents),
     path: filePath,
   };
 }

@@ -15,51 +15,81 @@ export type { CategoryScore, QualityFinding, QualityResults, QualityTool, ScanPr
 // Formatting Analysis
 // ============================================================================
 
+interface FmtAccumulator {
+  totalFiles: number;
+  passingFiles: number;
+  ran: boolean;
+  findings: QualityFinding[];
+}
+
+function newFmtAccumulator(): FmtAccumulator {
+  return { totalFiles: 0, passingFiles: 0, ran: false, findings: [] };
+}
+
+async function fmtNode(dirPath: string, files: SourceFile[], acc: FmtAccumulator): Promise<void> {
+  const result = await runCommand('npx', ['prettier', '--check', '.'], dirPath);
+  acc.ran = true;
+  const unformatted = result.stdout.split('\n').filter((l) => l.trim() && !l.startsWith('Checking'));
+  const nodeFiles = files.filter((f) => ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'].includes(extname(f.path)));
+  acc.totalFiles += nodeFiles.length;
+  acc.passingFiles += Math.max(0, nodeFiles.length - unformatted.length);
+  for (const filePath of unformatted) {
+    if (!filePath.trim()) continue;
+    const rel = filePath.startsWith('/') ? filePath.replace(`${dirPath}/`, '') : filePath;
+    acc.findings.push({ severity: 'low', category: 'format', file: rel, line: null, title: 'File not formatted', description: 'Does not match Prettier formatting rules.' });
+  }
+}
+
+async function fmtPython(dirPath: string, files: SourceFile[], acc: FmtAccumulator): Promise<void> {
+  const result = await runCommand('black', ['--check', '--quiet', '.'], dirPath);
+  acc.ran = true;
+  const pyFiles = files.filter((f) => ['.py', '.pyi'].includes(extname(f.path)));
+  acc.totalFiles += pyFiles.length;
+  if (result.exitCode === 0) {
+    acc.passingFiles += pyFiles.length;
+    return;
+  }
+  const reformatLines = result.stderr.split('\n').filter((l) => l.includes('would reformat'));
+  acc.passingFiles += Math.max(0, pyFiles.length - reformatLines.length);
+  for (const line of reformatLines) {
+    const match = line.match(/would reformat (.+)/);
+    if (match) acc.findings.push({ severity: 'low', category: 'format', file: match[1].trim(), line: null, title: 'File not formatted', description: 'Does not match Black formatting rules.' });
+  }
+}
+
+async function fmtRust(dirPath: string, files: SourceFile[], acc: FmtAccumulator): Promise<void> {
+  const result = await runCommand('cargo', ['fmt', '--check'], dirPath);
+  acc.ran = true;
+  const rsFiles = files.filter((f) => extname(f.path) === '.rs');
+  acc.totalFiles += rsFiles.length;
+  if (result.exitCode === 0) {
+    acc.passingFiles += rsFiles.length;
+    return;
+  }
+  const diffLines = result.stdout.split('\n').filter((l) => l.startsWith('Diff in'));
+  for (const line of diffLines) {
+    const match = line.match(/Diff in (.+?) at/);
+    if (match) acc.findings.push({ severity: 'low', category: 'format', file: match[1].trim(), line: null, title: 'File not formatted', description: 'Does not match rustfmt formatting rules.' });
+  }
+}
+
 async function analyzeFormatting(
   dirPath: string,
   ecosystems: Ecosystem[],
   files: SourceFile[],
-): Promise<{ score: number; available: boolean; issueCount: number }> {
-  let totalFiles = 0;
-  let passingFiles = 0;
-  let ran = false;
+): Promise<{ score: number; available: boolean; issueCount: number; findings: QualityFinding[] }> {
+  const acc = newFmtAccumulator();
 
-  if (ecosystems.includes('node')) {
-    const result = await runCommand('npx', ['prettier', '--check', '.'], dirPath);
-    ran = true;
-    const unformatted = result.stdout.split('\n').filter((l) => l.trim() && !l.startsWith('Checking'));
-    const nodeFiles = files.filter((f) => ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'].includes(extname(f.path)));
-    totalFiles += nodeFiles.length;
-    passingFiles += Math.max(0, nodeFiles.length - unformatted.length);
+  if (ecosystems.includes('node')) await fmtNode(dirPath, files, acc);
+  if (ecosystems.includes('python')) await fmtPython(dirPath, files, acc);
+  if (ecosystems.includes('rust')) await fmtRust(dirPath, files, acc);
+
+  if (!acc.ran || acc.totalFiles === 0) {
+    return { score: 0, available: false, issueCount: 0, findings: [] };
   }
 
-  if (ecosystems.includes('python')) {
-    const result = await runCommand('black', ['--check', '--quiet', '.'], dirPath);
-    ran = true;
-    const pyFiles = files.filter((f) => ['.py', '.pyi'].includes(extname(f.path)));
-    totalFiles += pyFiles.length;
-    if (result.exitCode === 0) {
-      passingFiles += pyFiles.length;
-    } else {
-      const wouldReformat = (result.stderr.match(/would reformat/gi) || []).length;
-      passingFiles += Math.max(0, pyFiles.length - wouldReformat);
-    }
-  }
-
-  if (ecosystems.includes('rust')) {
-    const result = await runCommand('cargo', ['fmt', '--check'], dirPath);
-    ran = true;
-    const rsFiles = files.filter((f) => extname(f.path) === '.rs');
-    totalFiles += rsFiles.length;
-    if (result.exitCode === 0) passingFiles += rsFiles.length;
-  }
-
-  if (!ran || totalFiles === 0) {
-    return { score: 0, available: false, issueCount: 0 };
-  }
-
-  const score = Math.round((passingFiles / totalFiles) * 100);
-  return { score, available: true, issueCount: totalFiles - passingFiles };
+  const score = Math.round((acc.passingFiles / acc.totalFiles) * 100);
+  return { score, available: true, issueCount: acc.totalFiles - acc.passingFiles, findings: acc.findings.slice(0, 50) };
 }
 
 // ============================================================================
@@ -195,7 +225,7 @@ export async function runQualityScan(
   progress('Running linters', 2);
   const hasLinter = !installedSet || hasInstalledToolInCategory(installedSet, ecosystems, 'linter');
   const lintResult = hasLinter
-    ? await analyzeLinting(dirPath, ecosystems, files)
+    ? await analyzeLinting(dirPath, ecosystems, files, installedToolNames)
     : { score: 0, findings: [], available: false, issueCount: 0 };
 
   // Step 3: Check formatting (only if a formatter is installed)
@@ -203,7 +233,7 @@ export async function runQualityScan(
   const hasFormatter = !installedSet || hasInstalledToolInCategory(installedSet, ecosystems, 'formatter');
   const fmtResult = hasFormatter
     ? await analyzeFormatting(dirPath, ecosystems, files)
-    : { score: 0, available: false, issueCount: 0 };
+    : { score: 0, available: false, issueCount: 0, findings: [] as QualityFinding[] };
 
   // Step 4: Analyze complexity (using real tools: Biome, ESLint, radon)
   progress('Analyzing complexity', 4);
@@ -274,6 +304,7 @@ export async function runQualityScan(
   const overall = computeOverallScore(categories);
   const allFindings = [
     ...lintResult.findings,
+    ...fmtResult.findings,
     ...complexityResult.findings,
     ...fileLengthResult.findings,
     ...funcLengthResult.findings,

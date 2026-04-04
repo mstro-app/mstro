@@ -2,17 +2,17 @@
 // Licensed under the MIT License. See LICENSE file for details.
 
 /**
- * Config Installer — Manages temporary config file modifications for Agent Teams.
+ * Config Installer — Manages temporary .claude/settings.json modifications
+ * for headless execution.
  *
- * Installs teammate permissions in .claude/settings.json and bouncer MCP config
- * in .mcp.json before wave execution, then restores originals afterward.
+ * Pre-approves tools so headless Claude Code instances can work without
+ * interactive permission prompts, then restores the original settings afterward.
  */
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { generateMcpConfig } from '../../cli/headless/mcp-config.js';
 
-/** Tools that teammates may need during execution */
+/** Tools that headless instances may need during execution */
 const REQUIRED_PERMISSIONS = [
   'Bash',
   'Read',
@@ -22,7 +22,6 @@ const REQUIRED_PERMISSIONS = [
   'Grep',
   'WebFetch',
   'WebSearch',
-  'Agent',
 ];
 
 /** Restore a file from a .pm-backup, handling the __NONE__ sentinel for files that didn't exist. */
@@ -42,20 +41,19 @@ function restoreFromBackup(backupPath: string, targetPath: string): void {
 export class ConfigInstaller {
   private savedClaudeSettings: string | null = null;
   private claudeSettingsInstalled = false;
-  private savedMcpJson: string | null = null;
-  private mcpJsonInstalled = false;
 
   constructor(private workingDir: string) {
     // Recover from prior crash: if backup files exist, restore them
     this.recoverFromCrash();
   }
 
-  /** Restore .claude/settings.json and .mcp.json from backups left by a previous crash. */
+  /** Restore .claude/settings.json from backups left by a previous crash. */
   private recoverFromCrash(): void {
     restoreFromBackup(
       join(this.workingDir, '.claude', 'settings.json.pm-backup'),
       join(this.workingDir, '.claude', 'settings.json'),
     );
+    // Legacy: clean up .mcp.json backup from previous Agent Teams implementation
     restoreFromBackup(
       join(this.workingDir, '.mcp.json.pm-backup'),
       join(this.workingDir, '.mcp.json'),
@@ -63,10 +61,11 @@ export class ConfigInstaller {
   }
 
   /**
-   * Pre-approve tools in .claude/settings.json so Agent Teams
-   * teammates can work without interactive permission prompts.
+   * Pre-approve tools in .claude/settings.json so headless instances
+   * can work without interactive permission prompts.
    */
-  installTeammatePermissions(): void {
+  installPermissions(): void {
+    if (this.claudeSettingsInstalled) return;
     const claudeDir = join(this.workingDir, '.claude');
     const settingsPath = join(claudeDir, 'settings.json');
 
@@ -100,12 +99,12 @@ export class ConfigInstaller {
       }
       this.claudeSettingsInstalled = true;
     } catch {
-      // Non-fatal — teammates may hit permission prompts
+      // Non-fatal — headless instances may hit permission prompts
     }
   }
 
   /** Restore original .claude/settings.json after wave execution. */
-  uninstallTeammatePermissions(): void {
+  uninstallPermissions(): void {
     if (!this.claudeSettingsInstalled) return;
     const settingsPath = join(this.workingDir, '.claude', 'settings.json');
     const backupPath = join(this.workingDir, '.claude', 'settings.json.pm-backup');
@@ -125,63 +124,5 @@ export class ConfigInstaller {
 
     this.savedClaudeSettings = null;
     this.claudeSettingsInstalled = false;
-  }
-
-  /**
-   * Write .mcp.json so Agent Teams teammates auto-discover the bouncer MCP server.
-   * Also generates ~/.mstro/mcp-config.json for the team lead (--mcp-config).
-   */
-  installBouncerForSubagents(): void {
-    const mcpJsonPath = join(this.workingDir, '.mcp.json');
-
-    const backupPath = join(this.workingDir, '.mcp.json.pm-backup');
-    try {
-      const generatedPath = generateMcpConfig(this.workingDir);
-      if (!generatedPath) return;
-
-      const mcpConfig = readFileSync(generatedPath, 'utf-8');
-
-      if (existsSync(mcpJsonPath)) {
-        this.savedMcpJson = readFileSync(mcpJsonPath, 'utf-8');
-        writeFileSync(backupPath, this.savedMcpJson);
-
-        const existing = JSON.parse(this.savedMcpJson);
-        const generated = JSON.parse(mcpConfig);
-        existing.mcpServers = {
-          ...existing.mcpServers,
-          'mstro-bouncer': generated.mcpServers['mstro-bouncer'],
-        };
-        writeFileSync(mcpJsonPath, JSON.stringify(existing, null, 2));
-      } else {
-        writeFileSync(backupPath, '__NONE__');
-        writeFileSync(mcpJsonPath, mcpConfig);
-      }
-
-      this.mcpJsonInstalled = true;
-    } catch {
-      // Non-fatal: parent has MCP via --mcp-config, teammates fall back to PreToolUse hooks
-    }
-  }
-
-  /** Restore or remove .mcp.json after execution. */
-  uninstallBouncerForSubagents(): void {
-    if (!this.mcpJsonInstalled) return;
-    const mcpJsonPath = join(this.workingDir, '.mcp.json');
-    const backupPath = join(this.workingDir, '.mcp.json.pm-backup');
-
-    try {
-      if (this.savedMcpJson !== null) {
-        writeFileSync(mcpJsonPath, this.savedMcpJson);
-      } else {
-        unlinkSync(mcpJsonPath);
-      }
-    } catch {
-      // Best effort cleanup
-    }
-
-    try { if (existsSync(backupPath)) unlinkSync(backupPath); } catch { /* ok */ }
-
-    this.savedMcpJson = null;
-    this.mcpJsonInstalled = false;
   }
 }

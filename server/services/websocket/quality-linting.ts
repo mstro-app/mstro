@@ -1,8 +1,7 @@
 // Copyright (c) 2025-present Mstro, Inc. All rights reserved.
 // Licensed under the MIT License. See LICENSE file for details.
 
-import { existsSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { relative } from 'node:path';
 import { runCommand, type SourceFile } from './quality-tools.js';
 import { biomeDiagToFinding, type Ecosystem, isBiomeComplexityDiagnostic, isEslintComplexityRule, type QualityFinding } from './quality-types.js';
 
@@ -57,7 +56,7 @@ function processEslintMessage(
   else acc.warnings++;
   acc.findings.push({
     severity: msg.severity === 2 ? 'high' : 'medium',
-    category: 'linting',
+    category: 'lint',
     file: relative(dirPath, filePath),
     line: (msg.line as number) ?? null,
     title: (msg.ruleId as string) || 'Lint issue',
@@ -81,11 +80,17 @@ async function lintWithEslint(dirPath: string, acc: LintAccumulator): Promise<vo
   }
 }
 
-async function lintNode(dirPath: string, acc: LintAccumulator): Promise<void> {
-  const biomeConfig = existsSync(join(dirPath, 'biome.json')) || existsSync(join(dirPath, 'biome.jsonc'));
-  if (biomeConfig) {
+async function lintNode(dirPath: string, acc: LintAccumulator, installed: Set<string> | null): Promise<void> {
+  // Use installed tools list to decide which linter to run, not config file presence.
+  // This fixes monorepo scenarios where the config is in a subdirectory.
+  const hasBiome = !installed || installed.has('biome');
+  const hasEslint = !installed || installed.has('eslint');
+
+  if (hasBiome) {
     await lintWithBiome(dirPath, acc);
-  } else {
+    if (acc.ran) return;
+  }
+  if (hasEslint) {
     await lintWithEslint(dirPath, acc);
   }
 }
@@ -103,7 +108,7 @@ async function lintPython(dirPath: string, acc: LintAccumulator): Promise<void> 
       else acc.warnings++;
       acc.findings.push({
         severity: sev,
-        category: 'linting',
+        category: 'lint',
         file: item.filename ? relative(dirPath, item.filename) : '',
         line: item.location?.row ?? null,
         title: item.code || 'Lint issue',
@@ -124,7 +129,7 @@ function processClippyMessage(msg: Record<string, unknown>, acc: LintAccumulator
   const code = message.code as Record<string, unknown> | undefined;
   acc.findings.push({
     severity: level === 'error' ? 'high' : 'medium',
-    category: 'linting',
+    category: 'lint',
     file: (span?.file_name as string) || '',
     line: (span?.line_start as number) ?? null,
     title: (code?.code as string) || 'Clippy',
@@ -164,10 +169,12 @@ export async function analyzeLinting(
   dirPath: string,
   ecosystems: Ecosystem[],
   files: SourceFile[],
+  installedToolNames?: string[],
 ): Promise<{ score: number; findings: QualityFinding[]; available: boolean; issueCount: number }> {
   const acc = newLintAccumulator();
+  const installed = installedToolNames ? new Set(installedToolNames) : null;
 
-  if (ecosystems.includes('node')) await lintNode(dirPath, acc);
+  if (ecosystems.includes('node')) await lintNode(dirPath, acc, installed);
   if (ecosystems.includes('python')) await lintPython(dirPath, acc);
   if (ecosystems.includes('rust')) await lintRust(dirPath, acc);
 

@@ -29,28 +29,62 @@ export interface CodeReviewFinding {
 
 // ── Prompt ────────────────────────────────────────────────────
 
-export function buildCodeReviewPrompt(dirPath: string): string {
-  return `You are an expert code review agent. Your task is to perform a comprehensive, language-agnostic code review of the project in the current working directory.
+export function buildCodeReviewPrompt(dirPath: string, cliFindings?: Array<{ severity: string; category: string; file: string; line: number | null; title: string; description: string }>): string {
+  const cliFindingsSection = cliFindings && cliFindings.length > 0
+    ? `\n## CLI Tool Findings (already detected)\n\nThe following issues were found by automated CLI tools (linters, formatters, complexity analyzers). Review these for context — they are already included in the final report. Focus your analysis on DEEPER issues these tools cannot detect.\n\n${cliFindings.slice(0, 50).map((f, i) => `${i + 1}. [${f.severity.toUpperCase()}] ${f.category} — ${f.file}${f.line ? `:${f.line}` : ''} — ${f.title}: ${f.description}`).join('\n')}\n${cliFindings.length > 50 ? `\n...and ${cliFindings.length - 50} more issues from CLI tools.\n` : ''}`
+    : '';
 
-IMPORTANT: Your current working directory is "${dirPath}". Only review files within this directory. Do NOT traverse parent directories or review files outside this path.
+  return `You are a senior staff engineer performing a rigorous, honest code review. Your job is to surface the most impactful quality bottlenecks — the issues a principal engineer would flag in a code review. Be critical and objective. Do NOT inflate scores.
 
+IMPORTANT: Your current working directory is "${dirPath}". Only review files within this directory.
+${cliFindingsSection}
 ## Review Process
 
-1. **Discover**: Use Glob to find source files (e.g. "**/*.{ts,tsx,js,py,rs,go,java,rb,php}"). Understand the project structure. Only search within the current directory.
+1. **Discover**: Use Glob to find source files (e.g. "**/*.{ts,tsx,js,py,rs,go,java,rb,php}"). Understand the project structure.
 2. **Read**: Read the most important files — entry points, core modules, handlers, services. Prioritize files with recent git changes (\`git diff --name-only HEAD~5\` via Bash if available).
-3. **Analyze**: Look for real, actionable issues across these categories:
-   - **security**: Injection vulnerabilities (SQL, XSS, command), hardcoded secrets/credentials, auth bypasses, insecure crypto, path traversal, SSRF, unsafe deserialization
-   - **bugs**: Null/undefined errors, race conditions, logic errors, unhandled edge cases, off-by-one errors, resource leaks, incorrect error handling
-   - **performance**: N+1 queries, unnecessary re-renders, missing memoization, blocking I/O in hot paths, unbounded data structures, missing pagination
-   - **maintainability**: God functions (>100 lines), deep nesting (>4 levels), duplicated logic, missing error handling at system boundaries, tight coupling
+3. **Analyze**: Look for real, actionable issues across ALL of these categories:
+
+   ### Architecture
+   - What is the current architecture (monolith, microservices, layered, etc.)?
+   - Are there architectural violations? (e.g., presentation layer directly accessing data layer, circular dependencies between modules)
+   - Is there proper separation of concerns?
+   - Are there god objects or god modules that do too much?
+
+   ### SOLID / OOP Principles
+   - **SRP**: Classes/modules with multiple unrelated responsibilities
+   - **OCP**: Code that requires modification instead of extension for new features
+   - **LSP**: Subtypes that don't properly substitute for their base types
+   - **ISP**: Interfaces/contracts that force implementations to depend on methods they don't use
+   - **DIP**: High-level modules directly depending on low-level modules instead of abstractions
+
+   ### Security
+   - Injection vulnerabilities (SQL, XSS, command), hardcoded secrets/credentials, auth bypasses, insecure crypto, path traversal, SSRF, unsafe deserialization
+
+   ### Bugs & Logic
+   - Null/undefined errors, race conditions, logic errors, unhandled edge cases, off-by-one errors, resource leaks, incorrect error handling, incorrect algorithms
+
+   ### Performance
+   - N+1 queries, unnecessary re-renders, missing memoization, blocking I/O in hot paths, unbounded data structures, missing pagination
 
 ## Rules
 
 - Only report findings you are >80% confident about. No speculative or low-confidence issues.
-- Focus on bugs and security over style. Skip formatting, naming preferences, and minor nits.
+- Focus on architecture, SOLID violations, bugs, and security over style nits.
 - Each finding MUST reference a specific file and line number. Do not report vague or file-level issues.
-- Limit to the 20 most important findings, ranked by severity.
+- Limit to the 25 most important findings, ranked by severity.
 - Do NOT modify any files. This is a read-only review.
+- Be HONEST about the overall quality. A codebase with serious issues should score low.
+
+## Scoring Guidelines
+
+After your analysis, provide an honest overall quality score (0-100) and letter grade:
+- **A (90-100)**: Excellent — clean architecture, minimal issues, well-tested, follows best practices
+- **B (80-89)**: Good — solid code with minor issues, mostly well-structured
+- **C (70-79)**: Adequate — functional but has notable quality issues that should be addressed
+- **D (60-69)**: Below average — significant issues in architecture, testing, or code quality
+- **F (0-59)**: Poor — serious problems: security vulnerabilities, broken architecture, major bugs, or unmaintainable code
+
+Consider ALL findings (both CLI tool findings and your own) when determining the score. The score should reflect the overall state of the codebase honestly. A project with 50+ linting errors, formatting issues, complex functions, AND architectural problems should NOT score above 70.
 
 ## Output
 
@@ -58,10 +92,13 @@ After your analysis, output EXACTLY one JSON code block with your findings. No o
 
 \`\`\`json
 {
+  "score": 72,
+  "grade": "C",
+  "scoreRationale": "Brief explanation of why this score was given, referencing key issues",
   "findings": [
     {
       "severity": "critical|high|medium|low",
-      "category": "security|bugs|performance|maintainability",
+      "category": "architecture|oop|security|bugs|performance|logic",
       "file": "relative/path/to/file.ts",
       "line": 42,
       "title": "Short title describing the issue",
@@ -77,7 +114,7 @@ After your analysis, output EXACTLY one JSON code block with your findings. No o
 // ── Response parsing ──────────────────────────────────────────
 
 const VALID_SEVERITIES = new Set(['critical', 'high', 'medium', 'low']);
-const VALID_CATEGORIES = new Set(['security', 'bugs', 'performance', 'maintainability']);
+const VALID_CATEGORIES = new Set(['architecture', 'oop', 'security', 'bugs', 'performance', 'logic', 'maintainability']);
 
 function normalizeFinding(f: Record<string, unknown>): CodeReviewFinding | null {
   if (typeof f.file !== 'string' || typeof f.title !== 'string') return null;
@@ -105,7 +142,15 @@ function extractJson(response: string): string {
   return response.trim();
 }
 
-export function parseCodeReviewResponse(response: string): { findings: CodeReviewFinding[]; summary: string } {
+export interface CodeReviewResult {
+  findings: CodeReviewFinding[];
+  summary: string;
+  score: number | null;
+  grade: string | null;
+  scoreRationale: string | null;
+}
+
+export function parseCodeReviewResponse(response: string): CodeReviewResult {
   const jsonStr = extractJson(response);
 
   try {
@@ -113,9 +158,12 @@ export function parseCodeReviewResponse(response: string): { findings: CodeRevie
     const rawFindings: Record<string, unknown>[] = Array.isArray(parsed.findings) ? parsed.findings : [];
     const findings = rawFindings.map(normalizeFinding).filter((f): f is CodeReviewFinding => f !== null);
     const summary = typeof parsed.summary === 'string' ? parsed.summary : `Found ${findings.length} issue(s).`;
-    return { findings, summary };
+    const score = typeof parsed.score === 'number' ? Math.max(0, Math.min(100, Math.round(parsed.score))) : null;
+    const grade = typeof parsed.grade === 'string' ? parsed.grade : null;
+    const scoreRationale = typeof parsed.scoreRationale === 'string' ? parsed.scoreRationale : null;
+    return { findings, summary, score, grade, scoreRationale };
   } catch {
-    return { findings: [], summary: 'Failed to parse code review results.' };
+    return { findings: [], summary: 'Failed to parse code review results.', score: null, grade: null, scoreRationale: null };
   }
 }
 
@@ -180,9 +228,21 @@ export async function handleCodeReview(
       data: { path: reportPath, message: 'Starting AI code review...' },
     });
 
+    // Load CLI findings from the existing report to pass to the AI reviewer
+    let cliFindings: Array<{ severity: string; category: string; file: string; line: number | null; title: string; description: string }> | undefined;
+    try {
+      const persistence = getPersistence(workingDir);
+      const existingReport = persistence.loadReport(reportPath);
+      if (existingReport?.findings) {
+        cliFindings = existingReport.findings;
+      }
+    } catch {
+      // Continue without CLI findings if persistence fails
+    }
+
     const runner = new HeadlessRunner({
       workingDir: dirPath,
-      directPrompt: buildCodeReviewPrompt(dirPath),
+      directPrompt: buildCodeReviewPrompt(dirPath, cliFindings),
       stallWarningMs: 120_000,
       stallKillMs: 600_000,
       stallHardCapMs: 900_000,
@@ -213,27 +273,39 @@ export async function handleCodeReview(
     });
 
     const responseText = result.assistantResponse || '';
-    const { findings, summary } = parseCodeReviewResponse(responseText);
+    const reviewResult = parseCodeReviewResponse(responseText);
 
-    // Recompute overall score with AI review findings included
+    // Use AI-determined score if available, otherwise fall back to recomputation
     let updatedResults: import('./quality-service.js').QualityResults | null = null;
     try {
       const persistence = getPersistence(workingDir);
       const existingReport = persistence.loadReport(reportPath);
       if (existingReport) {
-        updatedResults = recomputeWithAiReview(existingReport, findings);
-        updatedResults = { ...updatedResults, codeReview: findings as unknown as typeof updatedResults.codeReview };
+        if (reviewResult.score !== null && reviewResult.grade !== null) {
+          // Use the AI-determined score and grade directly
+          updatedResults = {
+            ...existingReport,
+            overall: reviewResult.score,
+            grade: reviewResult.grade,
+            codeReview: reviewResult.findings as unknown as typeof existingReport.codeReview,
+            scoreRationale: reviewResult.scoreRationale ?? undefined,
+          };
+        } else {
+          // Fallback: recompute with weighted formula
+          updatedResults = recomputeWithAiReview(existingReport, reviewResult.findings);
+          updatedResults = { ...updatedResults, codeReview: reviewResult.findings as unknown as typeof updatedResults.codeReview };
+        }
         persistence.saveReport(reportPath, updatedResults);
         persistence.appendHistory(updatedResults, reportPath);
       }
-      persistence.saveCodeReview(reportPath, findings as unknown as Record<string, unknown>[], summary);
+      persistence.saveCodeReview(reportPath, reviewResult.findings as unknown as Record<string, unknown>[], reviewResult.summary);
     } catch {
       // Persistence failure should not break the review flow
     }
 
     ctx.send(ws, {
       type: 'qualityCodeReview',
-      data: { path: reportPath, findings, summary, results: updatedResults },
+      data: { path: reportPath, findings: reviewResult.findings, summary: reviewResult.summary, results: updatedResults },
     });
   } catch (error) {
     ctx.send(ws, {

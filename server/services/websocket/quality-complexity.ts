@@ -1,8 +1,7 @@
 // Copyright (c) 2025-present Mstro, Inc. All rights reserved.
 // Licensed under the MIT License. See LICENSE file for details.
 
-import { existsSync } from 'node:fs';
-import { extname, join, relative } from 'node:path';
+import { extname, relative } from 'node:path';
 import { runCommand, type SourceFile } from './quality-tools.js';
 import { biomeDiagToFinding, type Ecosystem, FUNCTION_LENGTH_THRESHOLD, isBiomeComplexityDiagnostic, isEslintComplexityRule, type QualityFinding } from './quality-types.js';
 
@@ -162,9 +161,6 @@ function computeComplexityScore(findings: QualityFinding[]): number {
 }
 
 async function complexityFromBiome(dirPath: string): Promise<QualityFinding[] | null> {
-  const hasBiomeConfig = existsSync(join(dirPath, 'biome.json')) || existsSync(join(dirPath, 'biome.jsonc'));
-  if (!hasBiomeConfig) return null;
-
   const result = await runCommand('npx', ['@biomejs/biome', 'lint', '--reporter=json', '.'], dirPath);
   if (result.exitCode > 1) return null;
 
@@ -245,8 +241,10 @@ async function analyzeNodeComplexity(
   const hasCapableTool = !installed || installed.has('biome') || installed.has('eslint');
   if (!hasCapableTool) return null;
 
-  const hasBiomeConfig = existsSync(join(dirPath, 'biome.json')) || existsSync(join(dirPath, 'biome.jsonc'));
-  if (hasBiomeConfig) {
+  // Use installed tools list instead of config file presence.
+  // This fixes monorepo scenarios where biome.json is in a subdirectory.
+  const hasBiome = !installed || installed.has('biome');
+  if (hasBiome) {
     const findings = await complexityFromBiome(dirPath);
     if (findings) return findings;
   }

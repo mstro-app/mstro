@@ -42,6 +42,8 @@ export interface QualityResults {
   totalLines: number;
   timestamp: string;
   ecosystem: string[];
+  /** AI-generated rationale for the score */
+  scoreRationale?: string;
 }
 
 export interface ScanProgress {

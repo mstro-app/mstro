@@ -2,17 +2,18 @@
 // Licensed under the MIT License. See LICENSE file for details.
 
 /**
- * Plan Executor — Wave-based execution with Claude Code Agent Teams.
+ * Plan Executor — Wave-based execution with parallel headless Claude Code instances.
  *
- * Orchestrates the execution loop: picks ready issues, executes waves,
- * runs AI review gate, reconciles state, and repeats.
+ * Orchestrates the execution loop: picks ready issues, executes waves of
+ * parallel headless runners (one per issue), runs AI review gate,
+ * reconciles state, and repeats.
  *
  * Implementation is split across focused modules:
- * - config-installer.ts  — teammate permissions + bouncer MCP install/uninstall
- * - prompt-builder.ts    — Agent Teams coordinator prompt construction
- * - output-manager.ts    — output path resolution, listing, publishing
- * - review-gate.ts       — AI-powered quality gate (review, parse, persist)
- * - front-matter.ts      — YAML front matter field editing utility
+ * - config-installer.ts      — tool permissions install/uninstall
+ * - issue-prompt-builder.ts  — per-issue prompt construction
+ * - output-manager.ts        — output path resolution, listing, publishing
+ * - review-gate.ts           — AI-powered quality gate (review, parse, persist)
+ * - front-matter.ts          — YAML front matter field editing utility
  */
 
 import { EventEmitter } from 'node:events';
@@ -23,26 +24,26 @@ import { HeadlessRunner } from '../../cli/headless/index.js';
 import { ConfigInstaller } from './config-installer.js';
 import { resolveReadyToWork } from './dependency-resolver.js';
 import { replaceFrontMatterField, setFrontMatterField } from './front-matter.js';
+import { buildIssuePrompt } from './issue-prompt-builder.js';
 import { listExistingDocs, publishOutputs, resolveOutputPath } from './output-manager.js';
 import { parseBoardDirectory, parsePlanDirectory, resolvePmDir } from './parser.js';
-import { buildCoordinatorPrompt } from './prompt-builder.js';
 import { appendReviewFeedback, getReviewAttemptCount, MAX_REVIEW_ATTEMPTS, persistReviewResult, reviewIssue } from './review-gate.js';
 import { reconcileState } from './state-reconciler.js';
 import type { Issue } from './types.js';
 
 export type ExecutionStatus = 'idle' | 'starting' | 'executing' | 'paused' | 'stopping' | 'complete' | 'error';
 
-/** Max teammates per wave. Agent Teams docs recommend 3-5; beyond 5-6 returns diminish. */
-const MAX_WAVE_SIZE = 5;
+/** Default max parallel agents when board doesn't specify. */
+const DEFAULT_MAX_PARALLEL_AGENTS = 3;
 
 /** Stop after this many consecutive waves with zero completions. */
 const MAX_CONSECUTIVE_EMPTY_WAVES = 3;
 
-/** Wave execution stall timeouts (ms) */
-const WAVE_STALL_WARNING_MS = 1_800_000;   // 30 min — Agent Teams leads are silent while teammates work
-const WAVE_STALL_KILL_MS = 3_600_000;      // 60 min — waves run longer
-const WAVE_STALL_HARD_CAP_MS = 7_200_000;  // 2 hr hard cap
-const WAVE_STALL_MAX_EXTENSIONS = 10;
+/** Per-issue stall timeouts (ms) — shorter than Agent Teams wave timeouts */
+const ISSUE_STALL_WARNING_MS = 900_000;    // 15 min
+const ISSUE_STALL_KILL_MS = 1_800_000;     // 30 min
+const ISSUE_STALL_HARD_CAP_MS = 3_600_000; // 1 hr hard cap
+const ISSUE_STALL_MAX_EXTENSIONS = 10;
 
 export interface ExecutionMetrics {
   issuesCompleted: number;
@@ -59,6 +60,8 @@ export class PlanExecutor extends EventEmitter {
   private shouldStop = false;
   private shouldPause = false;
   private epicScope: string | null = null;
+  /** Cached PM directory path — resolved once per start(). */
+  private pmDir: string | null = null;
   /** Board directory path (e.g. /path/.pm/boards/BOARD-001). Used for outputs, reviews, progress. */
   private boardDir: string | null = null;
   /** Board ID being executed (e.g. "BOARD-001") */
@@ -114,6 +117,7 @@ export class PlanExecutor extends EventEmitter {
     this.status = 'executing';
     this.emit('statusChanged', this.status);
 
+    this.pmDir = resolvePmDir(this.workingDir);
     this.boardDir = this.resolveBoardDir();
 
     const stallResult = await this.runWaveLoop();
@@ -136,12 +140,13 @@ export class PlanExecutor extends EventEmitter {
   /** Run waves until done, paused, stopped, or stalled. Returns 'stalled' if zero-completion cap hit. */
   private async runWaveLoop(): Promise<'done' | 'stalled'> {
     let consecutiveZeroCompletions = 0;
+    const maxParallel = this.getBoardMaxParallelAgents();
 
     while (!this.shouldStop && !this.shouldPause) {
       const readyIssues = this.pickReadyIssues();
       if (readyIssues.length === 0) break;
 
-      const completedCount = await this.executeWave(readyIssues.slice(0, MAX_WAVE_SIZE));
+      const completedCount = await this.executeWave(readyIssues.slice(0, maxParallel));
 
       if (completedCount > 0) {
         consecutiveZeroCompletions = 0;
@@ -175,50 +180,31 @@ export class PlanExecutor extends EventEmitter {
     this.emit('waveStarted', { issueIds: waveIds });
 
     this.ensureOutputDirs();
-    this.configInstaller.installTeammatePermissions();
-    this.configInstaller.installBouncerForSubagents();
+    this.configInstaller.installPermissions();
 
     for (const issue of issues) {
       this.updateIssueFrontMatter(issue.path, 'in_progress');
     }
 
     const existingDocs = listExistingDocs(this.workingDir, this.boardDir);
-    const pmDir = resolvePmDir(this.workingDir);
-    const prompt = buildCoordinatorPrompt({
-      issues,
-      workingDir: this.workingDir,
-      pmDir,
-      boardDir: this.boardDir,
-      existingDocs,
-      resolveOutputPath: (issue) => resolveOutputPath(issue, this.workingDir, this.boardDir),
-    });
+    const pmDir = this.pmDir;
 
     let completedCount = 0;
 
     try {
-      const runner = new HeadlessRunner({
-        workingDir: this.workingDir,
-        directPrompt: prompt,
-        stallWarningMs: WAVE_STALL_WARNING_MS,
-        stallKillMs: WAVE_STALL_KILL_MS,
-        stallHardCapMs: WAVE_STALL_HARD_CAP_MS,
-        stallMaxExtensions: WAVE_STALL_MAX_EXTENSIONS,
-        verbose: process.env.MSTRO_VERBOSE === '1',
-        disallowedTools: ['TeamCreate', 'TeamDelete', 'TaskCreate', 'TaskUpdate', 'TaskList'],
-        extraEnv: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1' },
-        outputCallback: (text: string) => {
-          this.emit('output', { issueId: waveLabel, text });
-        },
-      });
+      // Spawn one HeadlessRunner per issue in parallel
+      const runnerPromises = issues.map(issue => this.runSingleIssue(issue, pmDir, existingDocs, waveLabel));
+      const results = await Promise.allSettled(runnerPromises);
 
-      const boardLogDir = this.boardDir ? join(this.boardDir, 'logs') : undefined;
-      const result = await runWithFileLogger('pm-execute-wave', () => runner.run(), boardLogDir);
-
-      if (!result.completed || result.error) {
-        this.emit('waveError', {
-          issueIds: waveIds,
-          error: result.error || 'Wave did not complete successfully',
-        });
+      // Log any rejected promises
+      for (let i = 0; i < results.length; i++) {
+        const result = results[i];
+        if (result.status === 'rejected') {
+          this.emit('issueError', {
+            issueId: issues[i].id,
+            error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+          });
+        }
       }
 
       completedCount = await this.reconcileWaveResults(issues);
@@ -229,13 +215,50 @@ export class PlanExecutor extends EventEmitter {
       });
       this.revertIncompleteIssues(issues);
     } finally {
-      this.configInstaller.uninstallBouncerForSubagents();
-      this.configInstaller.uninstallTeammatePermissions();
+      this.configInstaller.uninstallPermissions();
     }
 
     this.finalizeWave(issues, waveStart, waveLabel);
     this.metrics.currentWaveIds = [];
     return completedCount;
+  }
+
+  /** Run a single issue via its own headless Claude Code instance. */
+  private async runSingleIssue(
+    issue: Issue,
+    pmDir: string | null,
+    existingDocs: string[],
+    waveLabel: string,
+  ): Promise<void> {
+    const outputPath = resolveOutputPath(issue, this.workingDir, this.boardDir);
+    const prompt = buildIssuePrompt({
+      issue,
+      workingDir: this.workingDir,
+      pmDir,
+      boardDir: this.boardDir,
+      existingDocs,
+      outputPath,
+    });
+
+    const runner = new HeadlessRunner({
+      workingDir: this.workingDir,
+      directPrompt: prompt,
+      stallWarningMs: ISSUE_STALL_WARNING_MS,
+      stallKillMs: ISSUE_STALL_KILL_MS,
+      stallHardCapMs: ISSUE_STALL_HARD_CAP_MS,
+      stallMaxExtensions: ISSUE_STALL_MAX_EXTENSIONS,
+      verbose: process.env.MSTRO_VERBOSE === '1',
+      outputCallback: (text: string) => {
+        this.emit('output', { issueId: issue.id, text });
+      },
+    });
+
+    const boardLogDir = this.boardDir ? join(this.boardDir, 'logs') : undefined;
+    const result = await runWithFileLogger(`pm-issue-${issue.id}`, () => runner.run(), boardLogDir);
+
+    if (!result.completed || result.error) {
+      this.emit('output', { issueId: waveLabel, text: `Issue ${issue.id}: ${result.error || 'did not complete'}` });
+    }
   }
 
   /**
@@ -282,7 +305,7 @@ export class PlanExecutor extends EventEmitter {
    * and either confirmed `done` (passed) or reverted to `todo` (failed).
    */
   private async reconcileWaveResults(issues: Issue[]): Promise<number> {
-    const pmDir = resolvePmDir(this.workingDir);
+    const pmDir = this.pmDir;
     if (!pmDir) return 0;
 
     let completed = 0;
@@ -363,8 +386,29 @@ export class PlanExecutor extends EventEmitter {
 
   // ── Helpers ──────────────────────────────────────────────────
 
+  /** Read the board's maxParallelAgents setting, falling back to default. */
+  private getBoardMaxParallelAgents(): number {
+    const pmDir = this.pmDir;
+    if (!pmDir) return DEFAULT_MAX_PARALLEL_AGENTS;
+
+    const effectiveBoardId = this.boardId ?? this.resolveActiveBoardId();
+    if (!effectiveBoardId) return DEFAULT_MAX_PARALLEL_AGENTS;
+
+    // Read only board.md — avoids parsing STATE.md and all backlog issues just for one setting
+    const boardMdPath = join(pmDir, 'boards', effectiveBoardId, 'board.md');
+    if (!existsSync(boardMdPath)) return DEFAULT_MAX_PARALLEL_AGENTS;
+
+    try {
+      const content = readFileSync(boardMdPath, 'utf-8');
+      const match = content.match(/^max_parallel_agents:\s*(\d+)/m);
+      return match ? Math.max(1, Math.min(Number(match[1]), 10)) : DEFAULT_MAX_PARALLEL_AGENTS;
+    } catch {
+      return DEFAULT_MAX_PARALLEL_AGENTS;
+    }
+  }
+
   private pickReadyIssues(): Issue[] {
-    const pmDir = resolvePmDir(this.workingDir);
+    const pmDir = this.pmDir;
     if (!pmDir) {
       this.emit('error', 'No PM directory found');
       return [];
@@ -448,7 +492,7 @@ export class PlanExecutor extends EventEmitter {
   }
 
   private resolveActiveBoardId(): string | null {
-    const pmDir = resolvePmDir(this.workingDir);
+    const pmDir = this.pmDir;
     if (!pmDir) return null;
     try {
       const workspacePath = join(pmDir, 'workspace.json');
@@ -461,7 +505,7 @@ export class PlanExecutor extends EventEmitter {
   }
 
   private revertIncompleteIssues(issues: Issue[]): void {
-    const pmDir = resolvePmDir(this.workingDir);
+    const pmDir = this.pmDir;
     if (!pmDir) return;
     for (const issue of issues) {
       const fullPath = join(pmDir, issue.path);
@@ -475,7 +519,7 @@ export class PlanExecutor extends EventEmitter {
   }
 
   private updateIssueFrontMatter(issuePath: string, newStatus: string): void {
-    const pmDir = resolvePmDir(this.workingDir);
+    const pmDir = this.pmDir;
     if (!pmDir) return;
     try {
       setFrontMatterField(join(pmDir, issuePath), 'status', newStatus);
@@ -487,7 +531,7 @@ export class PlanExecutor extends EventEmitter {
       const boardOutDir = join(this.boardDir, 'out');
       if (!existsSync(boardOutDir)) mkdirSync(boardOutDir, { recursive: true });
     } else {
-      const pmDir = resolvePmDir(this.workingDir);
+      const pmDir = this.pmDir;
       if (pmDir) {
         const outDir = join(pmDir, 'out');
         if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
@@ -496,7 +540,7 @@ export class PlanExecutor extends EventEmitter {
   }
 
   private appendProgressEntry(issues: Issue[], waveStart: number): void {
-    const pmDir = resolvePmDir(this.workingDir);
+    const pmDir = this.pmDir;
     if (!pmDir) return;
 
     // Board-scoped progress log
@@ -551,7 +595,7 @@ export class PlanExecutor extends EventEmitter {
 
   /** Resolve the active board's directory path for outputs, reviews, and progress. */
   private resolveBoardDir(): string | null {
-    const pmDir = resolvePmDir(this.workingDir);
+    const pmDir = this.pmDir;
     if (!pmDir) return null;
 
     const effectiveBoardId = this.boardId ?? this.resolveActiveBoardId();

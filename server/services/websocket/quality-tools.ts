@@ -4,7 +4,14 @@
 import { spawn } from 'node:child_process';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { extname, join, relative } from 'node:path';
-import { ECOSYSTEM_TOOLS, type Ecosystem, IGNORE_DIRS, type QualityTool, SOURCE_EXTENSIONS } from './quality-types.js';
+import { ADDITIONAL_EXCLUDES, ECOSYSTEM_TOOLS, type Ecosystem, type QualityTool, SOURCE_EXTENSIONS } from './quality-types.js';
+
+/** Directories to skip when falling back to manual traversal (non-git repos). */
+const FALLBACK_IGNORE_DIRS = new Set([
+  'node_modules', '.git', 'dist', 'build', '.next', '__pycache__',
+  'target', 'vendor', '.venv', 'venv', '.tox', 'coverage',
+  '.mstro', '.cache', '.turbo', '.output',
+]);
 
 // ============================================================================
 // Ecosystem Detection
@@ -159,7 +166,7 @@ function tryReadSourceFile(fullPath: string, rootPath: string): SourceFile | nul
 }
 
 function processEntry(entry: string, dir: string, rootPath: string, stack: string[], files: SourceFile[]): void {
-  if (IGNORE_DIRS.has(entry)) return;
+  if (FALLBACK_IGNORE_DIRS.has(entry)) return;
   const fullPath = join(dir, entry);
   const stat = tryStatSync(fullPath);
   if (!stat) return;
@@ -171,7 +178,8 @@ function processEntry(entry: string, dir: string, rootPath: string, stack: strin
   if (sourceFile) files.push(sourceFile);
 }
 
-export function collectSourceFiles(dirPath: string, rootPath: string): SourceFile[] {
+/** Fallback: manual DFS traversal for non-git directories. */
+function collectSourceFilesFallback(dirPath: string, rootPath: string): SourceFile[] {
   const files: SourceFile[] = [];
   const stack = [dirPath];
 
@@ -183,6 +191,43 @@ export function collectSourceFiles(dirPath: string, rootPath: string): SourceFil
     for (const entry of entries) {
       processEntry(entry, dir, rootPath, stack, files);
     }
+  }
+
+  return files;
+}
+
+/**
+ * Collect source files for quality analysis.
+ *
+ * Primary: uses `git ls-files` to respect all .gitignore layers automatically.
+ * Fallback: manual directory traversal with hardcoded ignore list (non-git repos).
+ */
+export async function collectSourceFiles(dirPath: string, rootPath: string): Promise<SourceFile[]> {
+  // Check if inside a git repo
+  const gitCheck = await runCommand('git', ['rev-parse', '--is-inside-work-tree'], dirPath);
+  if (gitCheck.exitCode !== 0) {
+    return collectSourceFilesFallback(dirPath, rootPath);
+  }
+
+  // Use git ls-files: tracked + untracked-but-not-ignored
+  const result = await runCommand('git', ['ls-files', '--cached', '--others', '--exclude-standard'], dirPath);
+  if (result.exitCode !== 0) {
+    return collectSourceFilesFallback(dirPath, rootPath);
+  }
+
+  const files: SourceFile[] = [];
+  const relativePaths = result.stdout.split('\n').filter(Boolean);
+
+  for (const relPath of relativePaths) {
+    const ext = extname(relPath).toLowerCase();
+    if (!SOURCE_EXTENSIONS.has(ext)) continue;
+
+    const fileName = relPath.split('/').pop() || '';
+    if (ADDITIONAL_EXCLUDES.has(fileName)) continue;
+
+    const fullPath = join(dirPath, relPath);
+    const sourceFile = tryReadSourceFile(fullPath, rootPath);
+    if (sourceFile) files.push(sourceFile);
   }
 
   return files;

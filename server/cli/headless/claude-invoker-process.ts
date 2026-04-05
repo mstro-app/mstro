@@ -96,7 +96,8 @@ export function buildClaudeArgs(
   args.push('--append-system-prompt', 'IMPORTANT: Always use the Read tool to read a file before using Edit or Write on it. Never edit a file you have not read in this session.');
 
   if (!hasImageAttachments) {
-    args.push(prompt);
+    // Strip null bytes — Node.js spawn rejects args containing \0
+    args.push(prompt.replaceAll('\0', ''));
   }
 
   return args;

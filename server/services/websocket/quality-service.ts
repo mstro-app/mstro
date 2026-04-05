@@ -219,7 +219,7 @@ export async function runQualityScan(
 
   // Step 1: Collect source files
   progress('Collecting source files', 1);
-  const files = collectSourceFiles(dirPath, dirPath);
+  const files = await collectSourceFiles(dirPath, dirPath);
 
   // Step 2: Run linting (only if a linter is installed)
   progress('Running linters', 2);

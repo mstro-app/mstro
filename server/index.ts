@@ -183,7 +183,18 @@ async function startServer() {
         platformConnection.send({ type: 'reportUsage', data: report })
       })
     },
+    onDisconnected: () => {
+      if (platformRelayContext) {
+        wsHandler.handleClose(platformRelayContext)
+        platformRelayContext = null
+      }
+      pendingRelayMessages = []
+    },
     onWebConnected: () => {
+      // Clean up previous relay context to prevent duplicate broadcasts
+      if (platformRelayContext) {
+        wsHandler.handleClose(platformRelayContext)
+      }
       platformRelayContext = createPlatformRelayContext(
         (message) => platformConnection.send(message),
         WORKING_DIR

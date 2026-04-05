@@ -109,10 +109,18 @@ export const SOURCE_EXTENSIONS = new Set([
   '.c', '.cpp', '.h', '.hpp',
 ]);
 
-export const IGNORE_DIRS = new Set([
-  'node_modules', '.git', 'dist', 'build', '.next', '__pycache__',
-  'target', 'vendor', '.venv', 'venv', '.tox', 'coverage',
-  '.mstro', '.cache', '.turbo', '.output',
+/** Git-tracked files to skip in quality analysis (lock files, generated code, etc.) */
+export const ADDITIONAL_EXCLUDES = new Set([
+  'package-lock.json',
+  'pnpm-lock.yaml',
+  'yarn.lock',
+  'bun.lockb',
+  'bun.lock',
+  'composer.lock',
+  'Gemfile.lock',
+  'Cargo.lock',
+  'poetry.lock',
+  'go.sum',
 ]);
 
 export const FILE_LENGTH_THRESHOLD = 300;

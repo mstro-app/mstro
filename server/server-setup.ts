@@ -81,7 +81,7 @@ export function wrapWebSocket(ws: NodeWebSocket, workingDir: string): WSContext 
   return {
     send: (data: string | Buffer) => ws.send(data),
     close: () => ws.close(),
-    readyState: ws.readyState,
+    get readyState() { return ws.readyState },
     _workingDir: workingDir,
     _ws: ws
   } as WSContext

@@ -9,7 +9,7 @@
  * The token is created once (by `mstro login` or first server start) and reused.
  */
 
-import { randomBytes } from 'node:crypto'
+import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -53,7 +53,8 @@ export class AuthService {
    * Validate the local session token (used for localhost API/WS auth)
    */
   validateLocalToken(token: string): boolean {
-    return token === this.localToken
+    if (token.length !== this.localToken.length) return false
+    return timingSafeEqual(Buffer.from(token), Buffer.from(this.localToken))
   }
 
   /**

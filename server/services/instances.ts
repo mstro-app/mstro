@@ -81,7 +81,7 @@ export class InstanceRegistry {
    */
   register(port: number, workingDirectory: string): MstroInstance {
     const instance: MstroInstance = {
-      id: `mstro-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      id: `mstro-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
       port,
       url: `http://localhost:${port}`,
       workingDirectory,

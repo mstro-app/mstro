@@ -6,13 +6,13 @@ import { detectGitProvider, executeGitCommand, spawnCheck, spawnHaikuWithPrompt,
 import type { HandlerContext } from './handler-context.js';
 import type { WebSocketMessage, WSContext } from './types.js';
 
-export function handleGitPRMessage(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, gitDir: string, _workingDir: string): void {
-  const handlers: Record<string, () => void> = {
+export async function handleGitPRMessage(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, gitDir: string, _workingDir: string): Promise<void> {
+  const handlers: Record<string, () => Promise<void>> = {
     gitGetRemoteInfo: () => handleGitGetRemoteInfo(ctx, ws, tabId, gitDir),
     gitCreatePR: () => handleGitCreatePR(ctx, ws, msg, tabId, gitDir),
     gitGeneratePRDescription: () => handleGitGeneratePRDescription(ctx, ws, msg, tabId, gitDir),
   };
-  handlers[msg.type]?.();
+  await handlers[msg.type]?.();
 }
 
 async function handleGitGetRemoteInfo(ctx: HandlerContext, ws: WSContext, tabId: string, workingDir: string): Promise<void> {

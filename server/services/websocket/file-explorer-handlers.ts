@@ -93,9 +93,13 @@ export function handleFileExplorerMessage(ctx: HandlerContext, ws: WSContext, ms
       handleDeleteFile(ctx, ws, msg, tabId, workingDir);
     },
     renameFile: () => {
-      if (isSandboxed && msg.data?.filePath) {
-        const validation = validatePathWithinWorkingDir(msg.data.filePath, workingDir);
-        if (!validation.valid) { ctx.send(ws, { type: 'fileError', tabId, data: { operation: 'renameFile', path: msg.data.filePath, error: 'Sandboxed: path outside project directory' } }); return; }
+      if (isSandboxed) {
+        const oldValidation = msg.data?.oldPath ? validatePathWithinWorkingDir(msg.data.oldPath, workingDir) : { valid: false };
+        const newValidation = msg.data?.newPath ? validatePathWithinWorkingDir(msg.data.newPath, workingDir) : { valid: false };
+        if (!oldValidation.valid || !newValidation.valid) {
+          ctx.send(ws, { type: 'fileError', tabId, data: { operation: 'renameFile', path: msg.data?.oldPath || '', error: 'Sandboxed: path outside project directory' } });
+          return;
+        }
       }
       handleRenameFile(ctx, ws, msg, tabId, workingDir);
     },

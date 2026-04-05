@@ -201,7 +201,10 @@ export function handleSessionMessage(ctx: HandlerContext, ws: WSContext, msg: We
     }
     case 'new': {
       const oldSession = requireSession(ctx, ws, tabId);
+      const oldSessionId = oldSession.getSessionInfo().sessionId;
       const newSession = oldSession.startNewSession({ model: getModel() });
+      oldSession.destroy();
+      ctx.sessions.delete(oldSessionId);
       setupSessionListeners(ctx, newSession, ws, tabId);
       const newSessionId = newSession.getSessionInfo().sessionId;
       ctx.sessions.set(newSessionId, newSession);

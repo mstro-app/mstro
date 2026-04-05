@@ -31,7 +31,7 @@ export async function handleGitMessage(ctx: HandlerContext, ws: WSContext, msg: 
   const gitDir = ctx.gitDirectories.get(tabId) || workingDir;
 
   if (GIT_PR_TYPES.has(msg.type)) {
-    handleGitPRMessage(ctx, ws, msg, tabId, gitDir, workingDir);
+    await handleGitPRMessage(ctx, ws, msg, tabId, gitDir, workingDir);
     return;
   }
   if (GIT_WORKTREE_TYPES.has(msg.type)) {
@@ -39,7 +39,7 @@ export async function handleGitMessage(ctx: HandlerContext, ws: WSContext, msg: 
     return;
   }
 
-  const handlers: Record<string, () => void> = {
+  const handlers: Record<string, () => Promise<void>> = {
     gitStatus: () => handleGitStatus(ctx, ws, tabId, gitDir),
     gitStage: () => handleGitStage(ctx, ws, msg, tabId, gitDir),
     gitUnstage: () => handleGitUnstage(ctx, ws, msg, tabId, gitDir),
@@ -61,7 +61,7 @@ export async function handleGitMessage(ctx: HandlerContext, ws: WSContext, msg: 
     gitCreateTag: () => handleGitCreateTag(ctx, ws, msg, tabId, gitDir),
     gitPushTag: () => handleGitPushTag(ctx, ws, msg, tabId, gitDir),
   };
-  handlers[msg.type]?.();
+  await handlers[msg.type]?.();
 }
 
 export async function handleGitStatus(ctx: HandlerContext, ws: WSContext, tabId: string, workingDir: string): Promise<void> {

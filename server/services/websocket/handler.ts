@@ -215,6 +215,18 @@ export class WebSocketImproviseHandler implements HandlerContext {
   }
 
   handleClose(ws: WSContext): void {
+    // Destroy sessions owned by this connection to free interval timers
+    const tabMap = this.connections.get(ws);
+    if (tabMap) {
+      const sessionIds = new Set(tabMap.values());
+      for (const sessionId of sessionIds) {
+        const session = this.sessions.get(sessionId);
+        if (session) {
+          session.destroy();
+          this.sessions.delete(sessionId);
+        }
+      }
+    }
     this.connections.delete(ws);
     this.allConnections.delete(ws);
     cleanupTerminalSubscribers(this, ws);

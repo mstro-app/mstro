@@ -72,6 +72,7 @@ export class PlatformConnection {
   private tokenRefreshInterval: ReturnType<typeof setInterval> | null = null
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null
   private missedPongs = 0
+  private everConnected = false
   private readonly startedAt: string
 
   constructor(
@@ -228,13 +229,6 @@ export class PlatformConnection {
       }
     }
 
-    let everConnected = false
-    const originalOnConnected = this.callbacks.onConnected
-    this.callbacks.onConnected = (connectionId) => {
-      everConnected = true
-      originalOnConnected?.(connectionId)
-    }
-
     this.ws.onclose = (event) => {
       this.stopHeartbeat()
       this.isConnected = false
@@ -242,7 +236,7 @@ export class PlatformConnection {
       if (!this.isIntentionallyClosed) {
         const isAuthFailure = event.code === 4001 ||
           event.reason?.includes('Unauthorized') ||
-          (event.code === 1006 && !everConnected)
+          (event.code === 1006 && !this.everConnected)
 
         if (isAuthFailure) {
           console.error('\n❌ Authentication failed. Your device token may be invalid or expired.')
@@ -267,6 +261,7 @@ export class PlatformConnection {
     switch (message.type) {
       case 'paired':
         this.isConnected = true
+        this.everConnected = true
         this.connectionId = message.connectionId as string
         this.startHeartbeat()
         this.callbacks.onConnected?.(message.connectionId as string)

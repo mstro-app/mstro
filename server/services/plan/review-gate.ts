@@ -31,6 +31,8 @@ export interface ReviewIssueOptions {
   onOutput?: (text: string) => void;
   /** Board-scoped log directory for execution logs. Falls back to global ~/.mstro/logs/headless/ */
   logDir?: string;
+  /** Custom board-level review criteria — replaces default review instructions when set */
+  reviewCriteria?: string;
 }
 
 /**
@@ -38,12 +40,12 @@ export interface ReviewIssueOptions {
  * Returns auto-pass on infrastructure failures to avoid blocking execution.
  */
 export async function reviewIssue(options: ReviewIssueOptions): Promise<ReviewResult> {
-  const { workingDir, issue, pmDir, outputPath, onOutput, logDir } = options;
+  const { workingDir, issue, pmDir, outputPath, onOutput, logDir, reviewCriteria } = options;
   const isCodeTask = issue.filesToModify.length > 0;
   const issueType: ReviewResult['issueType'] = isCodeTask ? 'code' : 'non-code';
 
   try {
-    const prompt = buildReviewPrompt(issue, pmDir, outputPath, isCodeTask);
+    const prompt = buildReviewPrompt(issue, pmDir, outputPath, isCodeTask, reviewCriteria);
 
     const runner = new HeadlessRunner({
       workingDir,
@@ -162,10 +164,33 @@ export function autoPassResult(issueId: string, issueType: ReviewResult['issueTy
 
 // ── Private helpers ─────────────────────────────────────────
 
-function buildReviewPrompt(issue: Issue, pmDir: string, outputPath: string, isCodeTask: boolean): string {
+function buildReviewPrompt(issue: Issue, pmDir: string, outputPath: string, isCodeTask: boolean, reviewCriteria?: string): string {
   const criteria = issue.acceptanceCriteria
     .map(c => `- [${c.checked ? 'x' : ' '}] ${c.text}`)
     .join('\n');
+
+  // When custom review criteria are set, use a generic review prompt
+  // that applies the user's criteria instead of assuming code review.
+  if (reviewCriteria) {
+    return `You are a reviewer. Review the work done for issue ${issue.id}: ${issue.title}.
+${isCodeTask ? `\n## Files Modified\n${issue.filesToModify.map(f => `- ${f}`).join('\n')}` : `\n## Output File\n${outputPath}\n\n## Issue Spec\n${join(pmDir, issue.path)}`}
+
+## Acceptance Criteria
+${criteria || 'No specific criteria defined.'}
+
+## Review Criteria
+${reviewCriteria}
+
+## Instructions
+1. ${isCodeTask ? 'Read each modified file listed above' : 'Read the output file and issue spec at the paths above'}
+2. Check if all acceptance criteria are met
+3. Evaluate against the review criteria above
+
+Output EXACTLY one JSON object on its own line (no markdown fencing):
+{"passed": true, "checks": [{"name": "criteria_met", "passed": true, "details": "..."}]}
+
+Include checks for: criteria_met, review_criteria.`;
+  }
 
   if (isCodeTask) {
     return `You are a code reviewer. Review the work done for issue ${issue.id}: ${issue.title}.

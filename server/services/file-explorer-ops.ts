@@ -108,7 +108,8 @@ export function listDirectory(
 export function writeFile(
   filePath: string,
   content: string,
-  workingDir: string
+  workingDir: string,
+  encoding?: 'base64'
 ): FileOperationResult {
   if (containsDangerousPatterns(filePath)) {
     console.error(`[FileService] SECURITY: Dangerous pattern in path: "${filePath}"`)
@@ -133,7 +134,11 @@ export function writeFile(
       }
     }
 
-    writeFileSync(resolvedPath, content, 'utf-8')
+    if (encoding === 'base64') {
+      writeFileSync(resolvedPath, Buffer.from(content, 'base64'))
+    } else {
+      writeFileSync(resolvedPath, content, 'utf-8')
+    }
     return { success: true, path: resolvedPath.replace(`${workingDir}/`, '') }
   } catch (error: unknown) {
     console.error('[FileService] Error writing file:', error)

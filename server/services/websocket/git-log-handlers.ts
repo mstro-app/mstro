@@ -119,23 +119,29 @@ export async function handleGitSetDirectory(ctx: HandlerContext, ws: WSContext, 
     return;
   }
 
-  // Security: validate path is within working directory to prevent traversal
+  // Security: validate path is within working directory OR is a valid worktree of the repo
   const resolvedDir = resolve(directory);
   const resolvedWorkingDir = resolve(workingDir);
-  if (!resolvedDir.startsWith(`${resolvedWorkingDir}/`) && resolvedDir !== resolvedWorkingDir) {
-    ctx.send(ws, { type: 'gitError', tabId, data: { error: 'Access denied: path outside project directory' } });
-    return;
+  const isWithinWorkingDir = resolvedDir.startsWith(`${resolvedWorkingDir}/`) || resolvedDir === resolvedWorkingDir;
+
+  if (!isWithinWorkingDir) {
+    // Check if the directory is a known worktree of this repo
+    const isWorktree = await isValidWorktreePath(resolvedDir, workingDir);
+    if (!isWorktree) {
+      ctx.send(ws, { type: 'gitError', tabId, data: { error: 'Access denied: path outside project directory' } });
+      return;
+    }
   }
 
-  const gitPath = join(directory, '.git');
+  const gitPath = join(resolvedDir, '.git');
   const isValid = existsSync(gitPath);
 
   if (isValid) {
-    ctx.gitDirectories.set(tabId, directory);
+    ctx.gitDirectories.set(tabId, resolvedDir);
   }
 
   const response: GitDirectorySetResponse = {
-    directory,
+    directory: resolvedDir,
     isValid,
   };
 
@@ -143,7 +149,22 @@ export async function handleGitSetDirectory(ctx: HandlerContext, ws: WSContext, 
 
   if (isValid) {
     const { handleGitStatus } = await import('./git-handlers.js');
-    handleGitStatus(ctx, ws, tabId, directory);
-    handleGitLog(ctx, ws, { type: 'gitLog', data: { limit: 5 } }, tabId, directory);
+    handleGitStatus(ctx, ws, tabId, resolvedDir);
+    handleGitLog(ctx, ws, { type: 'gitLog', data: { limit: 5 } }, tabId, resolvedDir);
   }
+}
+
+/** Check if a path is a registered worktree of the repo at workingDir */
+async function isValidWorktreePath(targetPath: string, workingDir: string): Promise<boolean> {
+  const result = await executeGitCommand(['worktree', 'list', '--porcelain'], workingDir);
+  if (result.exitCode !== 0) return false;
+
+  const resolvedTarget = resolve(targetPath);
+  for (const line of result.stdout.split('\n')) {
+    if (line.startsWith('worktree ')) {
+      const wtPath = resolve(line.slice(9).trim());
+      if (wtPath === resolvedTarget) return true;
+    }
+  }
+  return false;
 }

@@ -178,14 +178,17 @@ export class WebSocketImproviseHandler implements HandlerContext {
     const domain = WebSocketImproviseHandler.DISPATCH[msg.type];
     if (!domain) throw new Error(`Unknown message type: ${msg.type}`);
 
+    // Resolve effective working directory: use worktree path if tab is on a worktree
+    const effectiveDir = this.gitDirectories.get(tabId) || workingDir;
+
     switch (domain) {
       case 'session':    return handleSessionMessage(this, ws, msg, tabId, permission);
       case 'history':    return handleHistoryMessage(this, ws, msg, tabId, workingDir);
-      case 'file':       return handleFileMessage(this, ws, msg, tabId, workingDir, permission);
+      case 'file':       return handleFileMessage(this, ws, msg, tabId, effectiveDir, permission);
       case 'terminal':   return handleTerminalMessage(this, ws, msg, tabId, workingDir, permission);
-      case 'fileExplorer': return handleFileExplorerMessage(this, ws, msg, tabId, workingDir, permission);
+      case 'fileExplorer': return handleFileExplorerMessage(this, ws, msg, tabId, effectiveDir, permission);
       case 'git':        return handleGitMessage(this, ws, msg, tabId, workingDir);
-      case 'quality':    return handleQualityMessage(this, ws, msg, tabId, workingDir);
+      case 'quality':    return handleQualityMessage(this, ws, msg, tabId, workingDir, permission);
       case 'plan':       return handlePlanMessage(this, ws, msg, tabId, workingDir, permission);
       case 'fileUpload': return this.handleFileUploadMessage(ws, msg, tabId, workingDir);
     }

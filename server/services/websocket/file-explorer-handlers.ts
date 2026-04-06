@@ -132,7 +132,8 @@ function handleListDirectory(ctx: HandlerContext, ws: WSContext, msg: WebSocketM
 function handleWriteFile(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): void {
   if (!msg.data?.filePath) throw new Error('File path is required');
   if (msg.data.content === undefined) throw new Error('Content is required');
-  const result = writeFile(msg.data.filePath, msg.data.content, workingDir);
+  const encoding = msg.data.encoding === 'base64' ? 'base64' as const : undefined;
+  const result = writeFile(msg.data.filePath, msg.data.content, workingDir, encoding);
   sendFileResult(ctx, ws, 'fileWritten', tabId, result);
   if (result.success) {
     ctx.broadcastToOthers(ws, {

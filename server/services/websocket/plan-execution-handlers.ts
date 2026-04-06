@@ -24,7 +24,8 @@ export function handlePrompt(
     ctx.send(ws, { type: 'planError', data: { error: 'Prompt required' } });
     return;
   }
-  handlePlanPrompt(ctx, ws, prompt, workingDir, boardId).catch(error => {
+  const sandboxed = permission === 'control';
+  handlePlanPrompt(ctx, ws, prompt, workingDir, boardId, sandboxed).catch(error => {
     ctx.send(ws, {
       type: 'planError',
       data: { error: error instanceof Error ? error.message : String(error) },
@@ -100,6 +101,7 @@ export function handleExecute(
   if (denyIfViewOnly(ctx, ws, permission)) return;
 
   const executor = getExecutor(workingDir);
+  executor.setSandboxed(permission === 'control');
 
   if (executor.getStatus() === 'executing' || executor.getStatus() === 'starting') {
     ctx.send(ws, { type: 'planError', data: { error: 'Execution already in progress' } });
@@ -132,6 +134,7 @@ export function handleExecuteEpic(
   }
 
   const executor = getExecutor(workingDir);
+  executor.setSandboxed(permission === 'control');
 
   if (executor.getStatus() === 'executing' || executor.getStatus() === 'starting') {
     ctx.send(ws, { type: 'planError', data: { error: 'Execution already in progress' } });

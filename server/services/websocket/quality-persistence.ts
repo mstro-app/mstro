@@ -11,7 +11,7 @@
  *   .mstro/quality/history.json       — Score history entries for trend tracking
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { QualityResults } from './quality-service.js';
 
@@ -56,6 +56,7 @@ export interface QualityPersistedState {
 // ============================================================================
 
 const MAX_HISTORY_ENTRIES = 100;
+const MAX_REPORT_HISTORY_FILES = 200;
 
 function slugify(dirPath: string): string {
   if (dirPath === '.' || dirPath === './') return '_root';
@@ -94,15 +95,18 @@ function writeJson(filePath: string, data: unknown): void {
 export class QualityPersistence {
   private qualityDir: string;
   private reportsDir: string;
+  private reportHistoryDir: string;
   private configPath: string;
   private historyPath: string;
 
   constructor(workingDir: string) {
     this.qualityDir = join(workingDir, '.mstro', 'quality');
     this.reportsDir = join(this.qualityDir, 'reports');
+    this.reportHistoryDir = join(this.reportsDir, 'history');
     this.configPath = join(this.qualityDir, 'config.json');
     this.historyPath = join(this.qualityDir, 'history.json');
     ensureDir(this.reportsDir);
+    ensureDir(this.reportHistoryDir);
   }
 
   // ---- Config (directory list) ----
@@ -141,6 +145,12 @@ export class QualityPersistence {
     const slug = slugify(dirPath);
     const reportPath = join(this.reportsDir, `${slug}.json`);
     writeJson(reportPath, results);
+
+    // Archive timestamped copy for historical tracking
+    const ts = Date.now();
+    const archivePath = join(this.reportHistoryDir, `${ts}_${slug}.json`);
+    writeJson(archivePath, results);
+    this.pruneReportHistory();
   }
 
   loadAllReports(directories: QualityDirectoryConfig[]): Record<string, QualityResults> {
@@ -152,6 +162,19 @@ export class QualityPersistence {
       }
     }
     return reports;
+  }
+
+  // ---- Report history pruning ----
+
+  private pruneReportHistory(): void {
+    try {
+      const files = readdirSync(this.reportHistoryDir).filter((f) => f.endsWith('.json')).sort();
+      if (files.length <= MAX_REPORT_HISTORY_FILES) return;
+      const toRemove = files.slice(0, files.length - MAX_REPORT_HISTORY_FILES);
+      for (const file of toRemove) {
+        try { unlinkSync(join(this.reportHistoryDir, file)); } catch { /* ignore */ }
+      }
+    } catch { /* directory may not exist yet */ }
   }
 
   // ---- History (trend tracking) ----
@@ -219,7 +242,14 @@ export class QualityPersistence {
   saveCodeReview(dirPath: string, findings: Record<string, unknown>[], summary: string): void {
     const slug = slugify(dirPath);
     const reviewPath = join(this.reportsDir, `${slug}-review.json`);
-    writeJson(reviewPath, { findings, summary, timestamp: new Date().toISOString() });
+    const data = { findings, summary, timestamp: new Date().toISOString() };
+    writeJson(reviewPath, data);
+
+    // Archive timestamped copy for historical tracking
+    const ts = Date.now();
+    const archivePath = join(this.reportHistoryDir, `${ts}_${slug}-review.json`);
+    writeJson(archivePath, data);
+    this.pruneReportHistory();
   }
 
   // ---- Full state load ----

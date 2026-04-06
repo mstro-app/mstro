@@ -11,6 +11,7 @@
  */
 
 import { join } from 'node:path';
+import { validatePathWithinWorkingDir } from '../pathUtils.js';
 import type { HandlerContext } from './handler-context.js';
 import type { FindingForFix } from './quality-fix-agent.js';
 import { handleFixIssues } from './quality-fix-agent.js';
@@ -39,6 +40,26 @@ function resolvePath(workingDir: string, dirPath?: string): string {
   return join(workingDir, dirPath);
 }
 
+/**
+ * Resolve and validate a directory path for sandboxed users.
+ * Returns null if the path escapes the working directory.
+ */
+function resolveAndValidatePath(
+  workingDir: string,
+  dirPath: string | undefined,
+  isSandboxed: boolean,
+): { resolved: string; error?: string } {
+  const resolved = resolvePath(workingDir, dirPath);
+  if (isSandboxed) {
+    const validation = validatePathWithinWorkingDir(resolved, workingDir);
+    if (!validation.valid) {
+      return { resolved: '', error: validation.error || 'Path outside project directory' };
+    }
+    return { resolved: validation.resolvedPath };
+  }
+  return { resolved };
+}
+
 // ── Message router ────────────────────────────────────────────
 
 export function handleQualityMessage(
@@ -47,25 +68,33 @@ export function handleQualityMessage(
   msg: WebSocketMessage,
   _tabId: string,
   workingDir: string,
+  permission?: 'control' | 'view',
 ): void {
+  const isSandboxed = permission === 'control' || permission === 'view';
+  const sendPathError = (path: string, error: string) => {
+    ctx.send(ws, { type: 'qualityError', data: { path, error } });
+  };
+
   const handlers: Record<string, () => void> = {
-    qualityDetectTools: () => handleDetectTools(ctx, ws, msg, workingDir),
-    qualityScan: () => handleScan(ctx, ws, msg, workingDir),
-    qualityInstallTools: () => handleInstallTools(ctx, ws, msg, workingDir),
+    qualityDetectTools: () => handleDetectTools(ctx, ws, msg, workingDir, isSandboxed),
+    qualityScan: () => handleScan(ctx, ws, msg, workingDir, isSandboxed),
+    qualityInstallTools: () => handleInstallTools(ctx, ws, msg, workingDir, isSandboxed),
     qualityCodeReview: () => {
-      const dirPath = resolvePath(workingDir, msg.data?.path);
+      const { resolved: dirPath, error } = resolveAndValidatePath(workingDir, msg.data?.path, isSandboxed);
+      if (error) { sendPathError(msg.data?.path || '.', error); return; }
       const reportPath = msg.data?.path || '.';
       handleCodeReview(ctx, ws, reportPath, dirPath, workingDir, activeReviews, getPersistence);
     },
     qualityFixIssues: () => {
-      const dirPath = resolvePath(workingDir, msg.data?.path);
+      const { resolved: dirPath, error } = resolveAndValidatePath(workingDir, msg.data?.path, isSandboxed);
+      if (error) { sendPathError(msg.data?.path || '.', error); return; }
       const reportPath = msg.data?.path || '.';
       const section: string | undefined = msg.data?.section;
       const findings: FindingForFix[] = msg.data?.findings || [];
       handleFixIssues(ctx, ws, reportPath, dirPath, workingDir, section, findings, getPersistence);
     },
     qualityLoadState: () => handleLoadState(ctx, ws, workingDir),
-    qualitySaveDirectories: () => handleSaveDirectories(ctx, ws, msg, workingDir),
+    qualitySaveDirectories: () => handleSaveDirectories(ctx, ws, msg, workingDir, isSandboxed),
   };
 
   const handler = handlers[msg.type];
@@ -106,10 +135,26 @@ async function handleSaveDirectories(
   ws: WSContext,
   msg: WebSocketMessage,
   workingDir: string,
+  isSandboxed = false,
 ): Promise<void> {
   try {
     const persistence = getPersistence(workingDir);
     const directories: Array<{ path: string; label: string }> = msg.data?.directories || [];
+
+    // Validate all directory paths when sandboxed
+    if (isSandboxed) {
+      for (const dir of directories) {
+        const { error } = resolveAndValidatePath(workingDir, dir.path, true);
+        if (error) {
+          ctx.send(ws, {
+            type: 'qualityError',
+            data: { path: dir.path, error: `Cannot save directory: ${error}` },
+          });
+          return;
+        }
+      }
+    }
+
     persistence.saveConfig(directories);
   } catch (error) {
     ctx.send(ws, {
@@ -124,8 +169,13 @@ async function handleDetectTools(
   ws: WSContext,
   msg: WebSocketMessage,
   workingDir: string,
+  isSandboxed = false,
 ): Promise<void> {
-  const dirPath = resolvePath(workingDir, msg.data?.path);
+  const { resolved: dirPath, error: pathError } = resolveAndValidatePath(workingDir, msg.data?.path, isSandboxed);
+  if (pathError) {
+    ctx.send(ws, { type: 'qualityError', data: { path: msg.data?.path || '.', error: pathError } });
+    return;
+  }
   try {
     const { tools, ecosystem } = await detectTools(dirPath);
     ctx.send(ws, {
@@ -145,8 +195,13 @@ async function handleScan(
   ws: WSContext,
   msg: WebSocketMessage,
   workingDir: string,
+  isSandboxed = false,
 ): Promise<void> {
-  const dirPath = resolvePath(workingDir, msg.data?.path);
+  const { resolved: dirPath, error: pathError } = resolveAndValidatePath(workingDir, msg.data?.path, isSandboxed);
+  if (pathError) {
+    ctx.send(ws, { type: 'qualityError', data: { path: msg.data?.path || '.', error: pathError } });
+    return;
+  }
   const reportPath = msg.data?.path || '.';
 
   try {
@@ -184,8 +239,13 @@ async function handleInstallTools(
   ws: WSContext,
   msg: WebSocketMessage,
   workingDir: string,
+  isSandboxed = false,
 ): Promise<void> {
-  const dirPath = resolvePath(workingDir, msg.data?.path);
+  const { resolved: dirPath, error: pathError } = resolveAndValidatePath(workingDir, msg.data?.path, isSandboxed);
+  if (pathError) {
+    ctx.send(ws, { type: 'qualityError', data: { path: msg.data?.path || '.', error: pathError } });
+    return;
+  }
   const reportPath = msg.data?.path || '.';
   const toolNames: string[] | undefined = msg.data?.tools;
 

@@ -39,7 +39,7 @@ export function formatYamlValue(value: unknown): string {
     if (value.length === 0) return '[]';
     return `[${value.map(v => typeof v === 'string' ? v : String(v)).join(', ')}]`;
   }
-  return `"${String(value).replace(/"/g, '\\"')}"`;
+  return `"${String(value).replace(/"/g, '\\"').replace(/\n/g, '\\n')}"`;
 }
 
 export function buildIssueMarkdown(

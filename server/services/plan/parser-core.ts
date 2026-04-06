@@ -397,6 +397,7 @@ export function parseBoard(content: string, filePath: string): Board {
     goal: String(fm.goal || sections.get('Goal') || ''),
     executionSummary,
     maxParallelAgents: clampParallelAgents(fm.max_parallel_agents),
+    reviewCriteria: String(fm.review_criteria || sections.get('Review Criteria') || '').replace(/\\n/g, '\n'),
     path: filePath,
   };
 }

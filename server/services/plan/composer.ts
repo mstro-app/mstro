@@ -129,6 +129,7 @@ export async function handlePlanPrompt(
   userPrompt: string,
   workingDir: string,
   boardId?: string,
+  sandboxed?: boolean,
 ): Promise<void> {
   const pmDir = resolvePmDir(workingDir) ?? defaultPmDir(workingDir);
   const projectContent = readFileOrEmpty(join(pmDir, 'project.md'));
@@ -237,7 +238,7 @@ Implementation guidance.
 - Give each child issue clear acceptance criteria and files to modify when possible
 - Set appropriate priorities (P0-P3) based on the issue's importance within the epic
 
-User request: ${userPrompt}`;
+User request: ${userPrompt}${sandboxed ? `\n\nIMPORTANT: This session has project-scoped access. You MUST NOT read, write, or access any files outside of "${workingDir}" and its subdirectories. All file operations (Read, Write, Edit, Glob, Grep, Bash) must target paths within this directory. Do not use absolute paths that escape this directory. Do not use "../" to access parent directories.` : ''}`;
 
   try {
     ctx.broadcastToAll({
@@ -248,6 +249,7 @@ User request: ${userPrompt}`;
     const runner = new HeadlessRunner({
       workingDir,
       directPrompt: enrichedPrompt,
+      sandboxed: sandboxed ?? false,
       outputCallback: (text: string) => {
         ctx.send(ws, {
           type: 'planPromptStreaming',

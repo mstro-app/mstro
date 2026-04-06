@@ -156,6 +156,15 @@ async function handleGitWorktreeRemove(ctx: HandlerContext, ws: WSContext, msg: 
 
     await executeGitCommand(['worktree', 'prune'], workingDir);
 
+    // Clean up gitDirectories entries for any tabs referencing the removed worktree
+    const resolvedWtPath = join(wtPath); // normalize
+    for (const [tid, dir] of ctx.gitDirectories) {
+      if (dir === resolvedWtPath || dir === wtPath) {
+        ctx.gitDirectories.delete(tid);
+        ctx.gitBranches.delete(tid);
+      }
+    }
+
     ctx.send(ws, { type: 'gitWorktreeRemoved', tabId, data: { path: wtPath } });
   } catch (error: unknown) {
     ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });

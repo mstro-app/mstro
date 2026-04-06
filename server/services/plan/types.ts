@@ -121,6 +121,8 @@ export interface Board {
   executionSummary: BoardExecutionSummary | null;
   /** Max parallel headless Claude Code instances per execution wave (default: 3) */
   maxParallelAgents: number;
+  /** Custom review criteria instructions — replaces default code-review prompt when set */
+  reviewCriteria: string;
   path: string;
 }
 

@@ -30,6 +30,9 @@ export interface QualityFinding {
   title: string;
   description: string;
   suggestion?: string;
+  evidence?: string;
+  verified?: boolean;
+  verificationNote?: string;
 }
 
 export interface QualityResults {

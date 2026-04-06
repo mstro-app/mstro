@@ -21,6 +21,7 @@ import {
   updateCredentials,
 } from './platform-credentials.js'
 import { captureException } from './sentry.js'
+import { isBwrapAvailable } from './terminal/pty-utils.js'
 
 /**
  * Get machine identification string
@@ -185,7 +186,7 @@ export class PlatformConnection {
       osType,
       cpuArch,
       cliVersion: CLI_VERSION,
-      capabilities: JSON.stringify({}),
+      capabilities: JSON.stringify({ terminalSandbox: isBwrapAvailable() }),
       startedAt: this.startedAt,
     })
 

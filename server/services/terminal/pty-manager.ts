@@ -13,10 +13,12 @@ import { homedir, platform } from 'node:os';
 import { sanitizeEnvForSandbox } from '../sandbox-utils.js';
 import type { PTYSession } from './pty-utils.js';
 import {
+  buildBwrapArgs,
   detectShell,
   getPty,
   getPtyInstallInstructions,
   getShellName,
+  isBwrapAvailable,
   isPtyAvailable,
   SCROLLBACK_MAX_BYTES,
   ScrollbackBuffer,
@@ -83,7 +85,27 @@ export class PTYManager extends EventEmitter {
         : { ...process.env, HOME: homedir() };
       const env = { ...baseEnv, TERM: 'xterm-256color', COLORTERM: 'truecolor' };
 
-      const ptyProcess = pty.spawn(shell, [], { name: 'xterm-256color', cols, rows, cwd, env });
+      // Sandboxed terminals use bubblewrap (bwrap) for filesystem isolation.
+      // The shell is spawned inside a namespace that only sees the project directory (rw)
+      // and system directories (ro). Without bwrap, sandboxed terminals are not available.
+      let spawnCommand: string;
+      let spawnArgs: string[];
+      let spawnCwd: string;
+
+      if (options?.sandboxed) {
+        if (!isBwrapAvailable()) {
+          throw new Error('SANDBOX_UNAVAILABLE:Terminal sandbox (bubblewrap) is not installed on this machine. Shared terminal sessions require bubblewrap for filesystem isolation.');
+        }
+        spawnCommand = '/usr/bin/bwrap';
+        spawnArgs = buildBwrapArgs(cwd, shell);
+        spawnCwd = '/'; // bwrap manages cwd internally via --chdir
+      } else {
+        spawnCommand = shell;
+        spawnArgs = [];
+        spawnCwd = cwd;
+      }
+
+      const ptyProcess = pty.spawn(spawnCommand, spawnArgs, { name: 'xterm-256color', cols, rows, cwd: spawnCwd, env });
 
       const session: PTYSession = {
         id: terminalId,

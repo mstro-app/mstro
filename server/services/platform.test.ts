@@ -20,6 +20,7 @@ const mockOs = {
   type: vi.fn(),
   arch: vi.fn(),
   homedir: vi.fn(),
+  platform: vi.fn().mockReturnValue('linux'),
 }
 
 const mockPath = {
@@ -114,6 +115,9 @@ vi.mock('fs', () => mockFs)
 vi.mock('os', () => mockOs)
 vi.mock('path', () => mockPath)
 vi.mock('./client-id.js', () => mockClientId)
+vi.mock('./terminal/pty-utils.js', () => ({
+  isBwrapAvailable: vi.fn().mockReturnValue(false),
+}))
 
 // Mock undici WebSocket for Node 18-20 compatibility
 vi.mock('undici', () => ({

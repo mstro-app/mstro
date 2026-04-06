@@ -94,12 +94,25 @@ function handleTerminalInit(
       is_reconnect: isReconnect,
     });
   } catch (error: unknown) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
     console.error(`[WebSocketImproviseHandler] Failed to create terminal:`, error);
-    ctx.send(ws, {
-      type: 'terminalError',
-      terminalId,
-      data: { error: (error instanceof Error ? error.message : String(error)) || 'Failed to create terminal' }
-    });
+
+    if (errorMsg.startsWith('SANDBOX_UNAVAILABLE:')) {
+      ctx.send(ws, {
+        type: 'terminalError',
+        terminalId,
+        data: {
+          error: 'SANDBOX_UNAVAILABLE',
+          message: 'Terminal requires bubblewrap (bwrap) to be installed on the host machine for shared app sessions. Ask the app owner to install it.',
+        }
+      });
+    } else {
+      ctx.send(ws, {
+        type: 'terminalError',
+        terminalId,
+        data: { error: errorMsg || 'Failed to create terminal' }
+      });
+    }
     removeTerminalSubscriber(ctx, terminalId, ws);
   }
 }

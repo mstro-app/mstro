@@ -8,6 +8,8 @@
  * on session lifecycle orchestration.
  */
 
+import { execSync } from 'node:child_process';
+import { accessSync, constants as fsConstants, lstatSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { platform } from 'node:os';
 
@@ -113,6 +115,82 @@ export function detectShell(): string {
 export function getShellName(shellPath: string): string {
   const parts = shellPath.split(/[/\\]/);
   return parts[parts.length - 1] || 'shell';
+}
+
+// ── Bubblewrap (bwrap) sandbox detection ─────────────────────
+
+let _bwrapAvailable: boolean | null = null;
+
+/**
+ * Check if bubblewrap (bwrap) is available for filesystem sandboxing.
+ * Required for sandboxed terminal sessions (shared "can control" users).
+ * Caches the result after first check.
+ */
+export function isBwrapAvailable(): boolean {
+  if (_bwrapAvailable !== null) return _bwrapAvailable;
+
+  if (platform() !== 'linux') {
+    _bwrapAvailable = false;
+    return false;
+  }
+
+  try {
+    accessSync('/usr/bin/bwrap', fsConstants.X_OK);
+    execSync('bwrap --ro-bind / / -- /bin/true', { timeout: 5000, stdio: 'ignore' });
+    _bwrapAvailable = true;
+  } catch {
+    _bwrapAvailable = false;
+  }
+  return _bwrapAvailable;
+}
+
+/**
+ * Build bwrap arguments to sandbox a shell to a specific directory.
+ * Provides read-only access to system directories, read-write to the project dir only.
+ */
+export function buildBwrapArgs(cwd: string, shell: string): string[] {
+  const mergedUsr = (() => {
+    try { return lstatSync('/bin').isSymbolicLink(); }
+    catch { return false; }
+  })();
+
+  const args: string[] = [
+    '--ro-bind', '/usr', '/usr',
+    '--ro-bind', '/etc', '/etc',
+    // Hide sensitive /etc files by binding /dev/null over them
+    '--ro-bind', '/dev/null', '/etc/shadow',
+    '--ro-bind', '/dev/null', '/etc/gshadow',
+  ];
+
+  if (mergedUsr) {
+    // Merged-usr distros (Fedora, Ubuntu 20.04+, Arch, Debian 12+)
+    args.push('--symlink', 'usr/bin', '/bin');
+    args.push('--symlink', 'usr/sbin', '/sbin');
+    args.push('--symlink', 'usr/lib', '/lib');
+    try { lstatSync('/lib64'); args.push('--symlink', 'usr/lib64', '/lib64'); } catch { /* skip */ }
+  } else {
+    args.push('--ro-bind', '/bin', '/bin');
+    args.push('--ro-bind', '/sbin', '/sbin');
+    args.push('--ro-bind', '/lib', '/lib');
+    try { lstatSync('/lib64'); args.push('--ro-bind', '/lib64', '/lib64'); } catch { /* skip */ }
+  }
+
+  args.push(
+    '--proc', '/proc',
+    '--dev', '/dev',
+    '--tmpfs', '/tmp',
+    '--tmpfs', '/run',
+    // Read-write access to the project directory only
+    '--bind', cwd, cwd,
+    '--unshare-pid',
+    '--unshare-ipc',
+    '--die-with-parent',
+    '--chdir', cwd,
+    '--',
+    shell,
+  );
+
+  return args;
 }
 
 // ── Scrollback buffer ─────────────────────────────────────────

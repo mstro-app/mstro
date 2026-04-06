@@ -95,6 +95,11 @@ export function buildClaudeArgs(
   // Reduce Edit-without-Read errors by reminding the model
   args.push('--append-system-prompt', 'IMPORTANT: Always use the Read tool to read a file before using Edit or Write on it. Never edit a file you have not read in this session.');
 
+  // Sandboxed sessions: restrict all file operations to the working directory
+  if (config.sandboxed) {
+    args.push('--append-system-prompt', `SECURITY: You are running in sandboxed mode for a shared user. You MUST NOT read, write, list, or access any files or directories outside the working directory (${config.workingDir}). This includes home directories, /etc, /tmp, /proc, and any path that does not start with ${config.workingDir}. If asked to access files outside this boundary, refuse the request and explain that access is restricted to the project directory.`);
+  }
+
   if (!hasImageAttachments) {
     // Strip null bytes — Node.js spawn rejects args containing \0
     args.push(prompt.replaceAll('\0', ''));
@@ -147,7 +152,7 @@ export function spawnAndRegister(
   );
 
   const baseEnv = config.sandboxed
-    ? sanitizeEnvForSandbox(process.env, config.workingDir)
+    ? sanitizeEnvForSandbox(process.env, config.workingDir, { overrideHome: false })
     : { ...process.env };
   const spawnEnv = config.extraEnv
     ? { ...baseEnv, ...config.extraEnv }

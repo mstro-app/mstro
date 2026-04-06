@@ -58,7 +58,8 @@ const BLOCKED_KEYS = new Set([
  */
 export function sanitizeEnvForSandbox(
   env: NodeJS.ProcessEnv,
-  workingDir: string
+  workingDir: string,
+  options?: { overrideHome?: boolean }
 ): Record<string, string> {
   const result: Record<string, string> = {};
 
@@ -69,8 +70,11 @@ export function sanitizeEnvForSandbox(
     result[key] = value;
   }
 
-  // Override HOME to project directory so `cd ~` stays sandboxed
-  result.HOME = workingDir;
+  // Override HOME to project directory so `cd ~` stays sandboxed (e.g. terminals).
+  // Claude Code processes opt out (overrideHome: false) to preserve OAuth auth lookup.
+  if (options?.overrideHome !== false) {
+    result.HOME = workingDir;
+  }
   // Marker so scripts can detect sandboxed execution
   result.MSTRO_SANDBOXED = '1';
 

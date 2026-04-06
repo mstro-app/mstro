@@ -539,6 +539,7 @@ async function runVerificationPass(
   dirPath: string,
   findings: CodeReviewFinding[],
   send: ProgressSender,
+  sandboxed?: boolean,
 ): Promise<CodeReviewFinding[]> {
   send(`Verifying ${findings.length} findings against actual code...`);
 
@@ -549,6 +550,7 @@ async function runVerificationPass(
     stallKillMs: 300_000,
     stallHardCapMs: 600_000,
     toolUseCallback: makeToolCallback(send, 'Verifying: '),
+    sandboxed,
   });
 
   const verifyResult = await runWithFileLogger('code-review-verify', () => verificationRunner.run());
@@ -571,8 +573,11 @@ function persistReviewResults(
 ): import('./quality-service.js').QualityResults | null {
   const persistence = getPersistence(workingDir);
   const existingReport = persistence.loadReport(reportPath);
+  // CodeReviewFinding is structurally compatible with QualityFinding (category is a narrower union)
+  const findings = reviewResult.findings as import('./quality-types.js').QualityFinding[];
+  const findingsRecord = reviewResult.findings as unknown[] as Record<string, unknown>[];
   if (!existingReport) {
-    persistence.saveCodeReview(reportPath, reviewResult.findings as unknown as Record<string, unknown>[], reviewResult.summary);
+    persistence.saveCodeReview(reportPath, findingsRecord, reviewResult.summary);
     return null;
   }
 
@@ -582,17 +587,17 @@ function persistReviewResults(
       ...existingReport,
       overall: reviewResult.score,
       grade: reviewResult.grade,
-      codeReview: reviewResult.findings as unknown as typeof existingReport.codeReview,
+      codeReview: findings,
       scoreRationale: reviewResult.scoreRationale ?? undefined,
     };
   } else {
     updatedResults = recomputeWithAiReview(existingReport, reviewResult.findings);
-    updatedResults = { ...updatedResults, codeReview: reviewResult.findings as unknown as typeof updatedResults.codeReview };
+    updatedResults = { ...updatedResults, codeReview: findings };
   }
 
   persistence.saveReport(reportPath, updatedResults);
   persistence.appendHistory(updatedResults, reportPath);
-  persistence.saveCodeReview(reportPath, reviewResult.findings as unknown as Record<string, unknown>[], reviewResult.summary);
+  persistence.saveCodeReview(reportPath, findingsRecord, reviewResult.summary);
   return updatedResults;
 }
 
@@ -606,6 +611,7 @@ export async function handleCodeReview(
   workingDir: string,
   activeReviews: Set<string>,
   getPersistence: (dir: string) => QualityPersistence,
+  sandboxed?: boolean,
 ): Promise<void> {
   if (activeReviews.has(dirPath)) {
     ctx.send(ws, { type: 'qualityError', data: { path: reportPath, error: 'A code review is already running for this directory.' } });
@@ -627,6 +633,7 @@ export async function handleCodeReview(
       stallKillMs: 600_000,
       stallHardCapMs: 900_000,
       toolUseCallback: makeToolCallback(send),
+      sandboxed,
     });
 
     send('Claude is analyzing your codebase...');
@@ -644,7 +651,7 @@ export async function handleCodeReview(
     let finalFindings = validation.validated;
     if (finalFindings.length > 0) {
       try {
-        finalFindings = await runVerificationPass(dirPath, finalFindings, send);
+        finalFindings = await runVerificationPass(dirPath, finalFindings, send, sandboxed);
       } catch {
         send('Verification pass skipped (timeout or error)');
       }

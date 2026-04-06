@@ -115,8 +115,8 @@ vi.mock('fs', () => mockFs)
 vi.mock('os', () => mockOs)
 vi.mock('path', () => mockPath)
 vi.mock('./client-id.js', () => mockClientId)
-vi.mock('./terminal/pty-utils.js', () => ({
-  isBwrapAvailable: vi.fn().mockReturnValue(false),
+vi.mock('./sandbox-config.js', () => ({
+  isSandboxAvailable: vi.fn().mockReturnValue(false),
 }))
 
 // Mock undici WebSocket for Node 18-20 compatibility
@@ -444,10 +444,13 @@ describe('Platform Connection Service', () => {
     describe('reconnection behavior', () => {
       beforeEach(() => {
         vi.useFakeTimers()
+        // Make jitter deterministic: Math.random() = 0.5 → jitter factor = 0
+        vi.spyOn(Math, 'random').mockReturnValue(0.5)
       })
 
       afterEach(() => {
         vi.useRealTimers()
+        vi.restoreAllMocks()
       })
 
       it('should schedule reconnect on connection failure', () => {
@@ -734,7 +737,7 @@ describe('Platform Connection Service', () => {
         sentMessages.length = 0
 
         // Advance time to trigger heartbeat
-        vi.advanceTimersByTime(2 * 60 * 1000)
+        vi.advanceTimersByTime(25_000)
         expect(sentMessages.some((msg) => JSON.parse(msg).type === 'ping')).toBe(true)
 
         sentMessages.length = 0
@@ -798,15 +801,15 @@ describe('Platform Connection Service', () => {
       // No heartbeat yet
       expect(sentMessages.length).toBe(0)
 
-      // Advance time to heartbeat interval (2 minutes)
-      vi.advanceTimersByTime(2 * 60 * 1000)
+      // Advance time to heartbeat interval (25 seconds)
+      vi.advanceTimersByTime(25_000)
 
       // Should have sent ping
       expect(sentMessages.length).toBe(1)
       expect(JSON.parse(sentMessages[0])).toEqual({ type: 'ping' })
     })
 
-    it('should send heartbeat every 2 minutes', () => {
+    it('should send heartbeat every 25 seconds', () => {
       const connection = new PlatformConnection('/test/dir')
       connection.connect()
 
@@ -822,22 +825,22 @@ describe('Platform Connection Service', () => {
       // Clear auth message
       sentMessages.length = 0
 
-      // First ping at 2 minutes
-      vi.advanceTimersByTime(2 * 60 * 1000)
+      // First ping at 25 seconds
+      vi.advanceTimersByTime(25_000)
       expect(sentMessages.length).toBe(1)
 
       // Simulate pong to reset missed counter
       lastWebSocketInstance!.triggerMessage({ type: 'pong' })
 
-      // Second ping at 4 minutes
-      vi.advanceTimersByTime(2 * 60 * 1000)
+      // Second ping at 50 seconds
+      vi.advanceTimersByTime(25_000)
       expect(sentMessages.length).toBe(2)
 
       // Simulate pong
       lastWebSocketInstance!.triggerMessage({ type: 'pong' })
 
-      // Third ping at 6 minutes
-      vi.advanceTimersByTime(2 * 60 * 1000)
+      // Third ping at 75 seconds
+      vi.advanceTimersByTime(25_000)
       expect(sentMessages.length).toBe(3)
 
       sentMessages.forEach((msg) => {
@@ -854,14 +857,14 @@ describe('Platform Connection Service', () => {
 
       expect(connection.isConnectedToPlatform()).toBe(true)
 
-      // First ping at 2 minutes (missedPongs goes to 1)
-      vi.advanceTimersByTime(2 * 60 * 1000)
+      // First ping at 25s (missedPongs goes to 1)
+      vi.advanceTimersByTime(25_000)
 
-      // Second ping at 4 minutes (missedPongs goes to 2, no pong received)
-      vi.advanceTimersByTime(2 * 60 * 1000)
+      // Second ping at 50s (missedPongs goes to 2, no pong received)
+      vi.advanceTimersByTime(25_000)
 
-      // Third tick at 6 minutes — missedPongs >= MAX_MISSED_PONGS, force close
-      vi.advanceTimersByTime(2 * 60 * 1000)
+      // Third tick at 75s — missedPongs >= MAX_MISSED_PONGS, force close
+      vi.advanceTimersByTime(25_000)
 
       // Connection should be closed (onclose fires, sets isConnected=false)
       expect(connection.isConnectedToPlatform()).toBe(false)

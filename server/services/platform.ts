@@ -20,8 +20,8 @@ import {
   shouldRefreshToken,
   updateCredentials,
 } from './platform-credentials.js'
+import { isSandboxAvailable } from './sandbox-config.js'
 import { captureException } from './sentry.js'
-import { isBwrapAvailable } from './terminal/pty-utils.js'
 
 /**
  * Get machine identification string
@@ -40,8 +40,12 @@ let WebSocketImpl: typeof WebSocket
 if (typeof WebSocket !== 'undefined') {
   WebSocketImpl = WebSocket
 } else {
-  const { default: WS } = await import('ws')
-  WebSocketImpl = WS as unknown as typeof WebSocket
+  try {
+    const { default: WS } = await import('ws')
+    WebSocketImpl = WS as unknown as typeof WebSocket
+  } catch {
+    throw new Error('WebSocket not available: install the "ws" package or use Node.js 21+')
+  }
 }
 
 // PLATFORM_URL is set via --server / --dev flag in mstro.js
@@ -122,7 +126,7 @@ export class PlatformConnection {
 
   private startHeartbeat(): void {
     this.missedPongs = 0
-    this.heartbeatInterval = setInterval(() => this.heartbeatTick(), 2 * 60 * 1000)
+    this.heartbeatInterval = setInterval(() => this.heartbeatTick(), 25_000)
   }
 
   private heartbeatTick(): void {
@@ -186,7 +190,7 @@ export class PlatformConnection {
       osType,
       cpuArch,
       cliVersion: CLI_VERSION,
-      capabilities: JSON.stringify({ terminalSandbox: isBwrapAvailable() }),
+      capabilities: JSON.stringify({ terminalSandbox: isSandboxAvailable(), claudeSandbox: isSandboxAvailable() }),
       startedAt: this.startedAt,
     })
 
@@ -231,6 +235,7 @@ export class PlatformConnection {
     }
 
     this.ws.onclose = (event) => {
+      clearTimeout(connectionTimeout)
       this.stopHeartbeat()
       this.isConnected = false
 
@@ -254,6 +259,7 @@ export class PlatformConnection {
     }
 
     this.ws.onerror = () => {
+      clearTimeout(connectionTimeout)
       // onclose will be called after this
     }
   }
@@ -275,6 +281,10 @@ export class PlatformConnection {
         this.callbacks.onWebDisconnected?.()
         trackEvent(AnalyticsEvents.WEB_CLIENT_DISCONNECTED)
         break
+      case 'ping':
+        // Server-initiated ping — respond with pong to reset stale detection
+        this.send({ type: 'pong' })
+        break
       case 'pong':
         this.missedPongs = 0
         break
@@ -293,7 +303,9 @@ export class PlatformConnection {
     }
 
     this.reconnectAttempts++
-    const delay = Math.min(1000 * 2 ** (this.reconnectAttempts - 1), 30000)
+    const base = Math.min(1000 * 2 ** (this.reconnectAttempts - 1), 30000)
+    const jitter = base * 0.25 * (2 * Math.random() - 1)
+    const delay = Math.max(0, Math.round(base + jitter))
 
     this.reconnectTimeout = setTimeout(() => {
       this.reconnectTimeout = null

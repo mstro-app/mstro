@@ -10,7 +10,7 @@
  * - quality-fix-agent.ts     — AI fix prompt, progress tracking, handler
  */
 
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { validatePathWithinWorkingDir } from '../pathUtils.js';
 import type { HandlerContext } from './handler-context.js';
 import type { FindingForFix } from './quality-fix-agent.js';
@@ -36,8 +36,12 @@ function getPersistence(workingDir: string): QualityPersistence {
 
 function resolvePath(workingDir: string, dirPath?: string): string {
   if (!dirPath || dirPath === '.' || dirPath === './') return workingDir;
-  if (dirPath.startsWith('/')) return dirPath;
-  return join(workingDir, dirPath);
+  const resolved = dirPath.startsWith('/') ? dirPath : join(workingDir, dirPath);
+  // Ensure path is within working directory even for non-sandboxed users
+  const normalizedResolved = resolve(resolved);
+  const normalizedWorkingDir = resolve(workingDir);
+  if (!normalizedResolved.startsWith(normalizedWorkingDir)) return workingDir;
+  return normalizedResolved;
 }
 
 /**
@@ -83,7 +87,7 @@ export function handleQualityMessage(
       const { resolved: dirPath, error } = resolveAndValidatePath(workingDir, msg.data?.path, isSandboxed);
       if (error) { sendPathError(msg.data?.path || '.', error); return; }
       const reportPath = msg.data?.path || '.';
-      handleCodeReview(ctx, ws, reportPath, dirPath, workingDir, activeReviews, getPersistence);
+      handleCodeReview(ctx, ws, reportPath, dirPath, workingDir, activeReviews, getPersistence, isSandboxed || undefined);
     },
     qualityFixIssues: () => {
       const { resolved: dirPath, error } = resolveAndValidatePath(workingDir, msg.data?.path, isSandboxed);
@@ -91,7 +95,7 @@ export function handleQualityMessage(
       const reportPath = msg.data?.path || '.';
       const section: string | undefined = msg.data?.section;
       const findings: FindingForFix[] = msg.data?.findings || [];
-      handleFixIssues(ctx, ws, reportPath, dirPath, workingDir, section, findings, getPersistence);
+      handleFixIssues(ctx, ws, reportPath, dirPath, workingDir, section, findings, getPersistence, isSandboxed || undefined);
     },
     qualityLoadState: () => handleLoadState(ctx, ws, workingDir),
     qualitySaveDirectories: () => handleSaveDirectories(ctx, ws, msg, workingDir, isSandboxed),

@@ -17,16 +17,23 @@ import type { HandlerContext } from './handler-context.js';
 import type { WebSocketMessage, WebSocketResponse, WSContext } from './types.js';
 
 export function handleFileMessage(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string, permission?: 'control' | 'view'): void {
+  const isSandboxed = permission === 'control' || permission === 'view';
   switch (msg.type) {
     case 'autocomplete':
       if (!msg.data?.partialPath) throw new Error('Partial path is required');
-      ctx.send(ws, { type: 'autocomplete', tabId, data: { completions: ctx.autocompleteService.getFileCompletions(msg.data.partialPath, workingDir) } });
+      ctx.send(ws, { type: 'autocomplete', tabId, data: { completions: ctx.autocompleteService.getFileCompletions(msg.data.partialPath, workingDir, isSandboxed || undefined) } });
       break;
     case 'readFile':
       handleReadFile(ctx, ws, msg, tabId, workingDir, permission);
       break;
     case 'recordSelection':
-      if (msg.data?.filePath) ctx.recordFileSelection(msg.data.filePath);
+      if (msg.data?.filePath) {
+        if (isSandboxed) {
+          const validation = validatePathWithinWorkingDir(msg.data.filePath, workingDir);
+          if (!validation.valid) break; // Silently ignore out-of-bounds selections
+        }
+        ctx.recordFileSelection(msg.data.filePath);
+      }
       break;
   }
 }

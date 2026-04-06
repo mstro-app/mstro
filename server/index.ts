@@ -27,9 +27,11 @@ import {
 import { createPlatformRelayContext, ensureClaudeSettings, setTerminalTitle, wrapWebSocket } from './server-setup.js'
 import { AnalyticsEvents, initAnalytics, shutdownAnalytics, trackEvent } from './services/analytics.js'
 import { AuthService } from './services/auth.js'
+import { getAuthProxy } from './services/auth-proxy.js'
 import { FileService } from './services/files.js'
 import { InstanceRegistry, type MstroInstance } from './services/instances.js'
 import { PlatformConnection } from './services/platform.js'
+import { probeSandboxAvailability, resetSandbox } from './services/sandbox-config.js'
 import { captureException, flushSentry, initSentry } from './services/sentry.js'
 import { getPTYManager, reloadPty } from './services/terminal/pty-manager.js'
 import { WebSocketImproviseHandler } from './services/websocket/index.js'
@@ -133,6 +135,17 @@ async function startServer() {
   initSentry()
   await initAnalytics()
 
+  // Probe sandbox availability early so isSandboxAvailable() has a cached result
+  await probeSandboxAvailability()
+
+  // Start auth proxy for sandboxed Claude Code sessions (credential injection without exposure)
+  const authProxy = getAuthProxy()
+  try {
+    await authProxy.start()
+  } catch (err) {
+    console.warn('[AuthProxy] Failed to start — sandboxed sessions will use soft sandbox only:', err instanceof Error ? err.message : err)
+  }
+
   const PORT = await findAvailablePort(REQUESTED_PORT, 20)
   _currentInstance = instanceRegistry.register(PORT, WORKING_DIR)
 
@@ -157,7 +170,18 @@ async function startServer() {
     wsHandler.handleConnection(wrappedWs, workingDir)
 
     ws.on('message', (data: Buffer | string) => {
-      const message = typeof data === 'string' ? data : data.toString('utf-8')
+      let message = typeof data === 'string' ? data : data.toString('utf-8')
+      // Strip _permission from local WebSocket messages — only the platform relay
+      // should inject permission metadata. Local connections are always the machine owner.
+      if (message.includes('_permission')) {
+        try {
+          const parsed = JSON.parse(message)
+          if ('_permission' in parsed) {
+            delete parsed._permission
+            message = JSON.stringify(parsed)
+          }
+        } catch { /* not JSON — pass through */ }
+      }
       wsHandler.handleMessage(wrappedWs, message, workingDir)
     })
     ws.on('close', () => wsHandler.handleClose(wrappedWs))
@@ -218,7 +242,10 @@ async function startServer() {
       if (platformRelayContext) {
         wsHandler.handleMessage(platformRelayContext, JSON.stringify(message), WORKING_DIR)
       } else {
-        pendingRelayMessages.push(message)
+        // Cap pending messages to prevent unbounded memory growth while disconnected
+        if (pendingRelayMessages.length < 100) {
+          pendingRelayMessages.push(message)
+        }
       }
     }
   })
@@ -236,7 +263,9 @@ async function startServer() {
 
   const gracefulShutdown = async () => {
     trackEvent(AnalyticsEvents.SERVER_STOPPED)
-    await Promise.all([shutdownAnalytics(), flushSentry()])
+    const withTimeout = (p: Promise<void>, ms: number) =>
+      Promise.race([p, new Promise<void>(resolve => setTimeout(resolve, ms))]);
+    await Promise.all([shutdownAnalytics(), flushSentry(), withTimeout(authProxy.stop(), 5000), resetSandbox()])
     platformConnection.disconnect()
     instanceRegistry.unregister()
     getPTYManager().closeAll()

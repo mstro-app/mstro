@@ -113,6 +113,33 @@ The result: you can trust mstro to run unattended and make better, more consiste
 
 For full details on architecture, threat model, red team results, and vulnerability reporting see **[SECURITY.md](./SECURITY.md)**.
 
+### Shared App Sandbox ("Can Control" Permission)
+
+When you share an app and grant someone "can control" permission, their Claude Code sessions and terminals run inside an OS-level sandbox powered by Anthropic's [`@anthropic-ai/sandbox-runtime`](https://github.com/anthropic-experimental/sandbox-runtime). The sandbox is cross-platform — bubblewrap on Linux, sandbox-exec (Seatbelt) on macOS — and enforces:
+
+- **Filesystem isolation** — the shared user can only read and write files inside your project directory. System directories are read-only, and credential files (`~/.claude/.credentials.json`, `~/.mstro/credentials.json`, `~/.ssh/`) are hidden entirely.
+- **Credential protection** — your API key never enters the sandboxed process. An auth proxy runs on localhost inside the mstro CLI server, reads your credentials, and injects them into API requests on behalf of the sandboxed session. The sandboxed process only sees a placeholder key.
+- **Autocomplete scoping** — `@` file autocomplete is restricted to the project directory. Path traversal with `../` is blocked server-side for shared users.
+
+#### Platform support
+
+| Platform | Sandbox backend | Dependencies |
+|----------|----------------|--------------|
+| **macOS** | sandbox-exec (Seatbelt) | Built-in — works out of the box |
+| **Linux** | bubblewrap (bwrap) | `sudo apt install bubblewrap socat` (Debian/Ubuntu) or equivalent |
+| **Windows** | Not supported natively | Use WSL2 (falls back to Linux bubblewrap) |
+
+macOS requires no extra installation — `sandbox-exec` is a built-in OS facility. Linux requires bubblewrap and socat to be installed by the user; `sandbox-runtime` does not install them automatically.
+
+#### How it works
+
+mstro checks sandbox availability at startup using `sandbox-runtime`'s built-in dependency checks (`isSupportedPlatform()` + `checkDependencies()`). The result is reported to the platform server as `terminalSandbox` and `claudeSandbox` capabilities. "Can control" shared link creation is only allowed when the host machine can sandbox securely:
+
+1. **Startup** — mstro probes sandbox availability and reports capabilities to the relay server.
+2. **Share link creation** — the relay server checks capabilities before allowing "can control" permission grants.
+3. **Runtime enforcement** — when a "control" user connects, the relay injects `_permission` metadata into their messages. The CLI uses this to spawn sandboxed processes (OS isolation + auth proxy + env sanitization).
+4. **Fallback** — if sandbox dependencies are not met, "can control" is blocked at the relay level. The user is told sandbox support is required and given platform-specific install instructions.
+
 ## Optional Setup
 
 ### Web Terminal

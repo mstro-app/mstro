@@ -10,17 +10,16 @@
 
 import { EventEmitter } from 'node:events';
 import { homedir, platform } from 'node:os';
+import { cleanupSandboxCommand, initializeSandbox, isSandboxAvailable, wrapCommandForSandbox } from '../sandbox-config.js';
 import { sanitizeEnvForSandbox } from '../sandbox-utils.js';
 import type { PTYSession } from './pty-utils.js';
 import {
-  buildBwrapArgs,
   detectShell,
   getPty,
   getPtyInstallInstructions,
   getShellName,
-  isBwrapAvailable,
   isPtyAvailable,
-  SCROLLBACK_MAX_BYTES,
+  SCROLLBACK_MAX_LENGTH,
   ScrollbackBuffer,
 } from './pty-utils.js';
 
@@ -54,14 +53,14 @@ export class PTYManager extends EventEmitter {
     return getPtyInstallInstructions();
   }
 
-  create(
+  async create(
     terminalId: string,
     workingDir: string,
     cols: number = 80,
     rows: number = 24,
     requestedShell?: string,
     options?: { sandboxed?: boolean }
-  ): { shell: string; cwd: string; isReconnect: boolean; platform: string } {
+  ): Promise<{ shell: string; cwd: string; isReconnect: boolean; platform: string }> {
     const pty = getPty();
     if (!pty) {
       throw new Error(`PTY_NOT_AVAILABLE:${getPtyInstallInstructions()}`);
@@ -85,20 +84,23 @@ export class PTYManager extends EventEmitter {
         : { ...process.env, HOME: homedir() };
       const env = { ...baseEnv, TERM: 'xterm-256color', COLORTERM: 'truecolor' };
 
-      // Sandboxed terminals use bubblewrap (bwrap) for filesystem isolation.
-      // The shell is spawned inside a namespace that only sees the project directory (rw)
-      // and system directories (ro). Without bwrap, sandboxed terminals are not available.
+      // Sandboxed terminals use sandbox-runtime for filesystem isolation.
+      // Cross-platform: bwrap on Linux, sandbox-exec on macOS.
+      // The shell is spawned inside a sandbox that only sees the project directory (rw)
+      // and system directories (ro). Without sandbox-runtime, sandboxed terminals are not available.
       let spawnCommand: string;
       let spawnArgs: string[];
       let spawnCwd: string;
 
       if (options?.sandboxed) {
-        if (!isBwrapAvailable()) {
-          throw new Error('SANDBOX_UNAVAILABLE:Terminal sandbox (bubblewrap) is not installed on this machine. Shared terminal sessions require bubblewrap for filesystem isolation.');
+        if (!isSandboxAvailable()) {
+          throw new Error('SANDBOX_UNAVAILABLE:Sandbox runtime is not available on this machine. Shared terminal sessions require sandbox-runtime for filesystem isolation.');
         }
-        spawnCommand = '/usr/bin/bwrap';
-        spawnArgs = buildBwrapArgs(cwd, shell);
-        spawnCwd = '/'; // bwrap manages cwd internally via --chdir
+        await initializeSandbox(cwd);
+        const wrappedCommand = await wrapCommandForSandbox(shell);
+        spawnCommand = '/bin/sh';
+        spawnArgs = ['-c', wrappedCommand];
+        spawnCwd = cwd;
       } else {
         spawnCommand = shell;
         spawnArgs = [];
@@ -107,6 +109,7 @@ export class PTYManager extends EventEmitter {
 
       const ptyProcess = pty.spawn(spawnCommand, spawnArgs, { name: 'xterm-256color', cols, rows, cwd: spawnCwd, env });
 
+      const isSandboxed = !!options?.sandboxed;
       const session: PTYSession = {
         id: terminalId,
         pty: ptyProcess,
@@ -116,9 +119,10 @@ export class PTYManager extends EventEmitter {
         lastActivityAt: Date.now(),
         cols,
         rows,
+        sandboxed: isSandboxed,
         _outputBuffer: '',
         _outputTimer: null,
-        scrollback: new ScrollbackBuffer(SCROLLBACK_MAX_BYTES),
+        scrollback: new ScrollbackBuffer(SCROLLBACK_MAX_LENGTH),
       };
       this.terminals.set(terminalId, session);
 
@@ -168,6 +172,7 @@ export class PTYManager extends EventEmitter {
         clearTimeout(session._outputTimer);
         session._outputTimer = null;
       }
+      if (session.sandboxed) void cleanupSandboxCommand();
       this.emit('exit', terminalId, exitCode);
       this.terminals.delete(terminalId);
     });

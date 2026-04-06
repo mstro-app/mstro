@@ -8,10 +8,10 @@
  */
 
 import { existsSync, readdirSync, statSync } from 'node:fs';
-import { join, } from 'node:path';
+import { join, normalize, resolve } from 'node:path';
 import Fuse, { type FuseResult } from 'fuse.js';
 import {
-  CACHE_TTL_MS, 
+  CACHE_TTL_MS,
   directoryCache,
   getFileType,
   isIgnored,
@@ -100,6 +100,30 @@ function shouldIncludeEntry(
   return true;
 }
 
+interface PathScope {
+  scopedDir: string;
+  searchQuery: string;
+  pathPrefix: string;
+  maxDepth: number;
+}
+
+/** Parse a partial path into its directory scope, search query, and depth limit. */
+function resolvePathScope(cleanPath: string, workingDir: string, sandboxed?: boolean): PathScope | null {
+  const lastSlashIndex = cleanPath.lastIndexOf('/');
+  if (lastSlashIndex === -1) {
+    return { scopedDir: workingDir, searchQuery: cleanPath, pathPrefix: '', maxDepth: cleanPath === '' ? 4 : 10 };
+  }
+
+  const dirPath = cleanPath.substring(0, lastSlashIndex);
+  if (sandboxed && !isPathWithinDir(dirPath, workingDir)) return null;
+
+  const candidateDir = join(workingDir, dirPath);
+  if (existsSync(candidateDir) && statSync(candidateDir).isDirectory()) {
+    return { scopedDir: candidateDir, searchQuery: cleanPath.substring(lastSlashIndex + 1), pathPrefix: `${dirPath}/`, maxDepth: 3 };
+  }
+  return { scopedDir: workingDir, searchQuery: cleanPath, pathPrefix: '', maxDepth: 10 };
+}
+
 export class AutocompleteService {
   private frecencyData: FrecencyData = {};
 
@@ -175,11 +199,17 @@ export class AutocompleteService {
   /**
    * Get file completions for autocomplete with directory-scoped navigation
    */
-  getFileCompletions(partialPath: string, workingDir: string): AutocompleteResult[] {
+  getFileCompletions(partialPath: string, workingDir: string, sandboxed?: boolean): AutocompleteResult[] {
     try {
       // Handle @ symbol prefix for file autocomplete
       const isAtSymbol = partialPath.startsWith('@');
       const cleanPath = isAtSymbol ? partialPath.substring(1) : partialPath;
+
+      // Sandboxed users: block path traversal outside the working directory.
+      // Resolves the target path and checks it stays within workingDir boundaries.
+      if (sandboxed && cleanPath && !isPathWithinDir(cleanPath, workingDir)) {
+        return [];
+      }
 
       // Parse .gitignore patterns
       const gitignorePatterns = parseGitignore(workingDir);
@@ -189,28 +219,10 @@ export class AutocompleteService {
         return this.getDirectoryContentsEnhanced(cleanPath, workingDir, gitignorePatterns);
       }
 
-      // STRICT PATH SEGMENT MATCHING
-      const lastSlashIndex = cleanPath.lastIndexOf('/');
-      let scopedDir = workingDir;
-      let searchQuery = cleanPath;
-      let pathPrefix = '';
-      let maxDepth = 10;
+      const scope = resolvePathScope(cleanPath, workingDir, sandboxed);
+      if (!scope) return [];
 
-      if (lastSlashIndex !== -1) {
-        const dirPath = cleanPath.substring(0, lastSlashIndex);
-        const candidateDir = join(workingDir, dirPath);
-
-        if (existsSync(candidateDir) && statSync(candidateDir).isDirectory()) {
-          scopedDir = candidateDir;
-          searchQuery = cleanPath.substring(lastSlashIndex + 1);
-          pathPrefix = `${dirPath}/`;
-          maxDepth = 3;
-        }
-      } else if (cleanPath === '') {
-        maxDepth = 4;
-      }
-
-      const filesWithMetadata = this.getFilesWithCache(scopedDir, gitignorePatterns, maxDepth, pathPrefix);
+      const filesWithMetadata = this.getFilesWithCache(scope.scopedDir, gitignorePatterns, scope.maxDepth, scope.pathPrefix);
 
       // Track which files are recent
       const recentFiles = new Set<string>();
@@ -220,9 +232,9 @@ export class AutocompleteService {
         }
       }
 
-      const scoredMatches = searchQuery === ''
+      const scoredMatches = scope.searchQuery === ''
         ? this.scoreEmptyQuery(filesWithMetadata)
-        : this.scoreWithQuery(filesWithMetadata, searchQuery, recentFiles);
+        : this.scoreWithQuery(filesWithMetadata, scope.searchQuery, recentFiles);
 
       const results: AutocompleteResult[] = scoredMatches.slice(0, 15).map(file => {
         const displayPath = file.isDirectory ? `${file.relativePath}/` : file.relativePath;
@@ -439,4 +451,14 @@ export class AutocompleteService {
       return [];
     }
   }
+}
+
+/**
+ * Check if a relative path resolves to a location within the working directory.
+ * Used to prevent path traversal (../) in sandboxed autocomplete.
+ */
+function isPathWithinDir(relativePath: string, workingDir: string): boolean {
+  const resolved = normalize(resolve(workingDir, relativePath));
+  const normalizedWorkDir = resolve(workingDir);
+  return resolved === normalizedWorkDir || resolved.startsWith(`${normalizedWorkDir}/`);
 }

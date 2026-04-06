@@ -40,7 +40,7 @@ export async function executeClaudeCommand(
   const hasImageAttachments = config.imageAttachments && config.imageAttachments.length > 0;
   const useStreamJson = hasImageAttachments || config.thinkingCallback || config.outputCallback || config.toolUseCallback;
 
-  const claudeProcess = spawnAndRegister(config, prompt, !!hasImageAttachments, !!useStreamJson, runningProcesses, perfStart);
+  const claudeProcess = await spawnAndRegister(config, prompt, !!hasImageAttachments, !!useStreamJson, runningProcesses, perfStart);
 
   let stdout = '';
   let stderr = '';

@@ -33,6 +33,8 @@ export interface ReviewIssueOptions {
   logDir?: string;
   /** Custom board-level review criteria — replaces default review instructions when set */
   reviewCriteria?: string;
+  /** When true, run the review HeadlessRunner in sandboxed mode (sandbox-runtime + auth proxy) */
+  sandboxed?: boolean;
 }
 
 /**
@@ -40,7 +42,7 @@ export interface ReviewIssueOptions {
  * Returns auto-pass on infrastructure failures to avoid blocking execution.
  */
 export async function reviewIssue(options: ReviewIssueOptions): Promise<ReviewResult> {
-  const { workingDir, issue, pmDir, outputPath, onOutput, logDir, reviewCriteria } = options;
+  const { workingDir, issue, pmDir, outputPath, onOutput, logDir, reviewCriteria, sandboxed } = options;
   const isCodeTask = issue.filesToModify.length > 0;
   const issueType: ReviewResult['issueType'] = isCodeTask ? 'code' : 'non-code';
 
@@ -55,6 +57,7 @@ export async function reviewIssue(options: ReviewIssueOptions): Promise<ReviewRe
       stallHardCapMs: REVIEW_STALL_HARD_CAP_MS,
       verbose: false,
       outputCallback: onOutput ? (text: string) => onOutput(`Review: ${text}`) : undefined,
+      sandboxed,
     });
 
     const result = await runWithFileLogger('pm-review', () => runner.run(), logDir);
@@ -118,9 +121,16 @@ function extractJsonObject(text: string): string | null {
   const start = text.indexOf('{');
   if (start === -1) return null;
   let depth = 0;
+  let inString = false;
+  let escaped = false;
   for (let i = start; i < text.length; i++) {
-    if (text[i] === '{') depth++;
-    else if (text[i] === '}') depth--;
+    const ch = text[i];
+    if (escaped) { escaped = false; continue; }
+    if (ch === '\\' && inString) { escaped = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === '{') depth++;
+    else if (ch === '}') depth--;
     if (depth === 0) return text.slice(start, i + 1);
   }
   return null;

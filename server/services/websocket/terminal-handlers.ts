@@ -7,11 +7,11 @@ import { getPTYManager } from '../terminal/pty-manager.js';
 import type { HandlerContext } from './handler-context.js';
 import type { WebSocketMessage, WSContext } from './types.js';
 
-export function handleTerminalMessage(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string, permission?: 'control' | 'view'): void {
+export async function handleTerminalMessage(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string, permission?: 'control' | 'view'): Promise<void> {
   const termId = msg.terminalId || tabId;
   switch (msg.type) {
     case 'terminalInit':
-      handleTerminalInit(ctx, ws, termId, workingDir, msg.data?.shell, msg.data?.cols, msg.data?.rows, permission);
+      await handleTerminalInit(ctx, ws, termId, workingDir, msg.data?.shell, msg.data?.cols, msg.data?.rows, permission);
       break;
     case 'terminalReconnect':
       handleTerminalReconnect(ctx, ws, termId);
@@ -31,7 +31,7 @@ export function handleTerminalMessage(ctx: HandlerContext, ws: WSContext, msg: W
   }
 }
 
-function handleTerminalInit(
+async function handleTerminalInit(
   ctx: HandlerContext,
   ws: WSContext,
   terminalId: string,
@@ -40,7 +40,7 @@ function handleTerminalInit(
   cols?: number,
   rows?: number,
   permission?: 'control' | 'view'
-): void {
+): Promise<void> {
   const ptyManager = getPTYManager();
 
   if (!ptyManager.isPtyAvailable()) {
@@ -59,7 +59,7 @@ function handleTerminalInit(
   setupTerminalBroadcastListeners(ctx, terminalId);
 
   try {
-    const { shell, cwd, isReconnect, platform } = ptyManager.create(
+    const { shell, cwd, isReconnect, platform } = await ptyManager.create(
       terminalId,
       workingDir,
       cols || 80,
@@ -103,7 +103,7 @@ function handleTerminalInit(
         terminalId,
         data: {
           error: 'SANDBOX_UNAVAILABLE',
-          message: 'Terminal requires bubblewrap (bwrap) to be installed on the host machine for shared app sessions. Ask the app owner to install it.',
+          message: 'Sandbox runtime is not available on the host machine. Shared terminal sessions require sandbox-runtime dependencies (bubblewrap on Linux, sandbox-exec on macOS). Ask the app owner to check their setup.',
         }
       });
     } else {

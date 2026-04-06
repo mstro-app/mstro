@@ -372,6 +372,7 @@ export class PlanExecutor extends EventEmitter {
       onOutput: (text) => this.emit('output', { issueId: issue.id, text }),
       logDir: this.boardDir ? join(this.boardDir, 'logs') : undefined,
       reviewCriteria: this.getBoardReviewCriteria(),
+      sandboxed: this.sandboxed,
     });
     persistReviewResult(reviewDir, issue, result);
 

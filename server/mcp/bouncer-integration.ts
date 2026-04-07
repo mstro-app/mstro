@@ -262,18 +262,27 @@ export async function reviewOperation(request: BouncerReviewRequest): Promise<Bo
 export { classifyRisk as classifyOperationRisk } from './security-patterns.js';
 
 /**
- * Legacy compatibility — redirects to reviewOperation
+ * Legacy compatibility — redirects to reviewOperation.
+ * When useAI=false, temporarily sets BOUNCER_USE_AI env var.
+ * Uses a saved/restored pattern to avoid race conditions with concurrent calls.
  */
 export async function launchBouncerAgent(
   request: BouncerReviewRequest,
   useAI: boolean = true
 ): Promise<BouncerDecision> {
+  const prevValue = process.env.BOUNCER_USE_AI;
   if (!useAI) {
     process.env.BOUNCER_USE_AI = 'false';
   }
-  const result = await reviewOperation(request);
-  if (!useAI) {
-    delete process.env.BOUNCER_USE_AI;
+  try {
+    return await reviewOperation(request);
+  } finally {
+    if (!useAI) {
+      if (prevValue !== undefined) {
+        process.env.BOUNCER_USE_AI = prevValue;
+      } else {
+        delete process.env.BOUNCER_USE_AI;
+      }
+    }
   }
-  return result;
 }

@@ -178,10 +178,15 @@ function mergePreUploadedAttachments(ctx: HandlerContext, tabId: string, inlineA
   return merged;
 }
 
+const WRITE_OPS = new Set(['execute', 'cancel', 'new', 'approve', 'reject']);
+
 export function handleSessionMessage(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, permission?: 'view'): void {
+  if (permission === 'view' && WRITE_OPS.has(msg.type)) {
+    throw new Error('View-only users cannot perform write operations');
+  }
+
   switch (msg.type) {
     case 'execute': {
-      if (permission === 'view') throw new Error('View-only users cannot execute prompts');
       if (!msg.data?.prompt) throw new Error('Prompt is required');
       const session = requireSession(ctx, ws, tabId);
       const worktreeDir = ctx.gitDirectories.get(tabId);

@@ -233,6 +233,12 @@ export class WebSocketImproviseHandler implements HandlerContext {
     this.connections.delete(ws);
     this.allConnections.delete(ws);
     cleanupTerminalSubscribers(this, ws);
+
+    // Clean up file upload handler when no connections remain
+    if (this.allConnections.size === 0 && this.fileUploadHandler) {
+      this.fileUploadHandler.destroy();
+      this.fileUploadHandler = null;
+    }
   }
 
   send(ws: WSContext, response: WebSocketResponse): void {

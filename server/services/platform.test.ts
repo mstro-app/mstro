@@ -115,10 +115,6 @@ vi.mock('fs', () => mockFs)
 vi.mock('os', () => mockOs)
 vi.mock('path', () => mockPath)
 vi.mock('./client-id.js', () => mockClientId)
-vi.mock('./sandbox-config.js', () => ({
-  isSandboxAvailable: vi.fn().mockReturnValue(false),
-}))
-
 // Mock undici WebSocket for Node 18-20 compatibility
 vi.mock('undici', () => ({
   WebSocket: WebSocketConstructor,

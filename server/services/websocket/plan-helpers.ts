@@ -23,7 +23,7 @@ export function resolvePlanPath(workingDir: string, relativePath: string): strin
 }
 
 /** Guard for write operations — returns true if denied. */
-export function denyIfViewOnly(ctx: HandlerContext, ws: WSContext, permission?: 'control' | 'view'): boolean {
+export function denyIfViewOnly(ctx: HandlerContext, ws: WSContext, permission?: 'view'): boolean {
   if (permission === 'view') {
     ctx.send(ws, { type: 'planError', data: { error: 'Permission denied' } });
     return true;

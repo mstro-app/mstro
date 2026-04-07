@@ -104,7 +104,6 @@ export async function handleFixIssues(
   section: string | undefined,
   findings: FindingForFix[],
   getPersistence: (dir: string) => QualityPersistence,
-  sandboxed?: boolean,
 ): Promise<void> {
   if (activeFixes.has(dirPath)) {
     ctx.send(ws, {
@@ -138,7 +137,6 @@ export async function handleFixIssues(
       stallKillMs: 600_000,
       stallHardCapMs: 900_000,
       toolUseCallback: createToolProgressCallback(ctx, ws, reportPath),
-      sandboxed,
     });
 
     await runWithFileLogger('code-review-fix', () => runner.run());

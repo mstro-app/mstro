@@ -97,7 +97,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     operationString += ` ${JSON.stringify(input)}`;
   }
 
-  // Build bouncer request with context
+  // Build bouncer request with context — include the user's original prompt
+  // so Haiku can distinguish user-requested operations from prompt injection.
   const bouncerRequest: BouncerReviewRequest = {
     operation: operationString,
     context: {
@@ -105,6 +106,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       workingDirectory: process.cwd(),
       toolName: tool_name,
       toolInput: input,
+      userRequest: process.env.BOUNCER_USER_PROMPT,
     },
   };
 

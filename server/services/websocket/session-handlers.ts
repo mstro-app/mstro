@@ -178,15 +178,15 @@ function mergePreUploadedAttachments(ctx: HandlerContext, tabId: string, inlineA
   return merged;
 }
 
-export function handleSessionMessage(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, permission?: 'control' | 'view'): void {
+export function handleSessionMessage(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, permission?: 'view'): void {
   switch (msg.type) {
     case 'execute': {
+      if (permission === 'view') throw new Error('View-only users cannot execute prompts');
       if (!msg.data?.prompt) throw new Error('Prompt is required');
       const session = requireSession(ctx, ws, tabId);
-      const sandboxed = permission === 'control' || permission === 'view';
       const worktreeDir = ctx.gitDirectories.get(tabId);
       const attachments = mergePreUploadedAttachments(ctx, tabId, msg.data.attachments);
-      session.executePrompt(msg.data.prompt, attachments, { sandboxed, workingDir: worktreeDir });
+      session.executePrompt(msg.data.prompt, attachments, { workingDir: worktreeDir });
       break;
     }
     case 'cancel': {

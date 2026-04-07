@@ -170,7 +170,6 @@ export interface PTYSession {
   lastActivityAt: number;
   cols: number;
   rows: number;
-  sandboxed: boolean;
   _outputBuffer: string;
   _outputTimer: ReturnType<typeof setTimeout> | null;
   scrollback: ScrollbackBuffer;

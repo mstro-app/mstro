@@ -539,7 +539,6 @@ async function runVerificationPass(
   dirPath: string,
   findings: CodeReviewFinding[],
   send: ProgressSender,
-  sandboxed?: boolean,
 ): Promise<CodeReviewFinding[]> {
   send(`Verifying ${findings.length} findings against actual code...`);
 
@@ -550,7 +549,6 @@ async function runVerificationPass(
     stallKillMs: 300_000,
     stallHardCapMs: 600_000,
     toolUseCallback: makeToolCallback(send, 'Verifying: '),
-    sandboxed,
   });
 
   const verifyResult = await runWithFileLogger('code-review-verify', () => verificationRunner.run());
@@ -611,7 +609,6 @@ export async function handleCodeReview(
   workingDir: string,
   activeReviews: Set<string>,
   getPersistence: (dir: string) => QualityPersistence,
-  sandboxed?: boolean,
 ): Promise<void> {
   if (activeReviews.has(dirPath)) {
     ctx.send(ws, { type: 'qualityError', data: { path: reportPath, error: 'A code review is already running for this directory.' } });
@@ -633,7 +630,6 @@ export async function handleCodeReview(
       stallKillMs: 600_000,
       stallHardCapMs: 900_000,
       toolUseCallback: makeToolCallback(send),
-      sandboxed,
     });
 
     send('Claude is analyzing your codebase...');
@@ -651,7 +647,7 @@ export async function handleCodeReview(
     let finalFindings = validation.validated;
     if (finalFindings.length > 0) {
       try {
-        finalFindings = await runVerificationPass(dirPath, finalFindings, send, sandboxed);
+        finalFindings = await runVerificationPass(dirPath, finalFindings, send);
       } catch {
         send('Verification pass skipped (timeout or error)');
       }

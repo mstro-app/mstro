@@ -140,7 +140,7 @@ export class WebSocketImproviseHandler implements HandlerContext {
     fileUploadStart: 'fileUpload', fileUploadChunk: 'fileUpload', fileUploadComplete: 'fileUpload', fileUploadCancel: 'fileUpload',
   };
 
-  private async dispatchMessage(ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string, permission?: 'control' | 'view'): Promise<void> {
+  private async dispatchMessage(ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string, permission?: 'view'): Promise<void> {
     // Handle messages with custom inline logic first
     switch (msg.type) {
       case 'ping':
@@ -185,7 +185,7 @@ export class WebSocketImproviseHandler implements HandlerContext {
       case 'session':    return handleSessionMessage(this, ws, msg, tabId, permission);
       case 'history':    return handleHistoryMessage(this, ws, msg, tabId, workingDir);
       case 'file':       return handleFileMessage(this, ws, msg, tabId, effectiveDir, permission);
-      case 'terminal':   return handleTerminalMessage(this, ws, msg, tabId, workingDir, permission);
+      case 'terminal':   return handleTerminalMessage(this, ws, msg, tabId, workingDir);
       case 'fileExplorer': return handleFileExplorerMessage(this, ws, msg, tabId, effectiveDir, permission);
       case 'git':        return handleGitMessage(this, ws, msg, tabId, workingDir);
       case 'quality':    return handleQualityMessage(this, ws, msg, tabId, workingDir, permission);

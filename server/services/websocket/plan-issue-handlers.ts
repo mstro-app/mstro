@@ -108,7 +108,7 @@ function resolveBacklogContext(pmDir: string, workingDir: string, boardId?: stri
 
 export function handleCreateIssue(
   ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage,
-  workingDir: string, permission?: 'control' | 'view',
+  workingDir: string, permission?: 'view',
 ): void {
   if (denyIfViewOnly(ctx, ws, permission)) return;
 
@@ -135,7 +135,7 @@ export function handleCreateIssue(
 
 export function handleUpdateIssue(
   ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage,
-  workingDir: string, permission?: 'control' | 'view',
+  workingDir: string, permission?: 'view',
 ): void {
   if (denyIfViewOnly(ctx, ws, permission)) return;
 
@@ -170,7 +170,7 @@ export function handleUpdateIssue(
 
 export function handleDeleteIssue(
   ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage,
-  workingDir: string, permission?: 'control' | 'view',
+  workingDir: string, permission?: 'view',
 ): void {
   if (denyIfViewOnly(ctx, ws, permission)) return;
 
@@ -192,7 +192,7 @@ export function handleDeleteIssue(
 
 export function handleScaffold(
   ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage,
-  workingDir: string, permission?: 'control' | 'view',
+  workingDir: string, permission?: 'view',
 ): void {
   if (denyIfViewOnly(ctx, ws, permission)) return;
 

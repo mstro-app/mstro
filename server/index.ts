@@ -27,11 +27,9 @@ import {
 import { createPlatformRelayContext, ensureClaudeSettings, setTerminalTitle, wrapWebSocket } from './server-setup.js'
 import { AnalyticsEvents, initAnalytics, shutdownAnalytics, trackEvent } from './services/analytics.js'
 import { AuthService } from './services/auth.js'
-import { getAuthProxy } from './services/auth-proxy.js'
 import { FileService } from './services/files.js'
 import { InstanceRegistry, type MstroInstance } from './services/instances.js'
 import { PlatformConnection } from './services/platform.js'
-import { probeSandboxAvailability, resetSandbox } from './services/sandbox-config.js'
 import { captureException, flushSentry, initSentry } from './services/sentry.js'
 import { getPTYManager, reloadPty } from './services/terminal/pty-manager.js'
 import { WebSocketImproviseHandler } from './services/websocket/index.js'
@@ -134,17 +132,6 @@ app.onError((err, c) => {
 async function startServer() {
   initSentry()
   await initAnalytics()
-
-  // Probe sandbox availability early so isSandboxAvailable() has a cached result
-  await probeSandboxAvailability()
-
-  // Start auth proxy for sandboxed Claude Code sessions (credential injection without exposure)
-  const authProxy = getAuthProxy()
-  try {
-    await authProxy.start()
-  } catch (err) {
-    console.warn('[AuthProxy] Failed to start — sandboxed sessions will use soft sandbox only:', err instanceof Error ? err.message : err)
-  }
 
   const PORT = await findAvailablePort(REQUESTED_PORT, 20)
   _currentInstance = instanceRegistry.register(PORT, WORKING_DIR)
@@ -263,9 +250,7 @@ async function startServer() {
 
   const gracefulShutdown = async () => {
     trackEvent(AnalyticsEvents.SERVER_STOPPED)
-    const withTimeout = (p: Promise<void>, ms: number) =>
-      Promise.race([p, new Promise<void>(resolve => setTimeout(resolve, ms))]);
-    await Promise.all([shutdownAnalytics(), flushSentry(), withTimeout(authProxy.stop(), 5000), resetSandbox()])
+    await Promise.all([shutdownAnalytics(), flushSentry()])
     platformConnection.disconnect()
     instanceRegistry.unregister()
     getPTYManager().closeAll()

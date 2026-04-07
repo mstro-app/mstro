@@ -58,7 +58,6 @@ server/
     analytics.ts                    # PostHog analytics
     settings.ts                     # Settings.json (model selection, PR base branches per repo)
     sentry.ts                       # Sentry error reporting
-    sandbox-utils.ts                # Env sanitization for sandboxed execution
     pathUtils.ts                    # Path utilities
     terminal/
       pty-manager.ts                # PTY session management
@@ -149,4 +148,4 @@ The HeadlessRunner orchestrates Claude Code execution:
 - Autocomplete scans working directory, excludes node_modules/dist/etc, uses frecency + fuzzy matching
 - Session registry persists tab-to-session mapping across WebSocket disconnects
 - Settings.json stores model selection (defaults to opus) and per-repo PR base branches
-- Sandbox utils sanitize env vars (AWS, GitHub, Docker, SSH, secrets) for shared sessions
+- Shared sessions are view-only — the server blocks all write operations for non-owner users

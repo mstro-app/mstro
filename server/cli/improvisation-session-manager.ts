@@ -108,6 +108,7 @@ export class ImprovisationSessionManager extends EventEmitter {
     }
 
     this.history = this.loadHistory();
+    this.saveHistory(); // Persist immediately so the session file exists on disk from creation
     this.startQueueProcessor();
   }
 
@@ -130,7 +131,7 @@ export class ImprovisationSessionManager extends EventEmitter {
 
   // ========== Main Execution ==========
 
-  async executePrompt(userPrompt: string, attachments?: FileAttachment[], options?: { sandboxed?: boolean; workingDir?: string }): Promise<MovementRecord> {
+  async executePrompt(userPrompt: string, attachments?: FileAttachment[], options?: { workingDir?: string }): Promise<MovementRecord> {
     const _execStart = Date.now();
     this._isExecuting = true;
     this._cancelled = false;
@@ -151,6 +152,20 @@ export class ImprovisationSessionManager extends EventEmitter {
       is_resumed_session: this.isResumedSession,
       model: this.options.model || 'default',
     });
+
+    // Save pending movement immediately so history survives page refresh
+    const pendingMovement: MovementRecord = {
+      id: `prompt-${sequenceNumber}`,
+      sequenceNumber,
+      userPrompt,
+      timestamp: new Date().toISOString(),
+      tokensUsed: 0,
+      summary: '',
+      filesModified: [],
+      durationMs: 0,
+    };
+    this.history.movements.push(pendingMovement);
+    this.saveHistory();
 
     try {
       this.executionEventLog.push({
@@ -177,7 +192,7 @@ export class ImprovisationSessionManager extends EventEmitter {
         retryLog: [],
       };
 
-      let result = await this.runRetryLoop(state, sequenceNumber, promptWithAttachments, imageAttachments, options?.sandboxed, options?.workingDir);
+      let result = await this.runRetryLoop(state, sequenceNumber, promptWithAttachments, imageAttachments, options?.workingDir);
 
       if (this._cancelled) {
         return this.handleCancelledExecution(result, userPrompt, sequenceNumber, _execStart);
@@ -204,11 +219,26 @@ export class ImprovisationSessionManager extends EventEmitter {
       this._executionStartTimestamp = undefined;
       this.executionEventLog = [];
       this.currentRunner = null;
-      this.emit('onMovementError', error);
+
+      // Update the pending movement with error info so it's not lost
       const errorMessage = error instanceof Error ? error.message : String(error);
+      const errorMovement: MovementRecord = {
+        id: `prompt-${sequenceNumber}`,
+        sequenceNumber,
+        userPrompt,
+        timestamp: new Date().toISOString(),
+        tokensUsed: 0,
+        summary: '',
+        filesModified: [],
+        errorOutput: errorMessage,
+        durationMs: Date.now() - _execStart,
+      };
+      this.persistMovement(errorMovement);
+
+      this.emit('onMovementError', error);
       trackEvent(AnalyticsEvents.IMPROVISE_MOVEMENT_ERROR, {
         error_message: errorMessage.slice(0, 200),
-        sequence_number: this.history.movements.length + 1,
+        sequence_number: sequenceNumber,
         duration_ms: Date.now() - _execStart,
         model: this.options.model || 'default',
       });
@@ -255,7 +285,6 @@ export class ImprovisationSessionManager extends EventEmitter {
     sequenceNumber: number,
     promptWithAttachments: string,
     imageAttachments: FileAttachment[] | undefined,
-    sandboxed: boolean | undefined,
     workingDirOverride: string | undefined,
   ): Promise<HeadlessRunResult | undefined> {
     const maxRetries = 3;
@@ -265,7 +294,7 @@ export class ImprovisationSessionManager extends EventEmitter {
     // eslint-disable-next-line no-constant-condition
     while (true) {
       if (this._cancelled) break;
-      const iteration = await this.executeRetryIteration(state, callbacks, sequenceNumber, imageAttachments, sandboxed, workingDirOverride);
+      const iteration = await this.executeRetryIteration(state, callbacks, sequenceNumber, imageAttachments, workingDirOverride);
       result = iteration.result;
       if (this._cancelled) break;
       if (await this.evaluateRetryStrategies(result, state, iteration.useResume, iteration.nativeTimeouts, maxRetries, promptWithAttachments, callbacks)) continue;
@@ -280,7 +309,6 @@ export class ImprovisationSessionManager extends EventEmitter {
     callbacks: RetryCallbacks,
     sequenceNumber: number,
     imageAttachments: FileAttachment[] | undefined,
-    sandboxed: boolean | undefined,
     workingDirOverride: string | undefined,
   ): Promise<{ result: HeadlessRunResult; useResume: boolean; nativeTimeouts: number }> {
     if (state.checkpointRef.value) state.lastWatchdogCheckpoint = state.checkpointRef.value;
@@ -289,7 +317,7 @@ export class ImprovisationSessionManager extends EventEmitter {
 
     const session = this.buildRetrySessionState();
     const { useResume, resumeSessionId } = determineResumeStrategy(state, session);
-    const runner = createExecutionRunner(state, session, callbacks, sequenceNumber, useResume, resumeSessionId, imageAttachments, sandboxed, workingDirOverride);
+    const runner = createExecutionRunner(state, session, callbacks, sequenceNumber, useResume, resumeSessionId, imageAttachments, workingDirOverride);
     this.currentRunner = runner;
     const result = await runner.run();
     this.currentRunner = null;
@@ -422,8 +450,15 @@ export class ImprovisationSessionManager extends EventEmitter {
   }
 
   private persistMovement(movement: MovementRecord): void {
-    this.history.movements.push(movement);
-    this.history.totalTokens += movement.tokensUsed;
+    const existingIdx = this.history.movements.findIndex(m => m.sequenceNumber === movement.sequenceNumber);
+    if (existingIdx >= 0) {
+      const previousTokens = this.history.movements[existingIdx].tokensUsed;
+      this.history.movements[existingIdx] = movement;
+      this.history.totalTokens += movement.tokensUsed - previousTokens;
+    } else {
+      this.history.movements.push(movement);
+      this.history.totalTokens += movement.tokensUsed;
+    }
     this.saveHistory();
   }
 

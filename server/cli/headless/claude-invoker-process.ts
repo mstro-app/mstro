@@ -2,9 +2,7 @@
 // Licensed under the MIT License. See LICENSE file for details.
 
 import { type ChildProcess, spawn } from 'node:child_process';
-import { getAuthProxyPort, getAuthProxyToken } from '../../services/auth-proxy.js';
-import { cleanupSandboxCommand, initializeSandbox, isSandboxAvailable, wrapCommandForSandbox } from '../../services/sandbox-config.js';
-import { sanitizeEnvForSandbox } from '../../services/sandbox-utils.js';
+import { randomUUID } from 'node:crypto';
 import type { StreamHandlerContext } from './claude-invoker-stream.js';
 import { flushNativeTimeoutBuffers, verboseLog } from './claude-invoker-stream.js';
 import { herror } from './headless-logger.js';
@@ -97,11 +95,6 @@ export function buildClaudeArgs(
   // Reduce Edit-without-Read errors by reminding the model
   args.push('--append-system-prompt', 'IMPORTANT: Always use the Read tool to read a file before using Edit or Write on it. Never edit a file you have not read in this session.');
 
-  // Sandboxed sessions: restrict all file operations to the working directory
-  if (config.sandboxed) {
-    args.push('--append-system-prompt', `SECURITY: You are running in sandboxed mode for a shared user. You MUST NOT read, write, list, or access any files or directories outside the working directory (${config.workingDir}). This includes home directories, /etc, /tmp, /proc, and any path that does not start with ${config.workingDir}. If asked to access files outside this boundary, refuse the request and explain that access is restricted to the project directory.`);
-  }
-
   if (!hasImageAttachments) {
     // Strip null bytes — Node.js spawn rejects args containing \0
     args.push(prompt.replaceAll('\0', ''));
@@ -127,33 +120,6 @@ function writeImageAttachmentsToStdin(
   claudeProcess.stdin!.end();
 }
 
-// ========== Sandbox Helpers ==========
-
-/** Configure env vars for sandboxed execution with auth proxy credential injection. */
-function configureSandboxEnv(spawnEnv: Record<string, string | undefined>, authProxyPort: number): void {
-  if (authProxyPort <= 0) {
-    throw new Error('[[MSTRO_ERROR:AUTH_PROXY_UNAVAILABLE]] Cannot start sandboxed session — auth proxy is not running. Credentials cannot be safely isolated.');
-  }
-  // Embed the proxy secret token in the dummy API key so it's automatically sent
-  // as x-api-key with every request. The proxy validates and strips it.
-  const proxyToken = getAuthProxyToken();
-  spawnEnv.ANTHROPIC_BASE_URL = `http://127.0.0.1:${authProxyPort}`;
-  spawnEnv.ANTHROPIC_API_KEY = `sk-ant-proxy00-${proxyToken}`;
-  delete spawnEnv.ANTHROPIC_AUTH_TOKEN;
-  delete spawnEnv.CLAUDE_CODE_OAUTH_TOKEN;
-}
-
-/** Build the sandboxed spawn command via sandbox-runtime. */
-async function buildSandboxedCommand(
-  config: ResolvedHeadlessConfig,
-  args: string[],
-): Promise<{ command: string; args: string[] }> {
-  await initializeSandbox(config.workingDir);
-  const fullCommand = [config.claudeCommand, ...args].map(a => `'${a.replace(/\0/g, '').replace(/'/g, "'\\''")}'`).join(' ');
-  const wrappedCommand = await wrapCommandForSandbox(fullCommand);
-  return { command: '/bin/sh', args: ['-c', wrappedCommand] };
-}
-
 // ========== Process Spawning ==========
 
 /** Spawn the Claude CLI process and register it */
@@ -165,7 +131,7 @@ export async function spawnAndRegister(
   runningProcesses: Map<number, ChildProcess>,
   perfStart: number,
 ): Promise<ChildProcess> {
-  const mcpConfigPath = generateMcpConfig(config.workingDir, config.verbose);
+  const mcpConfigPath = generateMcpConfig(config.workingDir, config.verbose, prompt, randomUUID());
 
   if (!mcpConfigPath && config.outputCallback) {
     config.outputCallback(
@@ -180,35 +146,12 @@ export async function spawnAndRegister(
     `[PERF] Command: ${config.claudeCommand} ${args.join(' ')}`,
   );
 
-  const baseEnv = config.sandboxed
-    ? sanitizeEnvForSandbox(process.env, config.workingDir, { overrideHome: false })
-    : { ...process.env };
+  const baseEnv = { ...process.env };
   const spawnEnv = config.extraEnv
     ? { ...baseEnv, ...config.extraEnv }
     : baseEnv;
 
-  // Hard sandbox: use sandbox-runtime for filesystem isolation + auth proxy for credential protection.
-  // sandbox-runtime handles platform-specific wrapping (bwrap on Linux, sandbox-exec on macOS).
-  const useSandbox = config.sandboxed && isSandboxAvailable();
-
-  let spawnCommand: string;
-  let spawnArgs: string[];
-
-  if (useSandbox) {
-    configureSandboxEnv(spawnEnv, getAuthProxyPort());
-    const sandboxed = await buildSandboxedCommand(config, args);
-    spawnCommand = sandboxed.command;
-    spawnArgs = sandboxed.args;
-    verboseLog(config.verbose, `[SANDBOX] Using sandbox-runtime (auth proxy port: ${getAuthProxyPort()})`);
-  } else {
-    spawnCommand = config.claudeCommand;
-    spawnArgs = args;
-    if (config.sandboxed) {
-      verboseLog(config.verbose, '[SANDBOX] sandbox-runtime not available — falling back to soft sandbox (env sanitization + system prompt)');
-    }
-  }
-
-  const claudeProcess = spawn(spawnCommand, spawnArgs, {
+  const claudeProcess = spawn(config.claudeCommand, args, {
     cwd: config.workingDir,
     detached: true,
     env: spawnEnv,
@@ -222,10 +165,6 @@ export async function spawnAndRegister(
   if (claudeProcess.pid) {
     runningProcesses.set(claudeProcess.pid, claudeProcess);
   }
-
-  claudeProcess.on('exit', () => {
-    if (useSandbox) void cleanupSandboxCommand();
-  });
 
   verboseLog(config.verbose, `[PERF] Spawned: ${Date.now() - perfStart}ms`);
 

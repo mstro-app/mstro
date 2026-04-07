@@ -80,7 +80,6 @@ export function createExecutionRunner(
   useResume: boolean,
   resumeSessionId: string | undefined,
   imageAttachments: FileAttachment[] | undefined,
-  sandboxed: boolean | undefined,
   workingDirOverride?: string,
 ): HeadlessRunner {
   return new HeadlessRunner({
@@ -124,7 +123,6 @@ export function createExecutionRunner(
     onToolTimeout: (checkpoint: ExecutionCheckpoint) => {
       state.checkpointRef.value = checkpoint;
     },
-    sandboxed,
   });
 }
 

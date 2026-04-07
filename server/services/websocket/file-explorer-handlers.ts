@@ -16,8 +16,8 @@ import { readFileContent } from './file-utils.js';
 import type { HandlerContext } from './handler-context.js';
 import type { WebSocketMessage, WebSocketResponse, WSContext } from './types.js';
 
-export function handleFileMessage(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string, permission?: 'control' | 'view'): void {
-  const isSandboxed = permission === 'control' || permission === 'view';
+export function handleFileMessage(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string, permission?: 'view'): void {
+  const isSandboxed = !!permission;
   switch (msg.type) {
     case 'autocomplete':
       if (!msg.data?.partialPath) throw new Error('Partial path is required');
@@ -38,9 +38,9 @@ export function handleFileMessage(ctx: HandlerContext, ws: WSContext, msg: WebSo
   }
 }
 
-function handleReadFile(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string, permission?: 'control' | 'view'): void {
+function handleReadFile(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string, permission?: 'view'): void {
   if (!msg.data?.filePath) throw new Error('File path is required');
-  const isSandboxed = permission === 'control' || permission === 'view';
+  const isSandboxed = !!permission;
   if (isSandboxed) {
     const validation = validatePathWithinWorkingDir(msg.data.filePath, workingDir);
     if (!validation.valid) {
@@ -58,8 +58,8 @@ function sendFileResult(ctx: HandlerContext, ws: WSContext, type: WebSocketRespo
   ctx.send(ws, { type, tabId, data });
 }
 
-export function handleFileExplorerMessage(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string, permission?: 'control' | 'view'): void {
-  const isSandboxed = permission === 'control' || permission === 'view';
+export function handleFileExplorerMessage(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string, permission?: 'view'): void {
+  const isSandboxed = !!permission;
   const handlers: Record<string, () => void> = {
     listDirectory: () => {
       if (isSandboxed && msg.data?.dirPath) {

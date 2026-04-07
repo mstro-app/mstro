@@ -47,15 +47,41 @@ function loadUserMcpServers(workingDir: string, verbose: boolean): Record<string
   return servers;
 }
 
+/** Max length for user prompt passed to bouncer (prevents env var size issues). */
+const MAX_USER_PROMPT_LENGTH = 4000;
+
+/** Truncate prompt at a word boundary and append a marker so the bouncer knows it's incomplete. */
+function truncatePrompt(prompt: string): string {
+  const truncated = prompt.slice(0, MAX_USER_PROMPT_LENGTH);
+  const lastSpace = truncated.lastIndexOf(' ');
+  const clean = lastSpace > MAX_USER_PROMPT_LENGTH * 0.8 ? truncated.slice(0, lastSpace) : truncated;
+  return `${clean}... [truncated]`;
+}
+
 /**
  * Generate MCP config with bouncer + user's MCP servers from ~/.claude.json.
- * Writes to ~/.mstro/mcp-config.json for use with --mcp-config flag.
+ * Writes to ~/.mstro/mcp-config-{sessionId}.json for use with --mcp-config flag.
+ * Per-session files prevent concurrent sessions from overwriting each other's config.
+ *
+ * @param userPrompt — The user's original prompt, passed to the bouncer so its
+ *   AI layer can distinguish user-requested operations from prompt injection.
+ * @param sessionId — Unique session identifier for per-session config isolation.
  */
-export function generateMcpConfig(workingDir: string, verbose: boolean = false): string | null {
+export function generateMcpConfig(workingDir: string, verbose: boolean = false, userPrompt?: string, sessionId?: string): string | null {
   try {
     if (!existsSync(MCP_SERVER_PATH)) {
       herror(`[${new Date().toISOString()}] MCP server not found at ${MCP_SERVER_PATH}`);
       return null;
+    }
+
+    const bouncerEnv: Record<string, string> = {
+      BOUNCER_USE_AI: 'true',
+      MSTRO_ROOT: MSTRO_ROOT,
+    };
+    if (userPrompt) {
+      bouncerEnv.BOUNCER_USER_PROMPT = userPrompt.length > MAX_USER_PROMPT_LENGTH
+        ? truncatePrompt(userPrompt)
+        : userPrompt;
     }
 
     const mcpServers: Record<string, unknown> = {
@@ -63,7 +89,7 @@ export function generateMcpConfig(workingDir: string, verbose: boolean = false):
         command: 'npx',
         args: ['tsx', MCP_SERVER_PATH],
         description: 'Mstro security bouncer for approving/denying Claude Code tool use',
-        env: { BOUNCER_USE_AI: 'true', MSTRO_ROOT: MSTRO_ROOT }
+        env: bouncerEnv,
       },
       ...loadUserMcpServers(workingDir, verbose)
     };
@@ -73,7 +99,8 @@ export function generateMcpConfig(workingDir: string, verbose: boolean = false):
       mkdirSync(configDir, { recursive: true });
     }
 
-    const configPath = join(configDir, 'mcp-config.json');
+    const configFileName = sessionId ? `mcp-config-${sessionId}.json` : 'mcp-config.json';
+    const configPath = join(configDir, configFileName);
     writeFileSync(configPath, JSON.stringify({ mcpServers }, null, 2));
 
     if (verbose) {

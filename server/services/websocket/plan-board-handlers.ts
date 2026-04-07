@@ -16,7 +16,7 @@ import type { WebSocketMessage, WSContext } from './types.js';
 
 export function handleCreateBoard(
   ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage,
-  workingDir: string, permission?: 'control' | 'view',
+  workingDir: string, permission?: 'view',
 ): void {
   if (denyIfViewOnly(ctx, ws, permission)) return;
 
@@ -99,7 +99,7 @@ paused: false
 
 export function handleUpdateBoard(
   ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage,
-  workingDir: string, permission?: 'control' | 'view',
+  workingDir: string, permission?: 'view',
 ): void {
   if (denyIfViewOnly(ctx, ws, permission)) return;
 
@@ -133,7 +133,7 @@ export function handleUpdateBoard(
 
 export function handleArchiveBoard(
   ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage,
-  workingDir: string, permission?: 'control' | 'view',
+  workingDir: string, permission?: 'view',
 ): void {
   if (denyIfViewOnly(ctx, ws, permission)) return;
 
@@ -204,7 +204,7 @@ export function handleGetBoardState(
 
 export function handleReorderBoards(
   ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage,
-  workingDir: string, permission?: 'control' | 'view',
+  workingDir: string, permission?: 'view',
 ): void {
   if (denyIfViewOnly(ctx, ws, permission)) return;
 
@@ -229,7 +229,7 @@ export function handleReorderBoards(
 
 export function handleSetActiveBoard(
   ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage,
-  workingDir: string, permission?: 'control' | 'view',
+  workingDir: string, permission?: 'view',
 ): void {
   if (denyIfViewOnly(ctx, ws, permission)) return;
 

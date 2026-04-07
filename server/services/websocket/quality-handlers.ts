@@ -72,9 +72,9 @@ export function handleQualityMessage(
   msg: WebSocketMessage,
   _tabId: string,
   workingDir: string,
-  permission?: 'control' | 'view',
+  permission?: 'view',
 ): void {
-  const isSandboxed = permission === 'control' || permission === 'view';
+  const isSandboxed = !!permission;
   const sendPathError = (path: string, error: string) => {
     ctx.send(ws, { type: 'qualityError', data: { path, error } });
   };
@@ -87,7 +87,7 @@ export function handleQualityMessage(
       const { resolved: dirPath, error } = resolveAndValidatePath(workingDir, msg.data?.path, isSandboxed);
       if (error) { sendPathError(msg.data?.path || '.', error); return; }
       const reportPath = msg.data?.path || '.';
-      handleCodeReview(ctx, ws, reportPath, dirPath, workingDir, activeReviews, getPersistence, isSandboxed || undefined);
+      handleCodeReview(ctx, ws, reportPath, dirPath, workingDir, activeReviews, getPersistence);
     },
     qualityFixIssues: () => {
       const { resolved: dirPath, error } = resolveAndValidatePath(workingDir, msg.data?.path, isSandboxed);
@@ -95,7 +95,7 @@ export function handleQualityMessage(
       const reportPath = msg.data?.path || '.';
       const section: string | undefined = msg.data?.section;
       const findings: FindingForFix[] = msg.data?.findings || [];
-      handleFixIssues(ctx, ws, reportPath, dirPath, workingDir, section, findings, getPersistence, isSandboxed || undefined);
+      handleFixIssues(ctx, ws, reportPath, dirPath, workingDir, section, findings, getPersistence);
     },
     qualityLoadState: () => handleLoadState(ctx, ws, workingDir),
     qualitySaveDirectories: () => handleSaveDirectories(ctx, ws, msg, workingDir, isSandboxed),

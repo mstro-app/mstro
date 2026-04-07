@@ -14,7 +14,7 @@ import type { WebSocketMessage, WSContext } from './types.js';
 
 export function handlePrompt(
   ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage,
-  workingDir: string, permission?: 'control' | 'view',
+  workingDir: string, permission?: 'view',
 ): void {
   if (denyIfViewOnly(ctx, ws, permission)) return;
 
@@ -24,8 +24,7 @@ export function handlePrompt(
     ctx.send(ws, { type: 'planError', data: { error: 'Prompt required' } });
     return;
   }
-  const sandboxed = permission === 'control';
-  handlePlanPrompt(ctx, ws, prompt, workingDir, boardId, sandboxed).catch(error => {
+  handlePlanPrompt(ctx, ws, prompt, workingDir, boardId).catch(error => {
     ctx.send(ws, {
       type: 'planError',
       data: { error: error instanceof Error ? error.message : String(error) },
@@ -96,12 +95,11 @@ function wireExecutorEvents(executor: PlanExecutor, ctx: HandlerContext, working
 
 export function handleExecute(
   ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage,
-  workingDir: string, permission?: 'control' | 'view',
+  workingDir: string, permission?: 'view',
 ): void {
   if (denyIfViewOnly(ctx, ws, permission)) return;
 
   const executor = getExecutor(workingDir);
-  executor.setSandboxed(permission === 'control');
 
   if (executor.getStatus() === 'executing' || executor.getStatus() === 'starting') {
     ctx.send(ws, { type: 'planError', data: { error: 'Execution already in progress' } });
@@ -123,7 +121,7 @@ export function handleExecute(
 
 export function handleExecuteEpic(
   ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage,
-  workingDir: string, permission?: 'control' | 'view',
+  workingDir: string, permission?: 'view',
 ): void {
   if (denyIfViewOnly(ctx, ws, permission)) return;
 
@@ -134,7 +132,6 @@ export function handleExecuteEpic(
   }
 
   const executor = getExecutor(workingDir);
-  executor.setSandboxed(permission === 'control');
 
   if (executor.getStatus() === 'executing' || executor.getStatus() === 'starting') {
     ctx.send(ws, { type: 'planError', data: { error: 'Execution already in progress' } });
@@ -154,7 +151,7 @@ export function handleExecuteEpic(
 
 export function handlePause(
   ctx: HandlerContext, ws: WSContext,
-  workingDir: string, permission?: 'control' | 'view',
+  workingDir: string, permission?: 'view',
 ): void {
   if (denyIfViewOnly(ctx, ws, permission)) return;
   const executor = executorCache.get(workingDir);
@@ -163,7 +160,7 @@ export function handlePause(
 
 export function handleStop(
   ctx: HandlerContext, ws: WSContext,
-  workingDir: string, permission?: 'control' | 'view',
+  workingDir: string, permission?: 'view',
 ): void {
   if (denyIfViewOnly(ctx, ws, permission)) return;
   const executor = executorCache.get(workingDir);
@@ -172,7 +169,7 @@ export function handleStop(
 
 export function handleResume(
   ctx: HandlerContext, ws: WSContext,
-  workingDir: string, permission?: 'control' | 'view',
+  workingDir: string, permission?: 'view',
 ): void {
   if (denyIfViewOnly(ctx, ws, permission)) return;
   const executor = executorCache.get(workingDir);

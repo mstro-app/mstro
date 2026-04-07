@@ -69,8 +69,6 @@ export class PlanExecutor extends EventEmitter {
   private configInstaller: ConfigInstaller;
   /** Flag to prevent start() from clearing scope set by startBoard/startEpic */
   private _scopeSetByCall = false;
-  /** When true, HeadlessRunner instances run with sanitized env and project-scoped system prompt. */
-  private sandboxed = false;
   private metrics: ExecutionMetrics = {
     issuesCompleted: 0,
     issuesAttempted: 0,
@@ -87,7 +85,6 @@ export class PlanExecutor extends EventEmitter {
 
   getStatus(): ExecutionStatus { return this.status; }
   getMetrics(): ExecutionMetrics { return { ...this.metrics }; }
-  setSandboxed(value: boolean): void { this.sandboxed = value; }
 
   async startEpic(epicPath: string): Promise<void> {
     this.epicScope = epicPath;
@@ -243,19 +240,14 @@ export class PlanExecutor extends EventEmitter {
       outputPath,
     });
 
-    const sandboxPrompt = this.sandboxed
-      ? `\n\nIMPORTANT: This session has project-scoped access. You MUST NOT read, write, or access any files outside of "${this.workingDir}" and its subdirectories. All file operations (Read, Write, Edit, Glob, Grep, Bash) must target paths within this directory. Do not use absolute paths that escape this directory. Do not use "../" to access parent directories.`
-      : '';
-
     const runner = new HeadlessRunner({
       workingDir: this.workingDir,
-      directPrompt: prompt + sandboxPrompt,
+      directPrompt: prompt,
       stallWarningMs: ISSUE_STALL_WARNING_MS,
       stallKillMs: ISSUE_STALL_KILL_MS,
       stallHardCapMs: ISSUE_STALL_HARD_CAP_MS,
       stallMaxExtensions: ISSUE_STALL_MAX_EXTENSIONS,
       verbose: process.env.MSTRO_VERBOSE === '1',
-      sandboxed: this.sandboxed,
       outputCallback: (text: string) => {
         this.emit('output', { issueId: issue.id, text });
       },
@@ -372,7 +364,6 @@ export class PlanExecutor extends EventEmitter {
       onOutput: (text) => this.emit('output', { issueId: issue.id, text }),
       logDir: this.boardDir ? join(this.boardDir, 'logs') : undefined,
       reviewCriteria: this.getBoardReviewCriteria(),
-      sandboxed: this.sandboxed,
     });
     persistReviewResult(reviewDir, issue, result);
 

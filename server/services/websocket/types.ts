@@ -158,8 +158,8 @@ export interface WebSocketMessage {
   terminalId?: string;
   // biome-ignore lint/suspicious/noExplicitAny: message envelope carries heterogeneous payloads
   data?: any;
-  /** Injected by server relay for sandboxed shared users (control + view) */
-  _permission?: 'control' | 'view';
+  /** Injected by server relay for view-only shared users */
+  _permission?: 'view';
 }
 
 export interface WebSocketResponse {

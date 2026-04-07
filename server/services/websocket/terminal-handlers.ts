@@ -7,11 +7,11 @@ import { getPTYManager } from '../terminal/pty-manager.js';
 import type { HandlerContext } from './handler-context.js';
 import type { WebSocketMessage, WSContext } from './types.js';
 
-export async function handleTerminalMessage(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string, permission?: 'control' | 'view'): Promise<void> {
+export async function handleTerminalMessage(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): Promise<void> {
   const termId = msg.terminalId || tabId;
   switch (msg.type) {
     case 'terminalInit':
-      await handleTerminalInit(ctx, ws, termId, workingDir, msg.data?.shell, msg.data?.cols, msg.data?.rows, permission);
+      await handleTerminalInit(ctx, ws, termId, workingDir, msg.data?.shell, msg.data?.cols, msg.data?.rows);
       break;
     case 'terminalReconnect':
       handleTerminalReconnect(ctx, ws, termId);
@@ -39,7 +39,6 @@ async function handleTerminalInit(
   requestedShell?: string,
   cols?: number,
   rows?: number,
-  permission?: 'control' | 'view'
 ): Promise<void> {
   const ptyManager = getPTYManager();
 
@@ -65,7 +64,6 @@ async function handleTerminalInit(
       cols || 80,
       rows || 24,
       requestedShell,
-      { sandboxed: permission === 'control' || permission === 'view' }
     );
 
     if (!isReconnect) {
@@ -96,23 +94,11 @@ async function handleTerminalInit(
   } catch (error: unknown) {
     const errorMsg = error instanceof Error ? error.message : String(error);
     console.error(`[WebSocketImproviseHandler] Failed to create terminal:`, error);
-
-    if (errorMsg.startsWith('SANDBOX_UNAVAILABLE:')) {
-      ctx.send(ws, {
-        type: 'terminalError',
-        terminalId,
-        data: {
-          error: 'SANDBOX_UNAVAILABLE',
-          message: 'Sandbox runtime is not available on the host machine. Shared terminal sessions require sandbox-runtime dependencies (bubblewrap on Linux, sandbox-exec on macOS). Ask the app owner to check their setup.',
-        }
-      });
-    } else {
-      ctx.send(ws, {
-        type: 'terminalError',
-        terminalId,
-        data: { error: errorMsg || 'Failed to create terminal' }
-      });
-    }
+    ctx.send(ws, {
+      type: 'terminalError',
+      terminalId,
+      data: { error: errorMsg || 'Failed to create terminal' }
+    });
     removeTerminalSubscriber(ctx, terminalId, ws);
   }
 }

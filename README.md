@@ -1,84 +1,134 @@
 # mstro
 
-Run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) from any browser. Your code stays on your machine, mstro bridges your computer and your browser through a secure connection.
+The productivity scaling workspace. AI that builds, ships, and monitors software on your machines — autonomously, from any browser.
 
-> **Get started in 30 seconds:**
+> **Start in 30 seconds:**
 >
 > ```bash
 > npx mstro-app
 > ```
 >
-> Open [mstro.app](https://mstro.app) in your browser. Start prompting.
+> Open [mstro.app](https://mstro.app). Start building.
 
-## What Is This?
+## What Mstro Does
 
-mstro is for developers who use Claude Code and want to:
+### 1. Browser-based AI workstation for your machines
 
-- **Work from any device**: start on your desktop, continue from your phone or tablet
-- **Use a powerful machine remotely**: run Claude on a beefy server, interact from a lightweight laptop
-- **Stop babysitting permissions**: mstro's Security Bouncer handles tool approvals automatically so you can kick off long-running tasks and walk away knowing Claude will keep working until the job is done
-- **Share live sessions**: let a teammate watch or collaborate in real time
+Open [mstro.app](https://mstro.app) and connect to Claude Code running on your laptop, cloud VMs, or servers. Chat, edit files, use git, run terminals — all from any browser, on any device. Your code stays on your hardware.
 
-If you haven't used Claude Code before, [start here](https://docs.anthropic.com/en/docs/claude-code).
+### 2. Long-running AI tasks with zero babysitting
 
-## How It Works
+Start a complex task and walk away. The Security Bouncer handles every permission decision automatically. A three-layer watchdog detects stalls, kills frozen processes, and recovers. Come back to finished work.
 
-1. Start mstro on a computer with your project files (one command in the terminal)
-2. Open [mstro.app](https://mstro.app) in any browser, your machine appears as a workspace
-3. Type a prompt in the browser, and mstro works on your code directly on your machine
-4. Results stream back to your browser in real time
+### 3. One prompt to full apps of any complexity
 
-Your code never leaves your computer. The browser is just a window into what's happening.
+Describe what you want. The PM board breaks it into a kanban board of tasks, assigns AI agent teams, and they build features in parallel on separate git worktrees. Track progress in real time. What takes a solo developer a week ships in hours.
 
-## Prerequisites
+## Quick Start
 
-- **Node.js 18+**: check with `node --version` ([download](https://nodejs.org/) if needed)
-- **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** installed and signed in, you should be able to run `claude` in your terminal
+**Prerequisites:**
 
-## Installation
+- Node.js 18+ — check with `node --version` ([download](https://nodejs.org/))
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and signed in — `claude` must work in your terminal
 
-```bash
-npm install -g mstro-app
-```
-
-Or skip the install and run directly:
+**Run without installing:**
 
 ```bash
 npx mstro-app
 ```
 
-## Quick Start
+**Or install globally:**
 
 ```bash
+npm install -g mstro-app
 mstro
 ```
 
-On first run, mstro opens your browser so you can sign in to your mstro.app account. Once connected, open [mstro.app](https://mstro.app), your machine appears as a workspace. Start a conversation with Claude right from your browser.
+On first run, mstro opens your browser to sign in. Once connected, open [mstro.app](https://mstro.app) — your machine appears as a workspace.
 
-Run multiple instances for different projects. Each auto-selects an available port and appears as a separate workspace on [mstro.app](https://mstro.app)
+Run `mstro` on multiple machines. Each one appears as a separate workspace.
 
-Stop with Ctrl+C.
+Stop with `Ctrl+C`.
+
+## How It Works
+
+```
+Browser (mstro.app) <--WS--> Platform Server (relay) <--WS--> mstro CLI (your machine) --> Claude Code
+```
+
+Your code never leaves your computer. The browser is a window into what's happening on your machines.
+
+## Features
+
+| Feature | What it does |
+|---------|-------------|
+| **Chat** | Parallel AI conversation tabs with file autocomplete and drag-and-drop context |
+| **PM Board** | One prompt becomes a kanban board — AI agent teams build features in parallel on separate git worktrees |
+| **Quality** | Automated linting, complexity analysis, and AI code review before shipping |
+| **Files** | Browse, edit, search, and diff files on any connected machine with syntax highlighting |
+| **Git** | Stage, commit, push, and create PRs — AI writes commit messages |
+| **Terminal** | Full PTY shell access to any machine from your browser |
+| **Shared Apps** | Invite others with view-only, project control, or full machine access |
+
+## Security
+
+The Security Bouncer makes permission decisions so you don't have to sit there clicking "Allow."
+
+Two layers:
+
+1. **Pattern matching** (<5ms) — instantly blocks known threats like `rm -rf /` and reverse shells
+2. **AI analysis** (~200-500ms) — catches prompt injection and data exfiltration
+
+Validated against 400+ tests covering 22 MITRE ATT&CK techniques.
+
+For the full architecture, threat model, red-team results, and vulnerability reporting, see **[SECURITY.md](./SECURITY.md)**.
+
+### Autonomous Execution
+
+Three safety layers run continuously during AI sessions:
+
+- **Security Bouncer** — 2-layer tool approval (pattern matching + Haiku AI) via MCP
+- **Stall Assessor** — Heuristic + AI analysis detects stuck processes
+- **Tool Watchdog** — Per-tool adaptive timeouts using RFC 6298 EMA, with custom profiles for long-running operations (WebFetch 3m, Bash 5m, Task 15m)
+
+## PM Board
+
+The PM board turns a single prompt into a managed project:
+
+1. Describe what you want to build
+2. AI generates a kanban board with prioritized issues
+3. AI agent teams execute issues in parallel on separate git worktrees
+4. Track progress in real time — see each agent's output, status, and artifacts
+5. Review quality before merging
+
+Configurable parallel execution (max concurrent agents), custom review criteria per board, and board-scoped artifacts (progress logs, output files, review results).
+
+## Quality
+
+Quality analysis runs across your codebase:
+
+- **Tool detection** — Auto-detects linters and analyzers for your ecosystem (Node, Python, Rust, Go, Swift, Kotlin)
+- **Automated scanning** — Runs detected tools with progress tracking
+- **AI code review** — Claude reviews code for architecture violations, SOLID principles, security, and performance
+- **Severity scoring** — Findings with severity, category, file paths, and line numbers
+- **Automated fixes** — AI can fix identified issues with progress tracking
 
 ## CLI Reference
 
-Running `mstro` with no arguments starts a local server on port 4101 (auto-increments if busy), connects to the relay server, and runs in the foreground.
-
-### Commands
-
 ```bash
-mstro                       # Start mstro (auto-authenticates if needed)
-mstro login                 # Re-authenticate or switch accounts
+mstro                       # Start (auto-authenticates)
+mstro login                 # Authenticate or switch accounts
 mstro logout                # Sign out
-mstro whoami                # Show current user and device info
-mstro status                # Show connection and auth status
+mstro whoami                # Show user and device info
+mstro status                # Show connection status
 mstro setup-terminal        # Enable web terminal (compiles native module)
-mstro telemetry [on|off]    # Show/toggle anonymous telemetry
+mstro telemetry [on|off]    # Toggle anonymous telemetry
 ```
 
 ### Options
 
-| Option | Description |
-|--------|-------------|
+| Flag | Description |
+|------|-------------|
 | `-p, --port <port>` | Start on a specific port (default: 4101, auto-increments if busy) |
 | `-w, --working-dir <dir>` | Set working directory |
 | `-v, --verbose` | Verbose output |
@@ -92,94 +142,100 @@ mstro telemetry [on|off]    # Show/toggle anonymous telemetry
 | Variable | Description |
 |----------|-------------|
 | `PORT` | Override server port |
-| `BOUNCER_USE_AI` | Set to `false` to disable AI analysis layer |
-| `MSTRO_TELEMETRY` | Set to `0` to disable telemetry |
+| `BOUNCER_USE_AI` | `false` to disable AI analysis layer |
+| `MSTRO_TELEMETRY` | `0` to disable telemetry |
 
 ### Config Files
 
-mstro stores config in `~/.mstro/`:
+Stored in `~/.mstro/`:
 
 | File | Purpose |
 |------|---------|
-| `~/.mstro/credentials.json` | Device auth token (created by `mstro login`) |
+| `credentials.json` | Device auth token (created by `mstro login`) |
+| `settings.json` | Model selection, preferences |
+| `session-registry.json` | Tab-to-session mapping |
 
-## Security
+## Architecture
 
-When you use Claude Code through mstro, you don't need to sit there approving every file write and shell command. The Security Bouncer makes those decisions for you, and it's been tested more rigorously than any human clicking "Allow" ever could be.
+```
+server/
+  index.ts                          # Hono app entry, port detection, WebSocket setup
+  services/
+    websocket/handler.ts            # Main WebSocket message router
+    websocket/*-handlers.ts         # Domain handlers (session, plan, quality, git, terminal, files)
+    plan/executor.ts                # PM board execution engine
+    plan/composer.ts                # AI prompt composition for boards
+    plan/review-gate.ts             # Quality gates for board execution
+    terminal/pty-manager.ts         # PTY session management
+    platform.ts                     # WebSocket connection to platform server
+  cli/
+    headless/runner.ts              # Claude Code orchestrator
+    headless/stall-assessor.ts      # 2-layer stall detection (heuristic + Haiku AI)
+    headless/tool-watchdog.ts       # Per-tool adaptive timeouts (RFC 6298 EMA)
+    improvisation-session-manager.ts # Session orchestration, retry, checkpoints
+  mcp/
+    server.ts                       # MCP server (stdio transport)
+    bouncer-integration.ts          # 2-layer security (patterns + Haiku AI)
+    security-patterns.ts            # Threat/safe pattern matching
+bin/
+  mstro.js                          # CLI entry point
+  commands/                         # login, logout, status, whoami, config
+```
 
-The bouncer runs two layers of checks on every tool call: fast pattern matching that instantly blocks known threats (like `rm -rf /` or reverse shells) and an AI analysis layer that catches the subtle stuff like prompt injection and data exfiltration. It's validated against 400+ tests covering 22 MITRE ATT&CK techniques, including adversarial red teaming with real attack payloads.
+### Key Subsystems
 
-The result: you can trust mstro to run unattended and make better, more consistent security decisions than the "click Allow and hope for the best" workflow that most developers have normalized.
-
-For full details on architecture, threat model, red team results, and vulnerability reporting see **[SECURITY.md](./SECURITY.md)**.
-
-### Shared App Sandbox ("Can Control" Permission)
-
-When you share an app and grant someone "can control" permission, their Claude Code sessions and terminals run inside an OS-level sandbox powered by Anthropic's [`@anthropic-ai/sandbox-runtime`](https://github.com/anthropic-experimental/sandbox-runtime). The sandbox is cross-platform — bubblewrap on Linux, sandbox-exec (Seatbelt) on macOS — and enforces:
-
-- **Filesystem isolation** — the shared user can only read and write files inside your project directory. System directories are read-only, and credential files (`~/.claude/.credentials.json`, `~/.mstro/credentials.json`, `~/.ssh/`) are hidden entirely.
-- **Credential protection** — your API key never enters the sandboxed process. An auth proxy runs on localhost inside the mstro CLI server, reads your credentials, and injects them into API requests on behalf of the sandboxed session. The sandboxed process only sees a placeholder key.
-- **Autocomplete scoping** — `@` file autocomplete is restricted to the project directory. Path traversal with `../` is blocked server-side for shared users.
-
-#### Platform support
-
-| Platform | Sandbox backend | Dependencies |
-|----------|----------------|--------------|
-| **macOS** | sandbox-exec (Seatbelt) | Built-in — works out of the box |
-| **Linux** | bubblewrap (bwrap) | `sudo apt install bubblewrap socat` (Debian/Ubuntu) or equivalent |
-| **Windows** | Not supported natively | Use WSL2 (falls back to Linux bubblewrap) |
-
-macOS requires no extra installation — `sandbox-exec` is a built-in OS facility. Linux requires bubblewrap and socat to be installed by the user; `sandbox-runtime` does not install them automatically.
-
-#### How it works
-
-mstro checks sandbox availability at startup using `sandbox-runtime`'s built-in dependency checks (`isSupportedPlatform()` + `checkDependencies()`). The result is reported to the platform server as `terminalSandbox` and `claudeSandbox` capabilities. "Can control" shared link creation is only allowed when the host machine can sandbox securely:
-
-1. **Startup** — mstro probes sandbox availability and reports capabilities to the relay server.
-2. **Share link creation** — the relay server checks capabilities before allowing "can control" permission grants.
-3. **Runtime enforcement** — when a "control" user connects, the relay injects `_permission` metadata into their messages. The CLI uses this to spawn sandboxed processes (OS isolation + auth proxy + env sanitization).
-4. **Fallback** — if sandbox dependencies are not met, "can control" is blocked at the relay level. The user is told sandbox support is required and given platform-specific install instructions.
+- **Headless Runner** — Spawns Claude Code processes with MCP bouncer integration, manages lifecycle
+- **Improvisation Session Manager** — Session orchestration, retry with context recovery, checkpoint-and-retry on tool timeouts
+- **Security Bouncer** — MCP-integrated 2-layer tool approval (see [SECURITY.md](./SECURITY.md))
+- **PM Board Executor** — Parallel board execution with wave-based scheduling and quality gates
+- **PTY Manager** — Terminal session management with tmux support and subscriber model
+- **Session Registry** — Tab-to-session persistence across WebSocket disconnects
 
 ## Optional Setup
 
 ### Web Terminal
 
-The web terminal lets you use a full terminal in your browser. mstro works without it, if you don't set it up you just won't have the terminal tab.
-
-On first run, mstro automatically tries to compile the required native module. If your system has build tools, it just works. If not, install them first:
+The terminal tab requires a native module. Mstro tries to compile it automatically on first run. If it fails, install build tools first:
 
 - **macOS**: `xcode-select --install`
 - **Linux (Debian/Ubuntu)**: `sudo apt install build-essential python3`
 - **Linux (Fedora/RHEL)**: `sudo dnf install gcc-c++ make python3`
 - **Windows**: `npm install -g windows-build-tools`
 
-Then run:
-
-```bash
-mstro setup-terminal
-```
+Then run `mstro setup-terminal`.
 
 ### Persistent Terminals
 
-Install [tmux](https://github.com/tmux/tmux) for terminal sessions that survive restarts:
+Install [tmux](https://github.com/tmux/tmux) for sessions that survive restarts:
 
 ```bash
 # macOS
 brew install tmux
-
 # Debian/Ubuntu
 sudo apt install tmux
 ```
 
+## Development
+
+```bash
+cd cli
+npm install
+npm run dev          # Dev server with tsx (port 4101)
+npm run test         # vitest
+npm run check        # tsc + vitest + biome + npm audit
+npm run build        # tsc -p tsconfig.build.json
+```
+
+The CLI runs on Node.js with tsx in development (no build step). Hono serves HTTP and WebSocket. Biome handles linting. Published as ESM.
+
 ## Troubleshooting
 
-**`claude` not found** — Install [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and make sure you can run `claude` in your terminal.
-
-**Port conflict** — mstro auto-increments, but you can force a port with `mstro -p 4200`.
-
-**Machine not appearing in web app** — Run `mstro status` to verify the platform connection.
-
-**node-pty build fails** — Install build tools for your OS (see Optional Setup above), then run `mstro setup-terminal`.
+| Problem | Fix |
+|---------|-----|
+| `claude` not found | Install [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and sign in |
+| Port conflict | `mstro -p 4200` or let it auto-increment |
+| Machine not appearing | Run `mstro status` to verify connection |
+| node-pty build fails | Install build tools (see Optional Setup), then `mstro setup-terminal` |
 
 ## Uninstall
 
@@ -188,20 +244,10 @@ npm uninstall -g mstro-app
 rm -rf ~/.mstro
 ```
 
-## Telemetry and Privacy
-
-Mstro collects anonymous error reports and usage data to improve the software. No personal data or code is collected. See [PRIVACY.md](./PRIVACY.md) for details.
-
-```bash
-mstro telemetry off    # Disable
-mstro telemetry on     # Enable
-```
-
 ## Links
 
 - **Web App**: [mstro.app](https://mstro.app)
-- **GitHub**: [github.com/mstro-app/mstro](https://github.com/mstro-app/mstro)
-- **Security**: [SECURITY.md](./SECURITY.md) — bouncer architecture, threat model, vulnerability reporting
+- **Security**: [SECURITY.md](./SECURITY.md) — bouncer architecture, threat model, red teaming, vulnerability reporting
 
 ## License
 

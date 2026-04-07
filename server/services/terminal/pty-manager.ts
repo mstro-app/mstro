@@ -10,8 +10,6 @@
 
 import { EventEmitter } from 'node:events';
 import { homedir, platform } from 'node:os';
-import { cleanupSandboxCommand, initializeSandbox, isSandboxAvailable, wrapCommandForSandbox } from '../sandbox-config.js';
-import { sanitizeEnvForSandbox } from '../sandbox-utils.js';
 import type { PTYSession } from './pty-utils.js';
 import {
   detectShell,
@@ -59,7 +57,6 @@ export class PTYManager extends EventEmitter {
     cols: number = 80,
     rows: number = 24,
     requestedShell?: string,
-    options?: { sandboxed?: boolean }
   ): Promise<{ shell: string; cwd: string; isReconnect: boolean; platform: string }> {
     const pty = getPty();
     if (!pty) {
@@ -79,37 +76,10 @@ export class PTYManager extends EventEmitter {
     const cwd = workingDir || homedir();
 
     try {
-      const baseEnv = options?.sandboxed
-        ? sanitizeEnvForSandbox(process.env, cwd)
-        : { ...process.env, HOME: homedir() };
-      const env = { ...baseEnv, TERM: 'xterm-256color', COLORTERM: 'truecolor' };
+      const env = { ...process.env, HOME: homedir(), TERM: 'xterm-256color', COLORTERM: 'truecolor' };
 
-      // Sandboxed terminals use sandbox-runtime for filesystem isolation.
-      // Cross-platform: bwrap on Linux, sandbox-exec on macOS.
-      // The shell is spawned inside a sandbox that only sees the project directory (rw)
-      // and system directories (ro). Without sandbox-runtime, sandboxed terminals are not available.
-      let spawnCommand: string;
-      let spawnArgs: string[];
-      let spawnCwd: string;
+      const ptyProcess = pty.spawn(shell, [], { name: 'xterm-256color', cols, rows, cwd, env });
 
-      if (options?.sandboxed) {
-        if (!isSandboxAvailable()) {
-          throw new Error('SANDBOX_UNAVAILABLE:Sandbox runtime is not available on this machine. Shared terminal sessions require sandbox-runtime for filesystem isolation.');
-        }
-        await initializeSandbox(cwd);
-        const wrappedCommand = await wrapCommandForSandbox(shell);
-        spawnCommand = '/bin/sh';
-        spawnArgs = ['-c', wrappedCommand];
-        spawnCwd = cwd;
-      } else {
-        spawnCommand = shell;
-        spawnArgs = [];
-        spawnCwd = cwd;
-      }
-
-      const ptyProcess = pty.spawn(spawnCommand, spawnArgs, { name: 'xterm-256color', cols, rows, cwd: spawnCwd, env });
-
-      const isSandboxed = !!options?.sandboxed;
       const session: PTYSession = {
         id: terminalId,
         pty: ptyProcess,
@@ -119,7 +89,6 @@ export class PTYManager extends EventEmitter {
         lastActivityAt: Date.now(),
         cols,
         rows,
-        sandboxed: isSandboxed,
         _outputBuffer: '',
         _outputTimer: null,
         scrollback: new ScrollbackBuffer(SCROLLBACK_MAX_LENGTH),
@@ -172,7 +141,6 @@ export class PTYManager extends EventEmitter {
         clearTimeout(session._outputTimer);
         session._outputTimer = null;
       }
-      if (session.sandboxed) void cleanupSandboxCommand();
       this.emit('exit', terminalId, exitCode);
       this.terminals.delete(terminalId);
     });

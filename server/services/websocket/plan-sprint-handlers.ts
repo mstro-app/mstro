@@ -60,7 +60,7 @@ function assignIssuesToSprint(workingDir: string, issues: Issue[], issueIds: str
 
 export function handleCreateSprint(
   ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage,
-  workingDir: string, permission?: 'control' | 'view',
+  workingDir: string, permission?: 'view',
 ): void {
   if (denyIfViewOnly(ctx, ws, permission)) return;
 
@@ -116,7 +116,7 @@ function updateFileField(filePath: string, field: string, value: string): void {
 
 export function handleActivateSprint(
   ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage,
-  workingDir: string, permission?: 'control' | 'view',
+  workingDir: string, permission?: 'view',
 ): void {
   if (denyIfViewOnly(ctx, ws, permission)) return;
 
@@ -162,7 +162,7 @@ export function handleActivateSprint(
 
 export function handleCompleteSprint(
   ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage,
-  workingDir: string, permission?: 'control' | 'view',
+  workingDir: string, permission?: 'view',
 ): void {
   if (denyIfViewOnly(ctx, ws, permission)) return;
 

@@ -24,7 +24,7 @@ export function handlePlanMessage(
   msg: WebSocketMessage,
   _tabId: string,
   workingDir: string,
-  permission?: 'control' | 'view',
+  permission?: 'view',
 ): void {
   const handlers: Record<string, () => void> = {
     planInit: () => handlePlanInit(ctx, ws, workingDir),

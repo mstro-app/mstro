@@ -18,9 +18,8 @@
  * letting us verify routing without spawning Haiku.
  */
 
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { reviewOperation } from './bouncer-integration.js';
-import { BouncerSandboxHarness } from './bouncer-sandbox.js';
 import { CRITICAL_THREATS, classifyRisk, matchesPattern, requiresAIReview } from './security-patterns.js';
 
 // ============================================================================
@@ -468,80 +467,6 @@ describe('Adversarial: Risk classification accuracy', () => {
         expect(risk.riskLevel).toBe('high');
       }
     }
-  });
-});
-
-// ============================================================================
-// SANDBOX CONTAINMENT TESTS
-// These verify that if a malicious command DOES get through the bouncer,
-// the sandbox prevents actual damage.
-// ============================================================================
-
-describe('Adversarial: Sandbox containment', () => {
-  let harness: BouncerSandboxHarness;
-  let sandboxAvailable = false;
-
-  beforeAll(async () => {
-    harness = new BouncerSandboxHarness();
-    const init = await harness.initialize();
-    sandboxAvailable = init.available;
-    if (!sandboxAvailable) {
-      console.warn(`[Sandbox] Not available: ${init.reason} — running decision-only tests`);
-    }
-  });
-
-  afterAll(async () => {
-    await harness.cleanup();
-  });
-
-  beforeEach(() => {
-    vi.spyOn(console, 'error').mockImplementation(() => {});
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
-  });
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  it('sandbox harness initializes without throwing', () => {
-    expect(harness).toBeDefined();
-    expect(typeof harness.isAvailable()).toBe('boolean');
-  });
-
-  it('canary file system works', () => {
-    const canary = harness.placeCanary('test-canary');
-    const check = canary.check();
-    expect(check.canaryIntact).toBe(true);
-    expect(check.escapeDetected).toBe(false);
-  });
-
-  it('sandboxed execution returns result structure', async () => {
-    const result = await harness.executeInSandbox('echo hello');
-    expect(result).toHaveProperty('wrappedCommand');
-    expect(result).toHaveProperty('sandboxAvailable');
-    expect(result).toHaveProperty('contained');
-    expect(result).toHaveProperty('violations');
-    expect(Array.isArray(result.violations)).toBe(true);
-  });
-
-  it('sandbox write dir exists and is accessible', () => {
-    const writeDir = harness.getSandboxWriteDir();
-    expect(writeDir).toBeTruthy();
-    expect(writeDir.includes('bouncer-sandbox')).toBe(true);
-  });
-
-  // Conditional tests that only run when sandbox is available
-  it.skipIf(!sandboxAvailable)('contains file write attempts outside sandbox dir', async () => {
-    const canary = harness.placeCanary('write-escape-canary');
-    await harness.executeInSandbox(`echo pwned > ${canary.path}.escaped`);
-    const check = canary.check();
-    // If sandbox is working, the escape file should NOT exist
-    expect(check.escapeDetected).toBe(false);
-  });
-
-  it.skipIf(!sandboxAvailable)('contains network access attempts', async () => {
-    const result = await harness.executeInSandbox('curl -s http://example.com');
-    // Network should be blocked in sandbox
-    expect(result.contained).toBe(true);
   });
 });
 

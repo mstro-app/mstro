@@ -20,7 +20,6 @@ import {
   shouldRefreshToken,
   updateCredentials,
 } from './platform-credentials.js'
-import { isSandboxAvailable } from './sandbox-config.js'
 import { captureException } from './sentry.js'
 
 /**
@@ -190,7 +189,7 @@ export class PlatformConnection {
       osType,
       cpuArch,
       cliVersion: CLI_VERSION,
-      capabilities: JSON.stringify({ terminalSandbox: isSandboxAvailable(), claudeSandbox: isSandboxAvailable() }),
+      capabilities: JSON.stringify({}),
       startedAt: this.startedAt,
     })
 

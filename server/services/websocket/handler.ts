@@ -234,6 +234,12 @@ export class WebSocketImproviseHandler implements HandlerContext {
     this.allConnections.delete(ws);
     cleanupTerminalSubscribers(this, ws);
 
+    // Kill any active search processes to prevent resource leaks
+    for (const [key, process] of this.activeSearches) {
+      try { process.kill(); } catch { /* ignore */ }
+      this.activeSearches.delete(key);
+    }
+
     // Clean up file upload handler when no connections remain
     if (this.allConnections.size === 0 && this.fileUploadHandler) {
       this.fileUploadHandler.destroy();

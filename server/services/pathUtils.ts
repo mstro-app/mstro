@@ -8,7 +8,8 @@
  * All file explorer operations MUST validate paths through these functions.
  */
 
-import { isAbsolute, normalize, relative, resolve } from 'node:path';
+import { existsSync, lstatSync, realpathSync } from 'node:fs';
+import { dirname, isAbsolute, normalize, relative, resolve } from 'node:path';
 
 export interface PathValidationResult {
   valid: boolean;
@@ -42,6 +43,39 @@ export function validatePathWithinWorkingDir(
 
     // Normalize to remove any .. or . segments
     resolvedPath = normalize(resolvedPath);
+
+    // Resolve symlinks to prevent symlink-based path traversal.
+    // A symlink at /project/link -> /etc/passwd would pass the string
+    // check below but actually read outside the working directory.
+    // For existing paths: resolve the full path via realpath.
+    // For new paths (create operations): resolve the parent directory.
+    if (existsSync(resolvedPath)) {
+      // If the path itself is a symlink, resolve it to the real target
+      const stat = lstatSync(resolvedPath);
+      if (stat.isSymbolicLink()) {
+        resolvedPath = realpathSync(resolvedPath);
+      }
+    } else {
+      // Path doesn't exist yet (create operation) — validate the parent
+      const parentDir = dirname(resolvedPath);
+      if (existsSync(parentDir)) {
+        const realParent = realpathSync(parentDir);
+        const parentWithSep = normalizedWorkingDir.endsWith('/')
+          ? normalizedWorkingDir
+          : `${normalizedWorkingDir}/`;
+        if (realParent !== normalizedWorkingDir && !realParent.startsWith(parentWithSep)) {
+          console.error(
+            `[PathUtils] SECURITY: Symlink traversal in parent directory blocked. ` +
+            `Target: "${targetPath}", RealParent: "${realParent}", WorkingDir: "${normalizedWorkingDir}"`
+          );
+          return {
+            valid: false,
+            resolvedPath: '',
+            error: 'Access denied: parent directory resolves outside working directory'
+          };
+        }
+      }
+    }
 
     // Check if the resolved path starts with the working directory
     // Add trailing separator to prevent partial matches (e.g., /home/user vs /home/username)

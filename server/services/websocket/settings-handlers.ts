@@ -78,6 +78,17 @@ Respond with ONLY the summary text, nothing else.`;
 
     let stdout = '';
     let stderr = '';
+    let responseSent = false;
+
+    const sendSummaryOnce = (summary: string) => {
+      if (responseSent) return;
+      responseSent = true;
+      ctx.send(ws, {
+        type: 'notificationSummary',
+        tabId,
+        data: { summary }
+      });
+    };
 
     claude.stdout?.on('data', (data: Buffer) => {
       stdout += data.toString();
@@ -94,41 +105,26 @@ Respond with ONLY the summary text, nothing else.`;
         // Ignore cleanup errors
       }
 
-      let summary: string;
       if (code === 0 && stdout.trim()) {
-        summary = stdout.trim().slice(0, 150);
+        sendSummaryOnce(stdout.trim().slice(0, 150));
       } else {
         console.error('[WebSocketImproviseHandler] Claude error:', stderr || 'Unknown error');
-        summary = createFallbackSummary(userPrompt);
+        sendSummaryOnce(createFallbackSummary(userPrompt));
       }
-
-      ctx.send(ws, {
-        type: 'notificationSummary',
-        tabId,
-        data: { summary }
-      });
     });
 
     claude.on('error', (err: Error) => {
       console.error('[WebSocketImproviseHandler] Failed to spawn Claude:', err);
-      const summary = createFallbackSummary(userPrompt);
-      ctx.send(ws, {
-        type: 'notificationSummary',
-        tabId,
-        data: { summary }
-      });
+      sendSummaryOnce(createFallbackSummary(userPrompt));
     });
 
     // Timeout after 10 seconds
-    setTimeout(() => {
+    const timeout = setTimeout(() => {
       claude.kill();
-      const summary = createFallbackSummary(userPrompt);
-      ctx.send(ws, {
-        type: 'notificationSummary',
-        tabId,
-        data: { summary }
-      });
+      sendSummaryOnce(createFallbackSummary(userPrompt));
     }, 10000);
+
+    claude.on('close', () => { clearTimeout(timeout); });
 
   } catch (error) {
     console.error('[WebSocketImproviseHandler] Error generating summary:', error);

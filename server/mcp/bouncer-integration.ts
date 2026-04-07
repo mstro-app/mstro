@@ -168,8 +168,8 @@ async function runHaikuAnalysis(
   startTime: number,
   fin: (d: BouncerDecision, layer: string, opts?: Parameters<typeof finalizeDecision>[6]) => BouncerDecision,
 ): Promise<BouncerDecision> {
-  if (process.env.BOUNCER_USE_AI === 'false') {
-    console.error('[Bouncer] AI analysis disabled (BOUNCER_USE_AI=false)');
+  if (process.env.BOUNCER_USE_AI === 'false' || request.context?._skipAI === true) {
+    console.error('[Bouncer] AI analysis disabled');
     return fin({ decision: 'warn_allow', confidence: 60, reasoning: 'Operation requires review but AI analysis is disabled. Proceeding with caution.', threatLevel: 'medium' }, 'ai-disabled', { skipCache: true, skipAnalytics: true });
   }
 
@@ -263,26 +263,20 @@ export { classifyRisk as classifyOperationRisk } from './security-patterns.js';
 
 /**
  * Legacy compatibility — redirects to reviewOperation.
- * When useAI=false, temporarily sets BOUNCER_USE_AI env var.
- * Uses a saved/restored pattern to avoid race conditions with concurrent calls.
+ * When useAI=false, skips AI analysis by injecting a context flag
+ * that runHaikuAnalysis checks (avoids racy process.env mutation).
  */
 export async function launchBouncerAgent(
   request: BouncerReviewRequest,
   useAI: boolean = true
 ): Promise<BouncerDecision> {
-  const prevValue = process.env.BOUNCER_USE_AI;
   if (!useAI) {
-    process.env.BOUNCER_USE_AI = 'false';
+    // Inject skipAI flag into the request context so runHaikuAnalysis
+    // can check it without mutating process.env (which races under concurrency).
+    request = {
+      ...request,
+      context: { ...request.context, _skipAI: true },
+    };
   }
-  try {
-    return await reviewOperation(request);
-  } finally {
-    if (!useAI) {
-      if (prevValue !== undefined) {
-        process.env.BOUNCER_USE_AI = prevValue;
-      } else {
-        delete process.env.BOUNCER_USE_AI;
-      }
-    }
-  }
+  return reviewOperation(request);
 }

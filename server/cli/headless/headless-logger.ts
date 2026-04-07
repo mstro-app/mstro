@@ -93,7 +93,7 @@ export async function runWithFileLogger<T>(label: string, fn: () => Promise<T>, 
     try {
       return await fn();
     } finally {
-      stream.end();
+      await new Promise<void>((resolve) => stream.end(() => resolve()));
     }
   });
 }

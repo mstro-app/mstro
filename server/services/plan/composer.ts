@@ -248,6 +248,10 @@ User request: ${userPrompt}`;
     const runner = new HeadlessRunner({
       workingDir,
       directPrompt: enrichedPrompt,
+      stallWarningMs: 300_000,   // 5 min — compose usually finishes quickly
+      stallKillMs: 900_000,      // 15 min
+      stallHardCapMs: 1_800_000, // 30 min hard cap
+      verbose: true,
       outputCallback: (text: string) => {
         ctx.send(ws, {
           type: 'planPromptStreaming',

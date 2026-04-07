@@ -53,7 +53,7 @@ export async function reviewIssue(options: ReviewIssueOptions): Promise<ReviewRe
       stallWarningMs: REVIEW_STALL_WARNING_MS,
       stallKillMs: REVIEW_STALL_KILL_MS,
       stallHardCapMs: REVIEW_STALL_HARD_CAP_MS,
-      verbose: false,
+      verbose: true,
       outputCallback: onOutput ? (text: string) => onOutput(`Review: ${text}`) : undefined,
     });
 

@@ -20,11 +20,11 @@ import { EventEmitter } from 'node:events';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { runWithFileLogger } from '../../cli/headless/headless-logger.js';
-import { HeadlessRunner } from '../../cli/headless/index.js';
 import { ConfigInstaller } from './config-installer.js';
 import { resolveReadyToWork } from './dependency-resolver.js';
 import { replaceFrontMatterField, setFrontMatterField } from './front-matter.js';
 import { buildIssuePrompt } from './issue-prompt-builder.js';
+import { runIssueWithRetry } from './issue-retry.js';
 import { listExistingDocs, publishOutputs, resolveOutputPath } from './output-manager.js';
 import { parseBoardDirectory, parsePlanDirectory, resolvePmDir } from './parser.js';
 import { appendReviewFeedback, getReviewAttemptCount, MAX_REVIEW_ATTEMPTS, persistReviewResult, reviewIssue } from './review-gate.js';
@@ -223,7 +223,7 @@ export class PlanExecutor extends EventEmitter {
     return completedCount;
   }
 
-  /** Run a single issue via its own headless Claude Code instance. */
+  /** Run a single issue via its own headless Claude Code instance with retry logic. */
   private async runSingleIssue(
     issue: Issue,
     pmDir: string | null,
@@ -240,21 +240,18 @@ export class PlanExecutor extends EventEmitter {
       outputPath,
     });
 
-    const runner = new HeadlessRunner({
+    const boardLogDir = this.boardDir ? join(this.boardDir, 'logs') : undefined;
+    const result = await runWithFileLogger(`pm-issue-${issue.id}`, () => runIssueWithRetry({
       workingDir: this.workingDir,
-      directPrompt: prompt,
+      prompt,
       stallWarningMs: ISSUE_STALL_WARNING_MS,
       stallKillMs: ISSUE_STALL_KILL_MS,
       stallHardCapMs: ISSUE_STALL_HARD_CAP_MS,
       stallMaxExtensions: ISSUE_STALL_MAX_EXTENSIONS,
-      verbose: process.env.MSTRO_VERBOSE === '1',
       outputCallback: (text: string) => {
         this.emit('output', { issueId: issue.id, text });
       },
-    });
-
-    const boardLogDir = this.boardDir ? join(this.boardDir, 'logs') : undefined;
-    const result = await runWithFileLogger(`pm-issue-${issue.id}`, () => runner.run(), boardLogDir);
+    }), boardLogDir);
 
     if (!result.completed || result.error) {
       this.emit('output', { issueId: waveLabel, text: `Issue ${issue.id}: ${result.error || 'did not complete'}` });

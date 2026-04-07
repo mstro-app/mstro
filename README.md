@@ -1,6 +1,6 @@
 # mstro
 
-The productivity scaling workspace. AI that builds, ships, and monitors software on your machines — autonomously, from any browser.
+The productivity scaling workspace. AI that builds, ships, and monitors software on your machines, autonomously, from any browser.
 
 > **Start in 30 seconds:**
 >
@@ -14,7 +14,7 @@ The productivity scaling workspace. AI that builds, ships, and monitors software
 
 ### 1. Browser-based AI workstation for your machines
 
-Open [mstro.app](https://mstro.app) and connect to Claude Code running on your laptop, cloud VMs, or servers. Chat, edit files, use git, run terminals — all from any browser, on any device. Your code stays on your hardware.
+Open [mstro.app](https://mstro.app) and connect to Claude Code running on your laptop, cloud VMs, or servers. Chat, edit files, use git, run terminals. All from any browser, on any device. Your code stays on your hardware.
 
 ### 2. Long-running AI tasks with zero babysitting
 
@@ -28,8 +28,8 @@ Describe what you want. The PM board breaks it into a kanban board of tasks, ass
 
 **Prerequisites:**
 
-- Node.js 18+ — check with `node --version` ([download](https://nodejs.org/))
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and signed in — `claude` must work in your terminal
+- Node.js 18+ (check with `node --version`, [download here](https://nodejs.org/))
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and signed in. `claude` must work in your terminal
 
 **Run without installing:**
 
@@ -63,7 +63,7 @@ Your code never leaves your computer. The browser is a window into what's happen
 | Feature | What it does |
 |---------|-------------|
 | **Chat** | Parallel AI conversation tabs with file autocomplete and drag-and-drop context |
-| **PM Board** | One prompt becomes a kanban board — AI agent teams build features in parallel on separate git worktrees |
+| **PM Board** | One prompt becomes a kanban board. AI agent teams build features in parallel on separate git worktrees |
 | **Quality** | Automated linting, complexity analysis, and AI code review before shipping |
 | **Files** | Browse, edit, search, and diff files on any connected machine with syntax highlighting |
 | **Git** | Stage, commit, push, and create PRs — AI writes commit messages |
@@ -76,8 +76,8 @@ The Security Bouncer makes permission decisions so you don't have to sit there c
 
 Two layers:
 
-1. **Pattern matching** (<5ms) — instantly blocks known threats like `rm -rf /` and reverse shells
-2. **AI analysis** (~200-500ms) — catches prompt injection and data exfiltration
+1. **Pattern matching** (<5ms): instantly blocks known threats like `rm -rf /` and reverse shells
+2. **AI analysis** (~200-500ms): catches prompt injection and data exfiltration
 
 Validated against 400+ tests covering 22 MITRE ATT&CK techniques.
 
@@ -87,9 +87,9 @@ For the full architecture, threat model, red-team results, and vulnerability rep
 
 Three safety layers run continuously during AI sessions:
 
-- **Security Bouncer** — 2-layer tool approval (pattern matching + Haiku AI) via MCP
-- **Stall Assessor** — Heuristic + AI analysis detects stuck processes
-- **Tool Watchdog** — Per-tool adaptive timeouts using RFC 6298 EMA, with custom profiles for long-running operations (WebFetch 3m, Bash 5m, Task 15m)
+- **Security Bouncer**: 2-layer tool approval (pattern matching + Haiku AI) via MCP
+- **Stall Assessor**: heuristic + AI analysis detects stuck processes
+- **Tool Watchdog**: per-tool adaptive timeouts using RFC 6298 EMA, with custom profiles for long-running operations (WebFetch 3m, Bash 5m, Task 15m)
 
 ## PM Board
 
@@ -107,11 +107,11 @@ Configurable parallel execution (max concurrent agents), custom review criteria 
 
 Quality analysis runs across your codebase:
 
-- **Tool detection** — Auto-detects linters and analyzers for your ecosystem (Node, Python, Rust, Go, Swift, Kotlin)
-- **Automated scanning** — Runs detected tools with progress tracking
-- **AI code review** — Claude reviews code for architecture violations, SOLID principles, security, and performance
-- **Severity scoring** — Findings with severity, category, file paths, and line numbers
-- **Automated fixes** — AI can fix identified issues with progress tracking
+- **Tool detection**: auto-detects linters and analyzers for your ecosystem (Node, Python, Rust, Go, Swift, Kotlin)
+- **Automated scanning**: runs detected tools with progress tracking
+- **AI code review**: Claude reviews code for architecture violations, SOLID principles, security, and performance
+- **Severity scoring**: findings tagged with severity, category, file paths, and line numbers
+- **Automated fixes**: AI can fix identified issues with progress tracking
 
 ## CLI Reference
 
@@ -184,12 +184,12 @@ bin/
 
 ### Key Subsystems
 
-- **Headless Runner** — Spawns Claude Code processes with MCP bouncer integration, manages lifecycle
-- **Improvisation Session Manager** — Session orchestration, retry with context recovery, checkpoint-and-retry on tool timeouts
-- **Security Bouncer** — MCP-integrated 2-layer tool approval (see [SECURITY.md](./SECURITY.md))
-- **PM Board Executor** — Parallel board execution with wave-based scheduling and quality gates
-- **PTY Manager** — Terminal session management with tmux support and subscriber model
-- **Session Registry** — Tab-to-session persistence across WebSocket disconnects
+- **Headless Runner**: spawns Claude Code processes with MCP bouncer integration, manages lifecycle
+- **Improvisation Session Manager**: session orchestration, retry with context recovery, checkpoint-and-retry on tool timeouts
+- **Security Bouncer**: MCP-integrated 2-layer tool approval (see [SECURITY.md](./SECURITY.md))
+- **PM Board Executor**: parallel board execution with wave-based scheduling and quality gates
+- **PTY Manager**: terminal session management with tmux support and subscriber model
+- **Session Registry**: tab-to-session persistence across WebSocket disconnects
 
 ## Optional Setup
 
@@ -247,7 +247,7 @@ rm -rf ~/.mstro
 ## Links
 
 - **Web App**: [mstro.app](https://mstro.app)
-- **Security**: [SECURITY.md](./SECURITY.md) — bouncer architecture, threat model, red teaming, vulnerability reporting
+- **Security**: [SECURITY.md](./SECURITY.md) - bouncer architecture, threat model, red teaming, vulnerability reporting
 
 ## License
 

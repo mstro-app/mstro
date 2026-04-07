@@ -110,6 +110,36 @@ function buildStateMarkdown(
 }
 
 /**
+ * Derive epic status from its children's actual statuses.
+ * All children done/cancelled → done (auto-complete the epic).
+ */
+function deriveEpicDone(epic: Issue, issueByPath: Map<string, Issue>): boolean {
+  if (epic.children.length === 0) return false;
+  if (epic.status === 'done' || epic.status === 'cancelled') return false;
+
+  return epic.children.every(childPath => {
+    const child = issueByPath.get(childPath);
+    return child && (child.status === 'done' || child.status === 'cancelled');
+  });
+}
+
+function reconcileEpicStatuses(pmDir: string, issues: Issue[], issueByPath: Map<string, Issue>): void {
+  const epics = issues.filter(i => i.type === 'epic');
+  for (const epic of epics) {
+    if (!deriveEpicDone(epic, issueByPath)) continue;
+
+    const epicPath = join(pmDir, epic.path);
+    try {
+      let content = readFileSync(epicPath, 'utf-8');
+      content = replaceFrontMatterField(content, 'status', 'done');
+      writeFileSync(epicPath, content, 'utf-8');
+    } catch {
+      // Epic file may be missing or unwritable
+    }
+  }
+}
+
+/**
  * Derive sprint status from its issues' actual statuses.
  * - All issues done/cancelled → completed
  * - Any issue in_progress/in_review → active
@@ -155,6 +185,40 @@ function reconcileSprintStatuses(pmDir: string, sprints: Sprint[], issueByPath: 
   }
 }
 
+/**
+ * After an issue is updated, check if its parent epic should be auto-completed.
+ * Returns the epic's relative path if it was marked done, null otherwise.
+ */
+export function tryCompleteParentEpic(workingDir: string, updatedIssue: Issue): string | null {
+  if (!updatedIssue.epic) return null;
+
+  const pmDir = resolvePmDir(workingDir);
+  if (!pmDir) return null;
+
+  // Determine which board the issue belongs to from its path
+  const boardMatch = updatedIssue.path.match(/^boards\/([^/]+)\//);
+  const issues = boardMatch
+    ? parseBoardDirectory(pmDir, boardMatch[1])?.issues
+    : parsePlanDirectory(workingDir)?.issues;
+  if (!issues) return null;
+
+  const epic = issues.find(i => i.path === updatedIssue.epic);
+  if (!epic) return null;
+
+  const issueByPath = new Map(issues.map(i => [i.path, i]));
+  if (!deriveEpicDone(epic, issueByPath)) return null;
+
+  const epicFullPath = join(pmDir, epic.path);
+  try {
+    let content = readFileSync(epicFullPath, 'utf-8');
+    content = replaceFrontMatterField(content, 'status', 'done');
+    writeFileSync(epicFullPath, content, 'utf-8');
+    return epic.path;
+  } catch {
+    return null;
+  }
+}
+
 export function reconcileState(workingDir: string, boardId?: string): void {
   const pmDir = resolvePmDir(workingDir);
   if (!pmDir) return;
@@ -183,7 +247,8 @@ export function reconcileState(workingDir: string, boardId?: string): void {
   const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
   const frontMatter = fmMatch ? fmMatch[1] : `project: "${project.name}"\ncurrent_sprint: null\nactive_milestone: null\npaused: false\nlast_session: null`;
 
-  // Reconcile sprint statuses from actual issue statuses
+  // Reconcile epic and sprint statuses from actual issue statuses
+  reconcileEpicStatuses(pmDir, issues, issueByPath);
   reconcileSprintStatuses(pmDir, sprints, issueByPath);
 
   // Update current_sprint in front matter based on actual sprint statuses
@@ -211,6 +276,10 @@ function reconcileBoardState(pmDir: string, _workingDir: string, boardId?: strin
   const { board, issues } = boardState;
 
   const issueByPath = new Map(issues.map(i => [i.path, i]));
+
+  // Reconcile epic statuses before categorizing
+  reconcileEpicStatuses(pmDir, issues, issueByPath);
+
   const categories = categorizeIssues(issues, issueByPath);
   const warnings = computeWarnings(issues);
 

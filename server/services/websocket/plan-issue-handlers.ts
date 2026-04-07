@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from '
 import { basename, join } from 'node:path';
 import { replaceFrontMatterField } from '../plan/front-matter.js';
 import { defaultPmDir, getNextId, parseBoardDirectory, parsePlanDirectory, parseSingleIssue, parseSingleMilestone, parseSingleSprint, planDirExists, resolvePmDir } from '../plan/parser.js';
+import { tryCompleteParentEpic } from '../plan/state-reconciler.js';
 import type { HandlerContext } from './handler-context.js';
 import { buildIssueMarkdown, denyIfViewOnly, formatYamlValue, getWatcher, resolvePlanPath, scaffoldPmDirectory } from './plan-helpers.js';
 import type { WebSocketMessage, WSContext } from './types.js';
@@ -166,6 +167,15 @@ export function handleUpdateIssue(
 
   const issue = parseSingleIssue(workingDir, path);
   ctx.broadcastToAll({ type: 'planIssueUpdated', data: issue });
+
+  // Auto-complete parent epic if all its children are now done
+  if (issue) {
+    const epicPath = tryCompleteParentEpic(workingDir, issue);
+    if (epicPath) {
+      const epic = parseSingleIssue(workingDir, epicPath);
+      if (epic) ctx.broadcastToAll({ type: 'planIssueUpdated', data: epic });
+    }
+  }
 }
 
 export function handleDeleteIssue(

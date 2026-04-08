@@ -2,14 +2,14 @@
 // Licensed under the MIT License. See LICENSE file for details.
 
 /**
- * Legacy → Board-centric migration for .pm/ directories.
+ * Legacy → Board-centric migration for .mstro/pm/ directories.
  */
 
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseFrontMatter } from './parser-core.js';
 
-/** Check whether a .pm/ directory uses the legacy flat format (has backlog/ at root, no boards/). */
+/** Check whether a .mstro/pm/ directory uses the legacy flat format (has backlog/ at root, no boards/). */
 export function isLegacyFormat(pmDir: string): boolean {
   return existsSync(join(pmDir, 'backlog')) && !existsSync(join(pmDir, 'boards'));
 }
@@ -73,10 +73,10 @@ function cleanupMigratedIssues(boardBacklogDir: string): boolean {
     const content = readFileIfExists(join(boardBacklogDir, f));
     if (!content) continue;
     const fm = parseFrontMatter(content).frontMatter;
-    const status = String(fm.status || 'backlog');
+    const status = String(fm.status || 'todo');
     if (status === 'done' || status === 'closed' || status === 'cancelled') {
       rmSync(join(boardBacklogDir, f));
-    } else if (status !== 'backlog') {
+    } else if (status !== 'todo') {
       hasActive = true;
     }
   }
@@ -104,7 +104,7 @@ function writeBoardMetadata(pmDir: string, boardDir: string, boardId: string, sp
   }, null, 2));
 }
 
-/** Migrate a legacy flat .pm/ directory to the board-centric format. */
+/** Migrate a legacy flat .mstro/pm/ directory to the board-centric format. */
 export function migrateToBoards(pmDir: string): void {
   const boardId = 'BOARD-001';
   const boardDir = join(pmDir, 'boards', boardId);

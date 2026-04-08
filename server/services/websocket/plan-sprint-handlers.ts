@@ -97,15 +97,9 @@ export function handleCreateSprint(
   ctx.broadcastToAll({ type: 'planSprintCreated', data: sprint });
 }
 
-/** Promote sprint issues from 'backlog' to 'todo' status. */
-function promoteSprintIssues(pmDir: string, sprint: { issues: Array<{ id: string; path: string }> }, allIssues: Issue[]): void {
-  for (const issueSummary of sprint.issues) {
-    const issue = allIssues.find(i => i.id === issueSummary.id || i.path === issueSummary.path);
-    if (!issue || issue.status !== 'backlog') continue;
-    const issuePath = join(pmDir, issue.path);
-    if (!existsSync(issuePath)) continue;
-    writeFileSync(issuePath, replaceFrontMatterField(readFileSync(issuePath, 'utf-8'), 'status', 'todo'), 'utf-8');
-  }
+/** @deprecated Legacy sprint promotion — backlog status removed in v2 board-centric model. */
+function promoteSprintIssues(_pmDir: string, _sprint: { issues: Array<{ id: string; path: string }> }, _allIssues: Issue[]): void {
+  // No-op: all issues are created with status 'todo' in v2. Legacy sprint promotion is no longer needed.
 }
 
 /** Update a file's front matter field if the file exists. */

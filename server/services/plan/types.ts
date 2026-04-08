@@ -4,7 +4,7 @@
 /**
  * Plan Types — Project Plan Spec (PPS) data structures
  *
- * These types represent the parsed contents of .pm/ directory files.
+ * These types represent the parsed contents of .mstro/pm/ directory files.
  */
 
 // ============================================================================
@@ -25,7 +25,7 @@ export interface ProjectConfig {
 
 export interface WorkflowStatus {
   status: string;
-  category: 'unstarted' | 'started' | 'completed' | 'cancelled';
+  category: 'ready' | 'unstarted' | 'started' | 'completed' | 'cancelled';
   description: string;
 }
 
@@ -98,7 +98,7 @@ export interface Issue {
   outputFile: string | null;
   // Full markdown body
   body: string;
-  // File path relative to .pm/
+  // File path relative to .mstro/pm/
   path: string;
 }
 

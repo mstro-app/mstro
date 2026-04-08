@@ -79,7 +79,7 @@ function dfs(
  * Compute the set of issues that are ready to work on.
  * An issue is ready if:
  * - It's not an epic
- * - Its status is backlog or todo (not started, done, or cancelled)
+ * - Its status is todo (refined and ready for execution)
  * - All its blocked_by items are done or cancelled
  *
  * If epicScope is provided, only returns issues belonging to that epic.
@@ -90,7 +90,7 @@ export function resolveReadyToWork(issues: Issue[], epicScope?: string, sprintSc
     issueByPath.set(issue.path, issue);
   }
 
-  const readyStatuses = new Set(['backlog', 'todo']);
+  const readyStatuses = new Set(['todo']);
   const doneStatuses = new Set(['done', 'cancelled']);
 
   const priorityOrder: Record<string, number> = { P0: 0, P1: 1, P2: 2, P3: 3 };

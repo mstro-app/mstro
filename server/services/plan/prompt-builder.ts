@@ -15,7 +15,7 @@ export interface CoordinatorPromptOptions {
   issues: Issue[];
   workingDir: string;
   pmDir: string | null;
-  /** Board directory path when executing a board (e.g. /path/.pm/boards/BOARD-001). */
+  /** Board directory path when executing a board (e.g. /path/.mstro/pm/boards/BOARD-001). */
   boardDir: string | null;
   existingDocs: string[];
   resolveOutputPath: (issue: Issue) => string;

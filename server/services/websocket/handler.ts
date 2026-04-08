@@ -15,6 +15,7 @@ import { dirname, join } from 'node:path';
 import type { ImprovisationSessionManager } from '../../cli/improvisation-session-manager.js';
 import { captureException } from '../sentry.js';
 import { AutocompleteService } from './autocomplete.js';
+import { handleDeployMessage } from './deploy-handlers.js';
 import { handleFileExplorerMessage, handleFileMessage } from './file-explorer-handlers.js';
 import { FileUploadHandler } from './file-upload-handler.js';
 import { handleGitMessage } from './git-handlers.js';
@@ -119,7 +120,7 @@ export class WebSocketImproviseHandler implements HandlerContext {
   }
 
   /** Dispatch table mapping message types to domain handlers. Built once, looked up per message. */
-  private static readonly DISPATCH: Record<string, 'session' | 'history' | 'file' | 'terminal' | 'fileExplorer' | 'git' | 'quality' | 'plan' | 'fileUpload'> = {
+  private static readonly DISPATCH: Record<string, 'session' | 'history' | 'file' | 'terminal' | 'fileExplorer' | 'git' | 'quality' | 'plan' | 'fileUpload' | 'deploy'> = {
     // Session
     execute: 'session', cancel: 'session', getHistory: 'session', new: 'session', approve: 'session', reject: 'session',
     // History
@@ -138,6 +139,8 @@ export class WebSocketImproviseHandler implements HandlerContext {
     planInit: 'plan', planGetState: 'plan', planListIssues: 'plan', planGetIssue: 'plan', planGetSprint: 'plan', planGetMilestone: 'plan', planCreateIssue: 'plan', planUpdateIssue: 'plan', planDeleteIssue: 'plan', planScaffold: 'plan', planPrompt: 'plan', planExecute: 'plan', planExecuteEpic: 'plan', planPause: 'plan', planStop: 'plan', planResume: 'plan', planCreateBoard: 'plan', planUpdateBoard: 'plan', planArchiveBoard: 'plan', planGetBoard: 'plan', planGetBoardState: 'plan', planReorderBoards: 'plan', planSetActiveBoard: 'plan', planGetBoardArtifacts: 'plan', planCreateSprint: 'plan', planActivateSprint: 'plan', planCompleteSprint: 'plan', planGetSprintArtifacts: 'plan',
     // File upload
     fileUploadStart: 'fileUpload', fileUploadChunk: 'fileUpload', fileUploadComplete: 'fileUpload', fileUploadCancel: 'fileUpload',
+    // Deploy management + HTTP relay
+    deployCreate: 'deploy', deployStop: 'deploy', deployResume: 'deploy', deployDelete: 'deploy', deployList: 'deploy', deployGetStatus: 'deploy', deployUpdateConfig: 'deploy', deploySetApiKey: 'deploy', deployValidateApiKey: 'deploy', deployHttpRequest: 'deploy',
   };
 
   private async dispatchMessage(ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string, permission?: 'view'): Promise<void> {
@@ -191,6 +194,7 @@ export class WebSocketImproviseHandler implements HandlerContext {
       case 'quality':    return handleQualityMessage(this, ws, msg, tabId, workingDir, permission);
       case 'plan':       return handlePlanMessage(this, ws, msg, tabId, workingDir, permission);
       case 'fileUpload': return this.handleFileUploadMessage(ws, msg, tabId, workingDir);
+      case 'deploy':     return handleDeployMessage(this, ws, msg, tabId, workingDir, permission);
     }
   }
 

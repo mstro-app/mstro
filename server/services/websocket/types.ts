@@ -153,7 +153,22 @@ export interface WebSocketMessage {
     | 'planCreateSprint'
     | 'planActivateSprint'
     | 'planCompleteSprint'
-    | 'planGetSprintArtifacts';
+    | 'planGetSprintArtifacts'
+    // Deploy message types
+    | 'deployCreate'
+    | 'deployStop'
+    | 'deployResume'
+    | 'deployDelete'
+    | 'deployList'
+    | 'deployGetStatus'
+    | 'deployUpdateConfig'
+    | 'deploySetApiKey'
+    | 'deployValidateApiKey'
+    // Deploy HTTP relay message types (server→cli)
+    | 'deployHttpRequest'
+    // Deploy usage/health message types (cli→server)
+    | 'deployUsageReport'
+    | 'deployAiHealthUpdate';
   tabId?: string;
   terminalId?: string;
   // biome-ignore lint/suspicious/noExplicitAny: message envelope carries heterogeneous payloads
@@ -315,7 +330,23 @@ export interface WebSocketResponse {
     | 'planSprintUpdated'
     | 'planSprintCompleted'
     | 'planSprintArtifacts'
-    | 'planReviewProgress';
+    | 'planReviewProgress'
+    // Deploy response types
+    | 'deployCreated'
+    | 'deployStopped'
+    | 'deployResumed'
+    | 'deployDeleted'
+    | 'deployListResult'
+    | 'deployStatusResult'
+    | 'deployConfigUpdated'
+    | 'deployApiKeyStatus'
+    | 'deployError'
+    // Deploy HTTP relay response types (cli→server)
+    | 'deployHttpResponse'
+    | 'deployHttpResponseChunk'
+    | 'deployStatus'
+    | 'deployUsageReportAck'
+    | 'deployAiHealthAck';
   tabId?: string;
   terminalId?: string;
   // biome-ignore lint/suspicious/noExplicitAny: message envelope carries heterogeneous payloads
@@ -625,4 +656,304 @@ export interface WorktreeMergeResult {
   error?: string;
   /** List of conflicting files (if conflicts) */
   conflictFiles?: string[];
+}
+
+// ============================================================================
+// Deploy Types
+// ============================================================================
+
+/**
+ * Deployment status
+ */
+export type DeploymentStatus = 'running' | 'stopped' | 'error' | 'starting' | 'stopping';
+
+/**
+ * Deployment configuration
+ */
+export interface DeployConfig {
+  /** Subdomain for the deployment (e.g. "my-app" -> my-app.mstro.app) */
+  subdomain: string;
+  /** Local port to expose */
+  port: number;
+  /** Whether AI features are enabled for this deployment */
+  aiEnabled: boolean;
+  /** Custom domain if configured */
+  customDomain?: string;
+}
+
+/**
+ * Deployment info returned in responses
+ */
+export interface DeploymentInfo {
+  /** Unique deployment identifier */
+  deploymentId: string;
+  /** Deployment configuration */
+  config: DeployConfig;
+  /** Current deployment status */
+  status: DeploymentStatus;
+  /** Public URL of the deployment */
+  url: string;
+  /** When the deployment was created (ISO string) */
+  createdAt: string;
+  /** When the deployment was last updated (ISO string) */
+  updatedAt: string;
+}
+
+/**
+ * Message data for deployCreate request
+ */
+export interface DeployCreateData {
+  /** Subdomain for the deployment */
+  subdomain: string;
+  /** Local port to expose */
+  port: number;
+  /** Whether AI features are enabled */
+  aiEnabled: boolean;
+}
+
+/**
+ * Message data for deployStop request
+ */
+export interface DeployStopData {
+  /** ID of the deployment to stop */
+  deploymentId: string;
+}
+
+/**
+ * Message data for deployResume request
+ */
+export interface DeployResumeData {
+  /** ID of the deployment to resume */
+  deploymentId: string;
+}
+
+/**
+ * Message data for deployDelete request
+ */
+export interface DeployDeleteData {
+  /** ID of the deployment to delete */
+  deploymentId: string;
+}
+
+/**
+ * Message data for deployGetStatus request
+ */
+export interface DeployGetStatusData {
+  /** ID of the deployment to get status for */
+  deploymentId: string;
+}
+
+/**
+ * Message data for deployUpdateConfig request
+ */
+export interface DeployUpdateConfigData {
+  /** ID of the deployment to update */
+  deploymentId: string;
+  /** Partial config to update */
+  config: Partial<DeployConfig>;
+}
+
+/**
+ * Message data for deploySetApiKey request
+ * Note: API key transits via WSS but is never stored or logged by the server relay
+ */
+export interface DeploySetApiKeyData {
+  /** The API key to set */
+  apiKey: string;
+}
+
+/**
+ * Response data for deployCreated
+ */
+export interface DeployCreatedResponse {
+  /** The created deployment */
+  deployment: DeploymentInfo;
+}
+
+/**
+ * Response data for deployStopped
+ */
+export interface DeployStoppedResponse {
+  /** ID of the stopped deployment */
+  deploymentId: string;
+}
+
+/**
+ * Response data for deployResumed
+ */
+export interface DeployResumedResponse {
+  /** ID of the resumed deployment */
+  deploymentId: string;
+}
+
+/**
+ * Response data for deployDeleted
+ */
+export interface DeployDeletedResponse {
+  /** ID of the deleted deployment */
+  deploymentId: string;
+}
+
+/**
+ * Response data for deployListResult
+ */
+export interface DeployListResultResponse {
+  /** All deployments for this orchestra */
+  deployments: DeploymentInfo[];
+}
+
+/**
+ * Response data for deployStatusResult
+ */
+export interface DeployStatusResultResponse {
+  /** The requested deployment */
+  deployment: DeploymentInfo;
+}
+
+/**
+ * Response data for deployConfigUpdated
+ */
+export interface DeployConfigUpdatedResponse {
+  /** The updated deployment */
+  deployment: DeploymentInfo;
+}
+
+/**
+ * Response data for deployApiKeyStatus
+ * Note: Never includes the full API key — only the last four characters
+ */
+export interface DeployApiKeyStatusResponse {
+  /** Validation status of the API key */
+  status: 'valid' | 'invalid' | 'missing' | 'rate_limited';
+  /** Last four characters of the API key (for display) */
+  lastFour?: string;
+  /** Where the key was detected from */
+  source?: 'env' | 'stored';
+}
+
+/**
+ * Response data for deployError
+ */
+export interface DeployErrorResponse {
+  /** Error message */
+  error: string;
+  /** The deployment ID that caused the error, if applicable */
+  deploymentId?: string;
+}
+
+// ============================================================================
+// Deploy HTTP Relay Types
+// ============================================================================
+
+/**
+ * Message data for deployHttpRequest (server→cli)
+ * Represents an inbound HTTP request to be handled by the CLI
+ */
+export interface DeployHttpRequestData {
+  /** UUID for correlating this request with its response */
+  requestId: string;
+  /** HTTP method (GET, POST, PUT, DELETE, etc.) */
+  method: string;
+  /** Request URL path with query string (e.g. "/api/hello?name=world") */
+  url: string;
+  /** HTTP request headers */
+  headers: Record<string, string>;
+  /** HTTP request body (may be undefined for GET/HEAD) */
+  body?: string;
+  /** ID of the deployment this request is for */
+  deploymentId: string;
+  /** Local port of the developer's server to proxy to */
+  port: number;
+}
+
+/**
+ * Response data for deployHttpResponse (cli→server)
+ * The CLI's response to a proxied HTTP request
+ */
+export interface DeployHttpResponseData {
+  /** UUID matching the original deployHttpRequest */
+  requestId: string;
+  /** HTTP status code */
+  status: number;
+  /** HTTP response headers */
+  headers: Record<string, string>;
+  /** HTTP response body */
+  body?: string;
+}
+
+/**
+ * Response data for deployHttpResponseChunk (cli→server)
+ * A chunk of a large HTTP response streamed over multiple WebSocket messages
+ */
+export interface DeployHttpResponseChunkData {
+  /** UUID matching the original deployHttpRequest */
+  requestId: string;
+  /** Zero-based index of this chunk */
+  chunkIndex: number;
+  /** Total number of chunks (known after reading the full response) */
+  totalChunks: number;
+  /** Base64-encoded chunk data */
+  data: string;
+  /** Whether this is the last chunk */
+  isLast: boolean;
+  /** HTTP status code (sent with first chunk) */
+  status?: number;
+  /** HTTP response headers (sent with first chunk) */
+  headers?: Record<string, string>;
+}
+
+/**
+ * Response data for deployStatus (cli→server)
+ * Status update for a deployment
+ */
+export interface DeployStatusData {
+  /** ID of the deployment */
+  deploymentId: string;
+  /** Current status of the deployment */
+  status: DeploymentStatus;
+}
+
+// ============================================================================
+// Deploy Usage & Health Types
+// ============================================================================
+
+/**
+ * Message data for deployUsageReport (cli→server)
+ * Sent after each AI execution. Contains metadata only — never prompts or responses.
+ */
+export interface DeployUsageReportData {
+  /** ID of the deployment */
+  deploymentId: string;
+  /** End user who triggered the execution */
+  endUserId: string;
+  /** AI capability used */
+  capability: 'headless' | 'pm-board';
+  /** Total tokens consumed (input + output) */
+  tokensUsed: number;
+  /** Model used for execution */
+  model: string;
+  /** Execution duration in milliseconds */
+  durationMs: number;
+  /** Optional board ID if capability was pm-board */
+  boardId?: string;
+}
+
+/**
+ * AI health status values
+ */
+export type DeployAiHealthStatus = 'healthy' | 'invalid_key' | 'no_credits' | 'rate_limited' | 'unknown_error';
+
+/**
+ * Message data for deployAiHealthUpdate (cli→server)
+ * Sent when the CLI detects an API key or AI service issue.
+ */
+export interface DeployAiHealthUpdateData {
+  /** ID of the deployment */
+  deploymentId: string;
+  /** Current AI health status */
+  status: DeployAiHealthStatus;
+  /** Human-readable error message */
+  message: string;
+  /** Whether AI features are currently disabled locally */
+  aiDisabled: boolean;
 }

@@ -2,7 +2,7 @@
 // Licensed under the MIT License. See LICENSE file for details.
 
 /**
- * Plan Watcher — Watches .pm/ (or legacy .plan/) directory for changes and broadcasts updates.
+ * Plan Watcher — Watches .mstro/pm/ directory for changes and broadcasts updates.
  *
  * Uses fs.watch with debouncing to batch rapid changes.
  */

@@ -111,27 +111,36 @@ function buildStateMarkdown(
 
 /**
  * Derive epic status from its children's actual statuses.
- * All children done/cancelled → done (auto-complete the epic).
+ * - All children done/cancelled → done
+ * - Any child in_progress/in_review → in_progress
+ * - Otherwise → null (no change)
  */
-function deriveEpicDone(epic: Issue, issueByPath: Map<string, Issue>): boolean {
-  if (epic.children.length === 0) return false;
-  if (epic.status === 'done' || epic.status === 'cancelled') return false;
+function deriveEpicStatus(epic: Issue, issueByPath: Map<string, Issue>): string | null {
+  if (epic.children.length === 0) return null;
+  if (epic.status === 'done' || epic.status === 'cancelled') return null;
 
-  return epic.children.every(childPath => {
-    const child = issueByPath.get(childPath);
-    return child && (child.status === 'done' || child.status === 'cancelled');
-  });
+  const childStatuses = epic.children.map(cp => issueByPath.get(cp)?.status).filter(Boolean) as string[];
+  if (childStatuses.length === 0) return null;
+
+  const allFinished = childStatuses.every(s => s === 'done' || s === 'cancelled');
+  if (allFinished) return 'done';
+
+  const anyStarted = childStatuses.some(s => s === 'in_progress' || s === 'in_review');
+  if (anyStarted && epic.status !== 'in_progress') return 'in_progress';
+
+  return null;
 }
 
 function reconcileEpicStatuses(pmDir: string, issues: Issue[], issueByPath: Map<string, Issue>): void {
   const epics = issues.filter(i => i.type === 'epic');
   for (const epic of epics) {
-    if (!deriveEpicDone(epic, issueByPath)) continue;
+    const derived = deriveEpicStatus(epic, issueByPath);
+    if (!derived) continue;
 
     const epicPath = join(pmDir, epic.path);
     try {
       let content = readFileSync(epicPath, 'utf-8');
-      content = replaceFrontMatterField(content, 'status', 'done');
+      content = replaceFrontMatterField(content, 'status', derived);
       writeFileSync(epicPath, content, 'utf-8');
     } catch {
       // Epic file may be missing or unwritable
@@ -206,7 +215,8 @@ export function tryCompleteParentEpic(workingDir: string, updatedIssue: Issue): 
   if (!epic) return null;
 
   const issueByPath = new Map(issues.map(i => [i.path, i]));
-  if (!deriveEpicDone(epic, issueByPath)) return null;
+  const derived = deriveEpicStatus(epic, issueByPath);
+  if (derived !== 'done') return null;
 
   const epicFullPath = join(pmDir, epic.path);
   try {

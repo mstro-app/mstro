@@ -19,6 +19,13 @@
  * │ - Defaults to ALLOW - user is actively working with Claude │
  * └─────────────────────────────────────────────────────────────┘
  *
+ * SECURITY BOUNDARY: Layer 1 is a performance optimization, NOT a
+ * security boundary. Haiku (Layer 2) is the security boundary.
+ * Layer 1 patterns are public (open-source repo) and should be
+ * treated as a fast-path filter only. Never expand SAFE_OPERATIONS
+ * to include operations with side effects beyond the user's
+ * working directory.
+ *
  * Haiku AI analysis lives in bouncer-haiku.ts.
  * Pattern definitions live in security-patterns.ts.
  * Analysis logic lives in security-analysis.ts.
@@ -168,7 +175,8 @@ async function runHaikuAnalysis(
   startTime: number,
   fin: (d: BouncerDecision, layer: string, opts?: Parameters<typeof finalizeDecision>[6]) => BouncerDecision,
 ): Promise<BouncerDecision> {
-  if (process.env.BOUNCER_USE_AI === 'false' || request.context?._skipAI === true) {
+  const aiDisabledByEnv = process.env.BOUNCER_USE_AI === 'false' && process.env.NODE_ENV !== 'production';
+  if (aiDisabledByEnv || request.context?._skipAI === true) {
     console.error('[Bouncer] AI analysis disabled');
     return fin({ decision: 'warn_allow', confidence: 60, reasoning: 'Operation requires review but AI analysis is disabled. Proceeding with caution.', threatLevel: 'medium' }, 'ai-disabled', { skipCache: true, skipAnalytics: true });
   }

@@ -46,3 +46,26 @@ export function setFrontMatterField(filePath: string, field: string, value: stri
   const updated = replaceFrontMatterField(content, field, value);
   writeFileSync(filePath, updated, 'utf-8');
 }
+
+/**
+ * Check off all unchecked acceptance criteria checkboxes in a markdown string.
+ * Only modifies checkboxes within the "## Acceptance Criteria" section.
+ */
+export function checkAllAcceptanceCriteria(content: string): string {
+  const sectionStart = content.indexOf('## Acceptance Criteria');
+  if (sectionStart === -1) return content;
+
+  const afterHeader = content.indexOf('\n', sectionStart);
+  if (afterHeader === -1) return content;
+
+  const nextSection = content.slice(afterHeader).search(/\n## /);
+  const sectionEnd = nextSection !== -1 ? afterHeader + nextSection : content.length;
+
+  const before = content.slice(0, afterHeader);
+  const section = content.slice(afterHeader, sectionEnd);
+  const after = content.slice(sectionEnd);
+
+  const updatedSection = section.replace(/^([-*]\s+)\[ \]/gm, '$1[x]');
+
+  return before + updatedSection + after;
+}

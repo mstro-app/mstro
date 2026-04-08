@@ -6,9 +6,12 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import * as Sentry from '@sentry/node'
 
-// Hardcoded DSN for production - this is safe to expose (can only send, not read)
-// Override with SENTRY_DSN env var for development/testing
-const SENTRY_DSN = process.env.SENTRY_DSN || 'https://2a8d2493e3ee5a7beec30f4518a5e24c@o4510824844820480.ingest.us.sentry.io/4510824923594752'
+// Sentry DSN lives on the platform server. The CLI sends envelopes
+// to the server's /sentry-tunnel endpoint which proxies to Sentry.
+// A placeholder DSN is needed so the Sentry SDK initializes its
+// transport — the real DSN is injected server-side before forwarding.
+const SENTRY_TUNNEL_DSN = 'https://tunnel@sentry.io/0'
+const PLATFORM_URL = process.env.PLATFORM_URL || 'https://api.mstro.app'
 
 const CONFIG_FILE = join(homedir(), '.mstro', 'config.json')
 
@@ -51,7 +54,8 @@ export function initSentry(): void {
   initialized = true
 
   Sentry.init({
-    dsn: SENTRY_DSN,
+    dsn: SENTRY_TUNNEL_DSN,
+    tunnel: `${PLATFORM_URL}/sentry-tunnel`,
     environment: process.env.NODE_ENV || 'development',
     release: `mstro-cli@${process.env.npm_package_version || '0.0.0'}`,
     tracesSampleRate: 0.1,

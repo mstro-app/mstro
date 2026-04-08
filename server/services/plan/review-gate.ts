@@ -13,6 +13,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { join } from 'node:path';
 import { runWithFileLogger } from '../../cli/headless/headless-logger.js';
 import { HeadlessRunner } from '../../cli/headless/index.js';
+import { loadAgentPrompt } from './agent-loader.js';
 import type { Issue, ReviewCheck, ReviewResult } from './types.js';
 
 /** Max review attempts per issue per sprint before giving up */
@@ -33,6 +34,10 @@ export interface ReviewIssueOptions {
   logDir?: string;
   /** Custom board-level review criteria — replaces default review instructions when set */
   reviewCriteria?: string;
+  /** Board directory for agent prompt override resolution (e.g., .mstro/pm/boards/BOARD-001) */
+  boardDir?: string | null;
+  /** Extra environment variables for spawned Claude processes (e.g. API keys) */
+  extraEnv?: Record<string, string>;
 }
 
 /**
@@ -40,12 +45,12 @@ export interface ReviewIssueOptions {
  * Returns auto-pass on infrastructure failures to avoid blocking execution.
  */
 export async function reviewIssue(options: ReviewIssueOptions): Promise<ReviewResult> {
-  const { workingDir, issue, pmDir, outputPath, onOutput, logDir, reviewCriteria } = options;
+  const { workingDir, issue, pmDir, outputPath, onOutput, logDir, reviewCriteria, boardDir } = options;
   const isCodeTask = issue.filesToModify.length > 0;
   const issueType: ReviewResult['issueType'] = isCodeTask ? 'code' : 'non-code';
 
   try {
-    const prompt = buildReviewPrompt(issue, pmDir, outputPath, isCodeTask, reviewCriteria);
+    const prompt = buildReviewPrompt(issue, pmDir, outputPath, isCodeTask, reviewCriteria, boardDir);
 
     const runner = new HeadlessRunner({
       workingDir,
@@ -55,6 +60,7 @@ export async function reviewIssue(options: ReviewIssueOptions): Promise<ReviewRe
       stallHardCapMs: REVIEW_STALL_HARD_CAP_MS,
       verbose: true,
       outputCallback: onOutput ? (text: string) => onOutput(`Review: ${text}`) : undefined,
+      extraEnv: options.extraEnv,
     });
 
     const result = await runWithFileLogger('pm-review', () => runner.run(), logDir);
@@ -175,74 +181,139 @@ export function autoPassResult(issueId: string, issueType: ReviewResult['issueTy
 
 // ── Private helpers ─────────────────────────────────────────
 
-function buildReviewPrompt(issue: Issue, pmDir: string, outputPath: string, isCodeTask: boolean, reviewCriteria?: string): string {
+function buildReviewPrompt(
+  issue: Issue,
+  pmDir: string,
+  outputPath: string,
+  isCodeTask: boolean,
+  reviewCriteria?: string,
+  boardDir?: string | null,
+): string {
   const criteria = issue.acceptanceCriteria
     .map(c => `- [${c.checked ? 'x' : ' '}] ${c.text}`)
     .join('\n');
+  const criteriaStr = criteria || 'No specific criteria defined.';
+  const filesModified = issue.filesToModify.map(f => `- ${f}`).join('\n');
+  const issueSpecPath = join(pmDir, issue.path);
 
-  // When custom review criteria are set, use a generic review prompt
-  // that applies the user's criteria instead of assuming code review.
+  // When custom review criteria are set, use the review-custom agent.
   if (reviewCriteria) {
-    return `You are a reviewer. Review the work done for issue ${issue.id}: ${issue.title}.
-${isCodeTask ? `\n## Files Modified\n${issue.filesToModify.map(f => `- ${f}`).join('\n')}` : `\n## Output File\n${outputPath}\n\n## Issue Spec\n${join(pmDir, issue.path)}`}
+    const contextSection = isCodeTask
+      ? `\n## Files Modified\n${filesModified}`
+      : `\n## Output File\n${outputPath}\n\n## Issue Spec\n${issueSpecPath}`;
+    const readInstruction = isCodeTask
+      ? 'Read each modified file listed above'
+      : 'Read the output file and issue spec at the paths above';
 
-## Acceptance Criteria
-${criteria || 'No specific criteria defined.'}
-
-## Review Criteria
-${reviewCriteria}
-
-## Instructions
-1. ${isCodeTask ? 'Read each modified file listed above' : 'Read the output file and issue spec at the paths above'}
-2. Check if all acceptance criteria are met
-3. Evaluate against the review criteria above
-
-Output EXACTLY one JSON object on its own line (no markdown fencing):
-{"passed": true, "checks": [{"name": "criteria_met", "passed": true, "details": "..."}]}
-
-Include checks for: criteria_met, review_criteria.`;
+    return loadAgentPrompt('review-custom', {
+      issue_id: issue.id,
+      issue_title: issue.title,
+      context_section: contextSection,
+      acceptance_criteria: criteriaStr,
+      review_criteria: reviewCriteria,
+      read_instruction: readInstruction,
+    }, boardDir) ?? buildCustomFallback(issue, contextSection, criteriaStr, reviewCriteria, readInstruction);
   }
 
   if (isCodeTask) {
-    return `You are a code reviewer. Review the work done for issue ${issue.id}: ${issue.title}.
+    return loadAgentPrompt('review-code', {
+      issue_id: issue.id,
+      issue_title: issue.title,
+      files_modified: filesModified,
+      acceptance_criteria: criteriaStr,
+      output_path: outputPath,
+    }, boardDir) ?? buildCodeFallback(issue, filesModified, criteriaStr, outputPath);
+  }
+
+  return loadAgentPrompt('review-quality', {
+    issue_id: issue.id,
+    issue_title: issue.title,
+    output_path: outputPath,
+    issue_spec_path: issueSpecPath,
+    acceptance_criteria: criteriaStr,
+  }, boardDir) ?? buildQualityFallback(issue, outputPath, issueSpecPath, criteriaStr);
+}
+
+// ── Hardcoded fallbacks (used when agent files are missing) ──────────
+
+function buildCodeFallback(issue: Issue, filesModified: string, criteria: string, outputPath: string): string {
+  return `You are a reviewer. Review the work done for issue ${issue.id}: ${issue.title}.
 
 ## Files Modified
-${issue.filesToModify.map(f => `- ${f}`).join('\n')}
+${filesModified}
 
 ## Acceptance Criteria
-${criteria || 'No specific criteria defined.'}
+${criteria}
 
 ## Instructions
 1. Read each modified file listed above
-2. Check if all acceptance criteria are met by the code changes
-3. Look for obvious bugs, security vulnerabilities, or code quality issues
+2. Check if all acceptance criteria are met by the changes
+3. Evaluate the quality of the changes:
+   - For source code files: look for obvious bugs, security vulnerabilities, or code quality issues
+   - For content files (markdown, docs, config, copy): check for accuracy, completeness, and appropriate structure
 4. Check if the output artifact exists at: ${outputPath}
 
 Output EXACTLY one JSON object on its own line (no markdown fencing):
 {"passed": true, "checks": [{"name": "criteria_met", "passed": true, "details": "..."}]}
 
 Include checks for: criteria_met, code_quality, no_obvious_bugs.`;
-  }
+}
 
+function buildQualityFallback(issue: Issue, outputPath: string, issueSpecPath: string, criteria: string): string {
   return `You are a quality reviewer. Review the work done for issue ${issue.id}: ${issue.title}.
 
 ## Output File
 ${outputPath}
 
 ## Issue Spec
-${join(pmDir, issue.path)}
+${issueSpecPath}
 
 ## Acceptance Criteria
-${criteria || 'No specific criteria defined.'}
+${criteria}
 
 ## Instructions
 1. Read the output file at the path above
-2. Read the full issue spec
-3. Check if all acceptance criteria are met
-4. Check for completeness and quality of the output
+2. Read the full issue spec to understand the original requirements and intent
+3. Evaluate the output against ALL of the following dimensions:
+
+### Acceptance Criteria
+- Are all acceptance criteria met? Check each one individually.
+
+### Content Quality
+- Is the content accurate, well-reasoned, and free of factual errors?
+- Is it written clearly with appropriate structure and organization?
+- Does it have sufficient depth and detail for its purpose?
+- Is the tone and style appropriate for the intended audience?
+
+### Completeness
+- Does the output fully address what was requested in the issue spec?
+- Are there obvious gaps, missing sections, or incomplete thoughts?
+- If the issue requested specific deliverables (e.g., a plan, analysis, document), are all deliverables present?
 
 Output EXACTLY one JSON object on its own line (no markdown fencing):
 {"passed": true, "checks": [{"name": "criteria_met", "passed": true, "details": "..."}]}
 
 Include checks for: criteria_met, output_quality, completeness.`;
+}
+
+function buildCustomFallback(issue: Issue, contextSection: string, criteria: string, reviewCriteria: string, readInstruction: string): string {
+  return `You are a reviewer. Review the work done for issue ${issue.id}: ${issue.title}.
+${contextSection}
+
+## Acceptance Criteria
+${criteria}
+
+## Review Criteria
+${reviewCriteria}
+
+## Instructions
+1. ${readInstruction}
+2. Check if all acceptance criteria are met — evaluate each criterion individually
+3. Evaluate thoroughly against the review criteria above
+4. Consider the overall quality of the work: does it fully address the issue's intent, is it well-structured, and is it ready to ship?
+
+Output EXACTLY one JSON object on its own line (no markdown fencing):
+{"passed": true, "checks": [{"name": "criteria_met", "passed": true, "details": "..."}]}
+
+Include checks for: criteria_met, review_criteria.`;
 }

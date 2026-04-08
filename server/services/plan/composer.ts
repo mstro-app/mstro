@@ -5,7 +5,7 @@
  * Plan Composer — Handles natural language prompts for PPS creation/editing.
  *
  * When a planPrompt message arrives, this builds a context-enriched prompt
- * against the .pm/ (or legacy .plan/) directory and spawns a scoped
+ * against the .mstro/pm/ directory and spawns a scoped
  * HeadlessRunner session to execute it.
  */
 

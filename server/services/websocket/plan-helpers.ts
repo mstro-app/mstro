@@ -13,7 +13,7 @@ import type { WSContext } from './types.js';
 export const watcherCache = new Map<string, PlanWatcher>();
 export const executorCache = new Map<string, PlanExecutor>();
 
-/** Validate that a user-supplied path resolves within the .pm/ (or legacy .plan/) directory. */
+/** Validate that a user-supplied path resolves within the .mstro/pm/ directory. */
 export function resolvePlanPath(workingDir: string, relativePath: string): string | null {
   const pmDir = resolvePmDir(workingDir);
   if (!pmDir) return null;
@@ -52,7 +52,7 @@ export function buildIssueMarkdown(
 id: ${id}
 title: "${title.replace(/"/g, '\\"')}"
 type: ${type}
-status: backlog
+status: todo
 priority: ${priority}
 estimate: null
 labels: ${labelsYaml}
@@ -109,8 +109,7 @@ labels: []
 ## Workflows
 | Status | Category | Description |
 |---|---|---|
-| backlog | unstarted | Accepted, not yet scheduled |
-| todo | unstarted | Scheduled for current sprint |
+| todo | ready | Refined and ready for agent execution |
 | in_progress | started | Actively being worked on |
 | in_review | started | PR open, awaiting review |
 | done | completed | Merged and verified |

@@ -27,6 +27,7 @@ import {
 import { createPlatformRelayContext, ensureClaudeSettings, setTerminalTitle, wrapWebSocket } from './server-setup.js'
 import { AnalyticsEvents, initAnalytics, shutdownAnalytics, trackEvent } from './services/analytics.js'
 import { AuthService } from './services/auth.js'
+import { createAiBrokerRoutes, setDeployHealthUpdateListener, setDeployUsageReportListener } from './services/deploy/ai-broker.js'
 import { FileService } from './services/files.js'
 import { InstanceRegistry, type MstroInstance } from './services/instances.js'
 import { PlatformConnection } from './services/platform.js'
@@ -81,7 +82,7 @@ app.use('*', cors({
 app.use('*', logger())
 
 const authMiddleware = async (c: Context, next: Next) => {
-  const publicPaths = ['/health', '/api/config']
+  const publicPaths = ['/health', '/api/config', '/api/deploy/ai']
   if (publicPaths.some(path => c.req.path.startsWith(path))) {
     return next()
   }
@@ -104,6 +105,7 @@ app.route('/api/shutdown', createShutdownRoute(instanceRegistry))
 app.route('/api/improvise', createImproviseRoutes(WORKING_DIR))
 app.route('/api/files', createFileRoutes(fileService))
 app.route('/api/notifications', createNotificationRoutes(WORKING_DIR))
+app.route('/api/deploy/ai', createAiBrokerRoutes())
 
 app.post('/api/reload-pty', async (c) => {
   const success = await reloadPty()
@@ -192,6 +194,12 @@ async function startServer() {
       console.log(`Connected: https://mstro.app`)
       wsHandler.setUsageReporter((report) => {
         platformConnection.send({ type: 'reportUsage', data: report })
+      })
+      setDeployUsageReportListener((report) => {
+        platformConnection.send({ type: 'deployUsageReport', data: report })
+      })
+      setDeployHealthUpdateListener((update) => {
+        platformConnection.send({ type: 'deployAiHealthUpdate', data: update })
       })
     },
     onDisconnected: () => {

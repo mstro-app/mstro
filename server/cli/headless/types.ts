@@ -123,6 +123,8 @@ export interface HeadlessConfig {
   extraEnv?: Record<string, string>;
   /** Tools to disallow in the spawned Claude session (passed as --disallowedTools) */
   disallowedTools?: string[];
+  /** Enable deploy-mode patterns in the bouncer (stricter rules for end-user-driven sessions) */
+  deployMode?: boolean;
 }
 
 export interface SessionState {
@@ -209,7 +211,7 @@ export interface ExecutionResult {
 }
 
 /** Resolved config with all defaults applied */
-export type ResolvedHeadlessConfig = Omit<Required<HeadlessConfig>, 'outputCallback' | 'thinkingCallback' | 'toolUseCallback' | 'tokenUsageCallback' | 'continueSession' | 'claudeSessionId' | 'imageAttachments' | 'model' | 'toolTimeoutProfiles' | 'onToolTimeout' | 'extraEnv' | 'disallowedTools'> & {
+export type ResolvedHeadlessConfig = Omit<Required<HeadlessConfig>, 'outputCallback' | 'thinkingCallback' | 'toolUseCallback' | 'tokenUsageCallback' | 'continueSession' | 'claudeSessionId' | 'imageAttachments' | 'model' | 'toolTimeoutProfiles' | 'onToolTimeout' | 'extraEnv' | 'disallowedTools' | 'deployMode'> & {
   outputCallback?: (text: string) => void;
   thinkingCallback?: (text: string) => void;
   toolUseCallback?: (event: ToolUseEvent) => void;
@@ -222,6 +224,7 @@ export type ResolvedHeadlessConfig = Omit<Required<HeadlessConfig>, 'outputCallb
   onToolTimeout?: (checkpoint: ExecutionCheckpoint) => void;
   extraEnv?: Record<string, string>;
   disallowedTools?: string[];
+  deployMode?: boolean;
 };
 
 

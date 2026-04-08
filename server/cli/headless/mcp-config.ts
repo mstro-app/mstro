@@ -67,7 +67,7 @@ function truncatePrompt(prompt: string): string {
  *   AI layer can distinguish user-requested operations from prompt injection.
  * @param sessionId — Unique session identifier for per-session config isolation.
  */
-export function generateMcpConfig(workingDir: string, verbose: boolean = false, userPrompt?: string, sessionId?: string): string | null {
+export function generateMcpConfig(workingDir: string, verbose: boolean = false, userPrompt?: string, sessionId?: string, deployMode?: boolean): string | null {
   try {
     if (!existsSync(MCP_SERVER_PATH)) {
       herror(`[${new Date().toISOString()}] MCP server not found at ${MCP_SERVER_PATH}`);
@@ -78,6 +78,9 @@ export function generateMcpConfig(workingDir: string, verbose: boolean = false, 
       BOUNCER_USE_AI: 'true',
       MSTRO_ROOT: MSTRO_ROOT,
     };
+    if (deployMode) {
+      bouncerEnv.BOUNCER_DEPLOY_MODE = 'true';
+    }
     if (userPrompt) {
       bouncerEnv.BOUNCER_USER_PROMPT = userPrompt.length > MAX_USER_PROMPT_LENGTH
         ? truncatePrompt(userPrompt)

@@ -15,7 +15,7 @@ export interface IssuePromptOptions {
   issue: Issue;
   workingDir: string;
   pmDir: string | null;
-  /** Board directory path (e.g. /path/.pm/boards/BOARD-001). */
+  /** Board directory path (e.g. /path/.mstro/pm/boards/BOARD-001). */
   boardDir: string | null;
   existingDocs: string[];
   outputPath: string;
@@ -71,7 +71,7 @@ ${files}${predecessorSection}
 1. Read the full issue spec at ${pmDir ? join(pmDir, issue.path) : issue.path}
 2. Execute all acceptance criteria listed above
 3. Write your output and results to **${outputPath}** — this is the handoff artifact for downstream issues
-4. After writing output, update the issue front matter: change \`status: in_progress\` to \`status: done\`
+4. After writing output, update the issue front matter: change \`status: in_progress\` to \`status: in_review\`
 
 ## Rules
 

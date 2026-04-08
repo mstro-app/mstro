@@ -103,6 +103,70 @@ The PM board turns a single prompt into a managed project:
 
 Configurable parallel execution (max concurrent agents), custom review criteria per board, and board-scoped artifacts (progress logs, output files, review results).
 
+### Custom Review Agents
+
+When a task moves to "In Review", an AI review agent checks the work. There are three built-in agents:
+
+| Agent | When used | What it checks |
+|-------|-----------|----------------|
+| `review-code` | Task modifies source files | Acceptance criteria, bugs, security, code quality |
+| `review-quality` | Task produces non-code output | Acceptance criteria, content accuracy, completeness, structure |
+| `review-custom` | Board has custom review criteria | Acceptance criteria + your custom criteria |
+
+**Quick customization.** Click the gear icon on the "In Review" column header to set review criteria for the board. Works for code, writing, research, design, whatever.
+
+**Full prompt control.** Drop a markdown agent file into your board's `agents/` directory to replace the default review prompt entirely:
+
+```
+.mstro/pm/boards/BOARD-001/
+  board.md
+  agents/
+    review-code.md      # Override code review for this board
+    review-quality.md   # Override non-code review for this board
+    review-custom.md    # Override custom criteria review for this board
+```
+
+Agent files are markdown with YAML frontmatter and `{{variable}}` placeholders:
+
+```markdown
+---
+name: review-code
+description: Custom code review for my project
+type: review
+variables: [issue_id, issue_title, files_modified, acceptance_criteria, output_path]
+checks: [criteria_met, code_quality, no_obvious_bugs]
+---
+
+You are a reviewer for {{issue_title}}.
+
+## Files Modified
+{{files_modified}}
+
+## Acceptance Criteria
+{{acceptance_criteria}}
+
+(your custom instructions here)
+
+Output EXACTLY one JSON object on its own line (no markdown fencing):
+{"passed": true, "checks": [{"name": "criteria_met", "passed": true, "details": "..."}]}
+```
+
+Variables you can use:
+
+| Variable | Available in | Description |
+|----------|-------------|-------------|
+| `issue_id` | All agents | Issue ID (e.g., ISS-001) |
+| `issue_title` | All agents | Issue title |
+| `acceptance_criteria` | All agents | Formatted acceptance criteria checklist |
+| `files_modified` | review-code | List of modified file paths |
+| `output_path` | review-code, review-quality | Path to output artifact |
+| `issue_spec_path` | review-quality | Path to the issue spec file |
+| `context_section` | review-custom | Files or output section (depends on task type) |
+| `review_criteria` | review-custom | Board-level review criteria text |
+| `read_instruction` | review-custom | Read instruction (changes based on task type) |
+
+Resolution order: board agent file > system default > hardcoded fallback. If there's no board override, the built-in agents run.
+
 ## Quality
 
 Quality analysis runs across your codebase:
@@ -166,6 +230,8 @@ server/
     plan/executor.ts                # PM board execution engine
     plan/composer.ts                # AI prompt composition for boards
     plan/review-gate.ts             # Quality gates for board execution
+    plan/agent-loader.ts            # Review agent prompt loader (layered resolution)
+    plan/agents/                    # System default review agent prompts (markdown)
     terminal/pty-manager.ts         # PTY session management
     platform.ts                     # WebSocket connection to platform server
   cli/

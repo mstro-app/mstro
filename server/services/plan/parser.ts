@@ -2,7 +2,7 @@
 // Licensed under the MIT License. See LICENSE file for details.
 
 /**
- * PPS Parser — Public API for reading .pm/ (or legacy .plan/) directories.
+ * PPS Parser — Public API for reading .mstro/pm/ directories.
  *
  * Entity parsing lives in parser-core.ts; migration in parser-migration.ts.
  */
@@ -37,10 +37,6 @@ export function isBoardCentricFormat(pmDir: string): boolean {
 export function resolvePmDir(workingDir: string): string | null {
   const mstroPmDir = join(workingDir, '.mstro', 'pm');
   if (existsSync(mstroPmDir)) return mstroPmDir;
-  const legacyPmDir = join(workingDir, '.pm');
-  if (existsSync(legacyPmDir)) return legacyPmDir;
-  const legacyPlanDir = join(workingDir, '.plan');
-  if (existsSync(legacyPlanDir)) return legacyPlanDir;
   return null;
 }
 
@@ -125,6 +121,9 @@ export function parseBoardDirectory(pmDir: string, boardId: string): BoardFullSt
     issue.blockedBy = issue.blockedBy.map(bp => bp.startsWith('boards/') ? bp : `${boardPrefix}${bp}`);
     issue.blocks = issue.blocks.map(bp => bp.startsWith('boards/') ? bp : `${boardPrefix}${bp}`);
     if (issue.epic && !issue.epic.startsWith('boards/')) issue.epic = `${boardPrefix}${issue.epic}`;
+    if (issue.children.length > 0) {
+      issue.children = issue.children.map(cp => cp.startsWith('boards/') ? cp : `${boardPrefix}${cp}`);
+    }
     return issue;
   });
 

@@ -62,6 +62,8 @@ export interface IssueRunnerConfig {
   stallMaxExtensions: number;
   /** Callback for streaming output to executor event bus */
   outputCallback?: (text: string) => void;
+  /** Extra environment variables for spawned Claude processes (e.g. API keys) */
+  extraEnv?: Record<string, string>;
 }
 
 /**
@@ -108,6 +110,7 @@ export async function runIssueWithRetry(config: IssueRunnerConfig): Promise<Sess
       onToolTimeout: (cp: ExecutionCheckpoint) => {
         state.checkpoint = cp;
       },
+      extraEnv: config.extraEnv,
     });
 
     result = await runner.run();

@@ -13,6 +13,12 @@
  * - Sensitive operations (system paths, credentials) get AI review with context
  * - The question is: "Does this operation make sense given user intent?"
  *
+ * SECURITY NOTE: These patterns are public (open-source repo). Pattern
+ * visibility is intentional and follows industry practice (OWASP CRS,
+ * Snort, ModSecurity all publish rules publicly). The Haiku AI layer
+ * in bouncer-integration.ts is the actual security boundary — these
+ * patterns are a performance optimization for the fast path only.
+ *
  * Analysis logic (requiresAIReview, classifyRisk) lives in security-analysis.ts
  * and is re-exported here for backward compatibility.
  */
@@ -34,7 +40,7 @@ export interface SecurityPattern {
 export const SENSITIVE_PATHS: SecurityPattern[] = [
   // System directories - might be legitimate (e.g., user asked to configure something)
   { pattern: /^(Write|Edit):\s*\/etc\//i, reason: 'System configuration - verify user intent' },
-  { pattern: /^(Write|Edit):\s*\/(bin|sbin|usr\/bin|usr\/sbin)\//i, reason: 'System binaries - verify user intent' },
+  { pattern: /^(Write|Edit):\s*\/(bin|sbin|usr\/bin|usr\/sbin|usr\/local\/bin|usr\/local\/sbin)\//i, reason: 'System binaries - verify user intent' },
   { pattern: /^(Write|Edit):\s*\/boot\//i, reason: 'Boot directory - verify user intent' },
   { pattern: /^(Write|Edit):\s*\/root\//i, reason: 'Root home - verify user intent' },
   { pattern: /^(Write|Edit):\s*\/System\//i, reason: 'macOS system - verify user intent' },
@@ -63,7 +69,7 @@ export const SENSITIVE_PATHS: SecurityPattern[] = [
  */
 export const CRITICAL_THREATS: SecurityPattern[] = [
   {
-    pattern: /rm\s+-rf\s+(\/|~)($|\s)/i,
+    pattern: /rm\s+-rf\s+(\/|~)($|\s|;|&&|\|\|)/i,
     reason: 'Deleting root (/) or home (~) directory is never a legitimate dev task'
   },
   {
@@ -237,6 +243,51 @@ export const NEEDS_AI_REVIEW: SecurityPattern[] = [
 
   // MCP server manipulation
   { pattern: /\bclaude\b.*\bmcp\b.*\badd\b/i, reason: 'Adding MCP server - verify source is trusted' },
+];
+
+/**
+ * Deploy-specific patterns — additional restrictions for board/headless executions
+ * triggered by end-user prompts (untrusted input from deployed app users).
+ *
+ * These catch operations that are unusual in an automated board execution context
+ * and should be routed to AI review. They supplement NEEDS_AI_REVIEW above.
+ */
+export const DEPLOY_PATTERNS: SecurityPattern[] = [
+  // Credential access from deploy context is suspicious
+  {
+    pattern: /\b(cat|head|tail|less|more)\b.*\.(env|pem|key|crt|p12|pfx|jks)\b/i,
+    reason: 'Deploy execution reading credential/certificate files — verify intent'
+  },
+
+  // Git push from deploy context — end-user code should not push upstream
+  {
+    pattern: /\bgit\b.*\bpush\b/i,
+    reason: 'Deploy execution attempting git push — verify this is intended'
+  },
+
+  // Network listeners — deploy executions should not open ports
+  {
+    pattern: /\b(nc|netcat|ncat|socat)\b.*(\blisten\b|\s-l\b)/i,
+    reason: 'Deploy execution opening network listener — potential backdoor'
+  },
+
+  // Process manipulation from deploy context
+  {
+    pattern: /\b(kill|killall|pkill)\b/i,
+    reason: 'Deploy execution attempting process termination — verify intent'
+  },
+
+  // SSH/SCP from deploy context
+  {
+    pattern: /\b(ssh|scp|sftp)\b.*@/i,
+    reason: 'Deploy execution initiating SSH/SCP connection — verify intent'
+  },
+
+  // Cron/systemd manipulation
+  {
+    pattern: /\b(crontab|systemctl|launchctl)\b/i,
+    reason: 'Deploy execution manipulating scheduled tasks — verify intent'
+  },
 ];
 
 // ── Utility functions ─────────────────────────────────────────

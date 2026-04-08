@@ -23,7 +23,7 @@ export function slugify(text: string): string {
 
 /**
  * Resolve the canonical output path for an issue.
- * Uses sprint sandbox when available, otherwise global .pm/out/.
+ * Uses sprint sandbox when available, otherwise global .mstro/pm/out/.
  */
 export function resolveOutputPath(issue: Issue, workingDir: string, sprintSandboxDir: string | null): string {
   if (sprintSandboxDir) {
@@ -61,7 +61,7 @@ export interface PublishOutputsCallbacks {
 }
 
 /**
- * Copy confirmed-done outputs from .pm/out/ to user-specified output_file paths.
+ * Copy confirmed-done outputs from .mstro/pm/out/ to user-specified output_file paths.
  * Only copies for issues that completed successfully and have output_file set.
  */
 export function publishOutputs(

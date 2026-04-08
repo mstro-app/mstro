@@ -10,6 +10,7 @@
 
 import {
   CRITICAL_THREATS,
+  DEPLOY_PATTERNS,
   matchesPattern,
   NEEDS_AI_REVIEW,
   normalizeOperation,
@@ -62,6 +63,17 @@ function isSafeExpansionUse(operation: string): boolean {
   return safePrefix.test(cmd);
 }
 
+// ── Deploy Mode Detection ────────────────────────────────────
+
+/**
+ * Check if the bouncer is running in deploy mode.
+ * Set by the MCP config when spawned for deploy (board/headless) executions.
+ * Deploy mode activates additional security patterns for end-user-driven sessions.
+ */
+export function isDeployMode(): boolean {
+  return process.env.BOUNCER_DEPLOY_MODE === 'true';
+}
+
 // ── Public API ────────────────────────────────────────────────
 
 /**
@@ -101,6 +113,13 @@ export function requiresAIReview(operation: string): boolean {
   // UNLESS the command is clearly safe (expansion is just an argument to a
   // known-safe prefix like "echo ${HOME}").
   if (/^Bash:/i.test(op) && containsAnyExpansion(op) && !isSafeExpansionUse(op)) {
+    return true;
+  }
+
+  // Deploy-specific patterns: when running in deploy mode (end-user driven),
+  // additional operations are flagged for AI review. These take precedence
+  // over safe operations because deploy context has stricter requirements.
+  if (isDeployMode() && matchesPattern(op, DEPLOY_PATTERNS)) {
     return true;
   }
 

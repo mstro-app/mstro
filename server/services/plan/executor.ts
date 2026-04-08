@@ -22,7 +22,7 @@ import { join } from 'node:path';
 import { runWithFileLogger } from '../../cli/headless/headless-logger.js';
 import { ConfigInstaller } from './config-installer.js';
 import { resolveReadyToWork } from './dependency-resolver.js';
-import { replaceFrontMatterField, setFrontMatterField } from './front-matter.js';
+import { checkAllAcceptanceCriteria, replaceFrontMatterField, setFrontMatterField } from './front-matter.js';
 import { buildIssuePrompt } from './issue-prompt-builder.js';
 import { runIssueWithRetry } from './issue-retry.js';
 import { listExistingDocs, publishOutputs, resolveOutputPath } from './output-manager.js';
@@ -62,13 +62,15 @@ export class PlanExecutor extends EventEmitter {
   private epicScope: string | null = null;
   /** Cached PM directory path — resolved once per start(). */
   private pmDir: string | null = null;
-  /** Board directory path (e.g. /path/.pm/boards/BOARD-001). Used for outputs, reviews, progress. */
+  /** Board directory path (e.g. /path/.mstro/pm/boards/BOARD-001). Used for outputs, reviews, progress. */
   private boardDir: string | null = null;
   /** Board ID being executed (e.g. "BOARD-001") */
   private boardId: string | null = null;
   private configInstaller: ConfigInstaller;
   /** Flag to prevent start() from clearing scope set by startBoard/startEpic */
   private _scopeSetByCall = false;
+  /** Extra environment variables forwarded to HeadlessRunner child processes (e.g. API keys) */
+  private extraEnv?: Record<string, string>;
   private metrics: ExecutionMetrics = {
     issuesCompleted: 0,
     issuesAttempted: 0,
@@ -77,9 +79,10 @@ export class PlanExecutor extends EventEmitter {
     currentWaveIds: [],
   };
 
-  constructor(workingDir: string) {
+  constructor(workingDir: string, options?: { extraEnv?: Record<string, string> }) {
     super();
     this.workingDir = workingDir;
+    this.extraEnv = options?.extraEnv;
     this.configInstaller = new ConfigInstaller(workingDir);
   }
 
@@ -251,6 +254,7 @@ export class PlanExecutor extends EventEmitter {
       outputCallback: (text: string) => {
         this.emit('output', { issueId: issue.id, text });
       },
+      extraEnv: this.extraEnv,
     }), boardLogDir);
 
     if (!result.completed || result.error) {
@@ -314,9 +318,10 @@ export class PlanExecutor extends EventEmitter {
         const statusMatch = content.match(/^status:\s*(\S+)/m);
         const currentStatus = statusMatch?.[1] ?? 'unknown';
 
-        if (currentStatus === 'done') {
+        if (currentStatus === 'in_review' || currentStatus === 'done') {
           if (issue.reviewGate === 'none') {
-            // Skip review gate — accept agent's done status directly
+            // Skip review gate — mark done directly
+            this.updateIssueFrontMatter(issue.path, 'done');
             this.metrics.issuesCompleted++;
             this.emit('issueCompleted', issue);
             completed++;
@@ -361,6 +366,8 @@ export class PlanExecutor extends EventEmitter {
       onOutput: (text) => this.emit('output', { issueId: issue.id, text }),
       logDir: this.boardDir ? join(this.boardDir, 'logs') : undefined,
       reviewCriteria: this.getBoardReviewCriteria(),
+      boardDir: this.boardDir,
+      extraEnv: this.extraEnv,
     });
     persistReviewResult(reviewDir, issue, result);
 
@@ -542,7 +549,15 @@ export class PlanExecutor extends EventEmitter {
     const pmDir = this.pmDir;
     if (!pmDir) return;
     try {
-      setFrontMatterField(join(pmDir, issuePath), 'status', newStatus);
+      const fullPath = join(pmDir, issuePath);
+      setFrontMatterField(fullPath, 'status', newStatus);
+
+      // Check off all acceptance criteria when marking done
+      if (newStatus === 'done') {
+        const content = readFileSync(fullPath, 'utf-8');
+        const updated = checkAllAcceptanceCriteria(content);
+        if (updated !== content) writeFileSync(fullPath, updated, 'utf-8');
+      }
     } catch { /* file may have been moved */ }
   }
 

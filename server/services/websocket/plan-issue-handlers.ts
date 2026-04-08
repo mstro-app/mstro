@@ -3,7 +3,7 @@
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import { replaceFrontMatterField } from '../plan/front-matter.js';
+import { checkAllAcceptanceCriteria, replaceFrontMatterField } from '../plan/front-matter.js';
 import { defaultPmDir, getNextId, parseBoardDirectory, parsePlanDirectory, parseSingleIssue, parseSingleMilestone, parseSingleSprint, planDirExists, resolvePmDir } from '../plan/parser.js';
 import { tryCompleteParentEpic } from '../plan/state-reconciler.js';
 import type { HandlerContext } from './handler-context.js';
@@ -161,6 +161,11 @@ export function handleUpdateIssue(
   for (const [key, value] of Object.entries(fields as Record<string, unknown>)) {
     const yamlKey = key.replace(/([A-Z])/g, '_$1').toLowerCase();
     content = replaceFrontMatterField(content, yamlKey, formatYamlValue(value));
+  }
+
+  // Check off all acceptance criteria when status transitions to done
+  if ((fields as Record<string, unknown>).status === 'done') {
+    content = checkAllAcceptanceCriteria(content);
   }
 
   writeFileSync(fullPath, content, 'utf-8');

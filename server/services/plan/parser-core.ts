@@ -2,7 +2,7 @@
 // Licensed under the MIT License. See LICENSE file for details.
 
 /**
- * YAML front-matter parsing and entity parsers for PPS (.pm/) files.
+ * YAML front-matter parsing and entity parsers for PPS (.mstro/pm/) files.
  */
 
 import type {
@@ -264,7 +264,7 @@ export function parseIssue(content: string, filePath: string): Issue {
     id: String(fm.id || ''),
     title: String(fm.title || ''),
     type: (fm.type as Issue['type']) || 'issue',
-    status: String(fm.status || 'backlog'),
+    status: String(fm.status || 'todo'),
     priority: String(fm.priority || 'P2'),
     estimate: fm.estimate != null ? fm.estimate as number | string : null,
     labels: toStringArray(fm.labels),

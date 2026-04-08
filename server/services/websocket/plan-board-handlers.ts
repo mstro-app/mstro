@@ -1,7 +1,7 @@
 // Copyright (c) 2025-present Mstro, Inc. All rights reserved.
 // Licensed under the MIT License. See LICENSE file for details.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { replaceFrontMatterField } from '../plan/front-matter.js';
 import { getNextBoardId, getNextBoardNumber, parseBoardArtifacts, parseBoardDirectory, parsePlanDirectory, resolvePmDir } from '../plan/parser.js';
@@ -124,6 +124,24 @@ export function handleUpdateBoard(
     content = replaceFrontMatterField(content, yamlKey, formatYamlValue(value));
   }
   writeFileSync(boardMdPath, content, 'utf-8');
+
+  // When review criteria are set, also write a board-level review agent file
+  // so users can discover and edit the full prompt as markdown.
+  const typedFields = fields as Record<string, unknown>;
+  if ('reviewCriteria' in typedFields) {
+    const boardDir = join(pmDir, 'boards', boardId);
+    const agentsDir = join(boardDir, 'agents');
+    const agentPath = join(agentsDir, 'review-custom.md');
+    const criteriaValue = String(typedFields.reviewCriteria ?? '').trim();
+
+    if (criteriaValue) {
+      if (!existsSync(agentsDir)) mkdirSync(agentsDir, { recursive: true });
+      writeFileSync(agentPath, buildBoardReviewAgent(criteriaValue), 'utf-8');
+    } else if (existsSync(agentPath)) {
+      // Clear the agent file when criteria are removed
+      try { unlinkSync(agentPath); } catch { /* non-fatal */ }
+    }
+  }
 
   const boardState = parseBoardDirectory(pmDir, boardId);
   if (boardState) {
@@ -274,4 +292,38 @@ export function handleGetBoardArtifacts(
   }
 
   ctx.send(ws, { type: 'planBoardArtifacts', data: artifacts });
+}
+
+// ── Private helpers ──────────────────────────────────────────────────
+
+/** Build a board-level review-custom agent file from user-provided criteria. */
+function buildBoardReviewAgent(criteria: string): string {
+  return `---
+name: review-custom
+description: Board-specific review agent with custom criteria
+type: review
+variables: [issue_id, issue_title, context_section, acceptance_criteria, review_criteria, read_instruction]
+checks: [criteria_met, review_criteria]
+---
+
+You are a reviewer. Review the work done for issue {{issue_id}}: {{issue_title}}.
+{{context_section}}
+
+## Acceptance Criteria
+{{acceptance_criteria}}
+
+## Review Criteria
+${criteria}
+
+## Instructions
+1. {{read_instruction}}
+2. Check if all acceptance criteria are met — evaluate each criterion individually
+3. Evaluate thoroughly against the review criteria above
+4. Consider the overall quality of the work: does it fully address the issue's intent, is it well-structured, and is it ready to ship?
+
+Output EXACTLY one JSON object on its own line (no markdown fencing):
+{"passed": true, "checks": [{"name": "criteria_met", "passed": true, "details": "..."}]}
+
+Include checks for: criteria_met, review_criteria.
+`;
 }

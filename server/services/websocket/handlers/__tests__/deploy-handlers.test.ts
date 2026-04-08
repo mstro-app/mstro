@@ -234,7 +234,7 @@ describe('handleDeployHttpRequest', () => {
 
       expect(fetchMock).toHaveBeenCalledOnce();
       const [url, opts] = fetchMock.mock.calls[0];
-      expect(url).toBe('http://localhost:3000/api/data');
+      expect(url).toBe('http://127.0.0.1:3000/api/data');
       expect(opts?.method).toBe('GET');
       expect(opts?.body).toBeUndefined(); // GET has no body
 
@@ -279,7 +279,7 @@ describe('handleDeployHttpRequest', () => {
       await handleDeployHttpRequest(ctx, ws, msg);
 
       const [url, opts] = fetchMock.mock.calls[0];
-      expect(url).toBe('http://localhost:3000/api/items/1');
+      expect(url).toBe('http://127.0.0.1:3000/api/items/1');
       expect(opts?.method).toBe('PUT');
       expect(opts?.body).toBe('{"name":"updated"}');
 
@@ -311,7 +311,7 @@ describe('handleDeployHttpRequest', () => {
       await handleDeployHttpRequest(ctx, ws, msg);
 
       const [url] = fetchMock.mock.calls[0];
-      expect(url).toBe('http://localhost:3000/search?q=hello&page=2');
+      expect(url).toBe('http://127.0.0.1:3000/search?q=hello&page=2');
     });
 
     it('uses redirect: manual to prevent auto-following redirects', async () => {

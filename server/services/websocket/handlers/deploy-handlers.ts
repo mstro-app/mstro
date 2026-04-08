@@ -150,8 +150,9 @@ export async function handleDeployHttpRequest(
     return;
   }
 
-  // Build local URL: localhost:{port}{path with query string}
-  const localUrl = `http://localhost:${data.port}${data.url}`;
+  // Build local URL: 127.0.0.1:{port}{path with query string}
+  // Use explicit IPv4 loopback to avoid IPv6 resolution issues on some systems
+  const localUrl = `http://127.0.0.1:${data.port}${data.url}`;
 
   try {
     const requestHeaders = stripHopByHopHeaders(data.headers);

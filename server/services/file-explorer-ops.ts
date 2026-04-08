@@ -11,7 +11,7 @@ import {
   mkdirSync,
   readdirSync,
   renameSync,
-  rmdirSync,
+  rmSync,
   statSync,
   unlinkSync,
   writeFileSync
@@ -240,11 +240,7 @@ export function deleteFile(
     const stats = statSync(resolvedPath)
 
     if (stats.isDirectory()) {
-      const contents = readdirSync(resolvedPath)
-      if (contents.length > 0) {
-        return { success: false, error: 'Directory is not empty. Only empty directories can be deleted.' }
-      }
-      rmdirSync(resolvedPath)
+      rmSync(resolvedPath, { recursive: true })
     } else {
       unlinkSync(resolvedPath)
     }

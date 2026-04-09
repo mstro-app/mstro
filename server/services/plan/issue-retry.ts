@@ -64,6 +64,8 @@ export interface IssueRunnerConfig {
   outputCallback?: (text: string) => void;
   /** Extra environment variables for spawned Claude processes (e.g. API keys) */
   extraEnv?: Record<string, string>;
+  /** Signal to abort execution — when aborted, kills the running HeadlessRunner */
+  abortSignal?: AbortSignal;
 }
 
 /**
@@ -88,6 +90,14 @@ export async function runIssueWithRetry(config: IssueRunnerConfig): Promise<Sess
   let result: SessionResult | undefined;
 
   while (state.retryNumber <= MAX_ISSUE_RETRIES) {
+    // Check abort before starting a new attempt
+    if (config.abortSignal?.aborted) {
+      return state.bestResult ?? {
+        completed: false, needsHandoff: false, totalTokens: 0, sessionId: '',
+        error: 'Execution stopped by user',
+      };
+    }
+
     // Clear checkpoint from prior iteration
     state.checkpoint = null;
 
@@ -113,7 +123,31 @@ export async function runIssueWithRetry(config: IssueRunnerConfig): Promise<Sess
       extraEnv: config.extraEnv,
     });
 
+    // Wire abort signal to kill the runner's processes
+    const abortHandler = () => { runner.cleanup(); };
+    if (config.abortSignal) {
+      if (config.abortSignal.aborted) {
+        runner.cleanup();
+        return state.bestResult ?? {
+          completed: false, needsHandoff: false, totalTokens: 0, sessionId: '',
+          error: 'Execution stopped by user',
+        };
+      }
+      config.abortSignal.addEventListener('abort', abortHandler, { once: true });
+    }
+
     result = await runner.run();
+
+    // Clean up abort listener
+    config.abortSignal?.removeEventListener('abort', abortHandler);
+
+    // If aborted during run, return immediately
+    if (config.abortSignal?.aborted) {
+      return state.bestResult ?? result ?? {
+        completed: false, needsHandoff: false, totalTokens: 0, sessionId: '',
+        error: 'Execution stopped by user',
+      };
+    }
 
     // Track best result for fallback selection
     if (!state.bestResult || scoreResult(result) > scoreResult(state.bestResult)) {

@@ -59,6 +59,8 @@ export class PlanExecutor extends EventEmitter {
   private workingDir: string;
   private shouldStop = false;
   private shouldPause = false;
+  /** AbortController for killing running HeadlessRunner processes on stop. */
+  private waveAbortController: AbortController | null = null;
   private epicScope: string | null = null;
   /** Cached PM directory path — resolved once per start(). */
   private pmDir: string | null = null;
@@ -162,7 +164,13 @@ export class PlanExecutor extends EventEmitter {
   }
 
   pause(): void { this.shouldPause = true; }
-  stop(): void { this.shouldStop = true; }
+  stop(): void {
+    this.shouldStop = true;
+    this.status = 'stopping';
+    this.emit('statusChanged', this.status);
+    // Kill all running HeadlessRunner processes in the current wave
+    this.waveAbortController?.abort();
+  }
 
   resume(): Promise<void> {
     if (this.status !== 'paused') return Promise.resolve();
@@ -182,6 +190,9 @@ export class PlanExecutor extends EventEmitter {
     this.metrics.issuesAttempted += issues.length;
     this.emit('waveStarted', { issueIds: waveIds });
 
+    // Create abort controller for this wave — stop() will abort it
+    this.waveAbortController = new AbortController();
+
     this.ensureOutputDirs();
     this.configInstaller.installPermissions();
 
@@ -196,7 +207,8 @@ export class PlanExecutor extends EventEmitter {
 
     try {
       // Spawn one HeadlessRunner per issue in parallel
-      const runnerPromises = issues.map(issue => this.runSingleIssue(issue, pmDir, existingDocs, waveLabel));
+      const abortSignal = this.waveAbortController?.signal;
+      const runnerPromises = issues.map(issue => this.runSingleIssue(issue, pmDir, existingDocs, waveLabel, abortSignal));
       const results = await Promise.allSettled(runnerPromises);
 
       // Log any rejected promises
@@ -221,6 +233,7 @@ export class PlanExecutor extends EventEmitter {
       this.configInstaller.uninstallPermissions();
     }
 
+    this.waveAbortController = null;
     this.finalizeWave(issues, waveStart, waveLabel);
     this.metrics.currentWaveIds = [];
     return completedCount;
@@ -232,6 +245,7 @@ export class PlanExecutor extends EventEmitter {
     pmDir: string | null,
     existingDocs: string[],
     waveLabel: string,
+    abortSignal?: AbortSignal,
   ): Promise<void> {
     const outputPath = resolveOutputPath(issue, this.workingDir, this.boardDir);
     const prompt = buildIssuePrompt({
@@ -255,6 +269,7 @@ export class PlanExecutor extends EventEmitter {
         this.emit('output', { issueId: issue.id, text });
       },
       extraEnv: this.extraEnv,
+      abortSignal,
     }), boardLogDir);
 
     if (!result.completed || result.error) {

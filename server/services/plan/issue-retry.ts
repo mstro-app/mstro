@@ -76,6 +76,93 @@ export interface IssueRunnerConfig {
  * 2. Signal crash → fresh start with preserved tool results
  * 3. Premature completion → resume session with "continue"
  */
+/** Build the default "aborted" fallback result. */
+function abortedResult(bestResult: SessionResult | null): SessionResult {
+  return bestResult ?? {
+    completed: false, needsHandoff: false, totalTokens: 0, sessionId: '',
+    error: 'Execution stopped by user',
+  };
+}
+
+/** Create a HeadlessRunner configured for the current retry iteration. */
+function createRunner(
+  config: IssueRunnerConfig,
+  state: IssueRetryState,
+  useResume: boolean,
+  resumeSessionId: string | undefined,
+): HeadlessRunner {
+  return new HeadlessRunner({
+    workingDir: config.workingDir,
+    directPrompt: state.currentPrompt,
+    stallWarningMs: config.stallWarningMs,
+    stallKillMs: config.stallKillMs,
+    stallHardCapMs: config.stallHardCapMs,
+    stallMaxExtensions: config.stallMaxExtensions,
+    verbose: true,
+    continueSession: useResume,
+    claudeSessionId: resumeSessionId,
+    outputCallback: config.outputCallback,
+    onToolTimeout: (cp: ExecutionCheckpoint) => {
+      state.checkpoint = cp;
+    },
+    extraEnv: config.extraEnv,
+  });
+}
+
+/** Wire the abort signal to clean up the runner. Returns a cleanup function. */
+function wireAbortSignal(
+  runner: HeadlessRunner,
+  abortSignal: AbortSignal | undefined,
+): (() => void) | null {
+  if (!abortSignal) return null;
+
+  const abortHandler = () => { runner.cleanup(); };
+  abortSignal.addEventListener('abort', abortHandler, { once: true });
+  return () => abortSignal.removeEventListener('abort', abortHandler);
+}
+
+/**
+ * Run a single iteration: spawn runner, await result, evaluate retry.
+ * Returns { result, shouldRetry } — caller loops while shouldRetry is true.
+ * Returns null if aborted (caller should return abortedResult).
+ */
+async function runSingleAttempt(
+  config: IssueRunnerConfig,
+  state: IssueRetryState,
+): Promise<{ result: SessionResult; shouldRetry: boolean } | null> {
+  state.checkpoint = null;
+
+  const useResume = !!state.lastSessionId;
+  const resumeSessionId = state.lastSessionId;
+  state.lastSessionId = undefined;
+
+  const runner = createRunner(config, state, useResume, resumeSessionId);
+
+  if (config.abortSignal?.aborted) {
+    runner.cleanup();
+    return null;
+  }
+  const removeAbortListener = wireAbortSignal(runner, config.abortSignal);
+
+  const result = await runner.run();
+  removeAbortListener?.();
+
+  if (config.abortSignal?.aborted) return null;
+
+  // Track best result for fallback selection
+  if (!state.bestResult || scoreResult(result) > scoreResult(state.bestResult)) {
+    state.bestResult = result;
+  }
+
+  // Evaluate retry strategies in priority order
+  const shouldRetry =
+    tryToolTimeoutRetry(state, result, config) ||
+    trySignalCrashRetry(state, result, config) ||
+    await tryPrematureCompletionRetry(state, result, config);
+
+  return { result, shouldRetry };
+}
+
 export async function runIssueWithRetry(config: IssueRunnerConfig): Promise<SessionResult> {
   const state: IssueRetryState = {
     currentPrompt: config.prompt,
@@ -90,77 +177,15 @@ export async function runIssueWithRetry(config: IssueRunnerConfig): Promise<Sess
   let result: SessionResult | undefined;
 
   while (state.retryNumber <= MAX_ISSUE_RETRIES) {
-    // Check abort before starting a new attempt
-    if (config.abortSignal?.aborted) {
-      return state.bestResult ?? {
-        completed: false, needsHandoff: false, totalTokens: 0, sessionId: '',
-        error: 'Execution stopped by user',
-      };
+    if (config.abortSignal?.aborted) return abortedResult(state.bestResult);
+
+    const attempt = await runSingleAttempt(config, state);
+    if (!attempt) {
+      return state.bestResult ?? result ?? abortedResult(null);
     }
 
-    // Clear checkpoint from prior iteration
-    state.checkpoint = null;
-
-    // Determine resume strategy
-    const useResume = !!state.lastSessionId;
-    const resumeSessionId = state.lastSessionId;
-    state.lastSessionId = undefined;
-
-    const runner = new HeadlessRunner({
-      workingDir: config.workingDir,
-      directPrompt: state.currentPrompt,
-      stallWarningMs: config.stallWarningMs,
-      stallKillMs: config.stallKillMs,
-      stallHardCapMs: config.stallHardCapMs,
-      stallMaxExtensions: config.stallMaxExtensions,
-      verbose: true,
-      continueSession: useResume,
-      claudeSessionId: resumeSessionId,
-      outputCallback: config.outputCallback,
-      onToolTimeout: (cp: ExecutionCheckpoint) => {
-        state.checkpoint = cp;
-      },
-      extraEnv: config.extraEnv,
-    });
-
-    // Wire abort signal to kill the runner's processes
-    const abortHandler = () => { runner.cleanup(); };
-    if (config.abortSignal) {
-      if (config.abortSignal.aborted) {
-        runner.cleanup();
-        return state.bestResult ?? {
-          completed: false, needsHandoff: false, totalTokens: 0, sessionId: '',
-          error: 'Execution stopped by user',
-        };
-      }
-      config.abortSignal.addEventListener('abort', abortHandler, { once: true });
-    }
-
-    result = await runner.run();
-
-    // Clean up abort listener
-    config.abortSignal?.removeEventListener('abort', abortHandler);
-
-    // If aborted during run, return immediately
-    if (config.abortSignal?.aborted) {
-      return state.bestResult ?? result ?? {
-        completed: false, needsHandoff: false, totalTokens: 0, sessionId: '',
-        error: 'Execution stopped by user',
-      };
-    }
-
-    // Track best result for fallback selection
-    if (!state.bestResult || scoreResult(result) > scoreResult(state.bestResult)) {
-      state.bestResult = result;
-    }
-
-    // Evaluate retry strategies in priority order
-    if (tryToolTimeoutRetry(state, result, config)) continue;
-    if (trySignalCrashRetry(state, result, config)) continue;
-    if (await tryPrematureCompletionRetry(state, result, config)) continue;
-
-    // No retry needed — break out
-    break;
+    result = attempt.result;
+    if (!attempt.shouldRetry) break;
   }
 
   return result ?? state.bestResult ?? {

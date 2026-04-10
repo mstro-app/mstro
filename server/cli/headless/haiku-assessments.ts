@@ -11,6 +11,7 @@
  */
 
 import { type ChildProcess, spawn } from 'node:child_process';
+import { loadSkillPrompt } from '../../services/plan/agent-loader.js';
 import { hlog } from './headless-logger.js';
 
 // ========== Haiku Infrastructure ==========
@@ -107,26 +108,28 @@ export async function assessContextLoss(
   claudeCommand: string,
   verbose: boolean,
 ): Promise<ContextLossVerdict> {
-  const prompt = [
+  const thinkingLine = ctx.thinkingOutputLength > 0 ? 'Extended thinking was active' : 'No extended thinking';
+  const writeLine = ctx.hasSuccessfulWrite ? 'At least one file write succeeded' : 'No file writes succeeded';
+  const responseTail = ctx.assistantResponse.slice(-500);
+
+  const prompt = loadSkillPrompt('detect-context-loss', {
+    effectiveTimeouts: String(ctx.effectiveTimeouts),
+    nativeTimeoutCount: String(ctx.nativeTimeoutCount),
+    successfulToolCalls: String(ctx.successfulToolCalls),
+    thinkingLine,
+    writeLine,
+    responseTail,
+  }) ?? [
     'You are analyzing whether a Claude Code agent lost context after experiencing tool timeouts.',
     '',
     'Session signals:',
     `- ${ctx.effectiveTimeouts} tool(s) timed out (${ctx.nativeTimeoutCount} native timeouts)`,
     `- ${ctx.successfulToolCalls} tool calls completed successfully`,
-    `- ${ctx.thinkingOutputLength > 0 ? 'Extended thinking was active' : 'No extended thinking'}`,
-    `- ${ctx.hasSuccessfulWrite ? 'At least one file write succeeded' : 'No file writes succeeded'}`,
+    `- ${thinkingLine}`,
+    `- ${writeLine}`,
     '',
     `Final response text (last 500 chars):`,
-    ctx.assistantResponse.slice(-500),
-    '',
-    'CONTEXT_LOST signs: "How can I help you?", generic greeting, no reference to the task,',
-    'confusion about what to do, asking for task description, repeating the same action.',
-    '',
-    'CONTEXT_OK signs: references specific files/code, describes completed work, plans next steps,',
-    'summarizes results, mentions the timeout and adjusts approach.',
-    '',
-    'IMPORTANT: If successful file writes happened AND the response references specific work,',
-    'the agent likely recovered — favor CONTEXT_OK.',
+    responseTail,
     '',
     'Respond in EXACTLY this format (2 lines, no extra text):',
     'VERDICT: CONTEXT_LOST or CONTEXT_OK',
@@ -313,26 +316,16 @@ export async function classifyError(
   const tail = stderrContent.slice(-500);
   if (!tail.trim()) return null;
 
-  const prompt = [
+  const prompt = loadSkillPrompt('classify-error', {
+    tailLength: String(tail.length),
+    stderrTail: tail,
+  }) ?? [
     'You are classifying an error message from the Claude Code CLI that did not match known patterns.',
     '',
     `stderr (last ${tail.length} chars):`,
     tail,
     '',
-    'Classify into one of these categories:',
-    '- AUTH_REQUIRED: Authentication/login issues',
-    '- API_KEY_INVALID: API key problems',
-    '- QUOTA_EXCEEDED: Usage limits, billing, subscription',
-    '- RATE_LIMITED: Too many requests, throttling',
-    '- NETWORK_ERROR: Connection, DNS, timeout issues',
-    '- SSL_ERROR: Certificate/TLS problems',
-    '- SERVICE_UNAVAILABLE: Backend down (502/503/504)',
-    '- INTERNAL_ERROR: Server errors (500)',
-    '- CONTEXT_TOO_LONG: Token/context limit exceeded',
-    '- SESSION_NOT_FOUND: Invalid/expired session',
-    '- UNKNOWN: Cannot determine, not a real error, or just warnings/debug output',
-    '',
-    'If the stderr content is just warnings, debug info, or not an actual error, use UNKNOWN.',
+    'Classify: AUTH_REQUIRED, API_KEY_INVALID, QUOTA_EXCEEDED, RATE_LIMITED, NETWORK_ERROR, SSL_ERROR, SERVICE_UNAVAILABLE, INTERNAL_ERROR, CONTEXT_TOO_LONG, SESSION_NOT_FOUND, or UNKNOWN.',
     '',
     'Respond in EXACTLY this format (2 lines, no extra text):',
     'CATEGORY: <one of the above>',

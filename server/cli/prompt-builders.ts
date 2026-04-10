@@ -5,6 +5,7 @@
  * These are stateless formatting functions that take their inputs as parameters.
  */
 
+import { loadSkillPrompt } from '../services/plan/agent-loader.js';
 import type { ExecutionCheckpoint } from './headless/types.js';
 import type { MovementRecord, ToolUseRecord } from './improvisation-session-manager.js';
 
@@ -147,34 +148,44 @@ export function buildRetryPrompt(
   allTimedOut?: Array<{ toolName: string; input: Record<string, unknown>; timeoutMs: number }>,
 ): string {
   const urlSuffix = checkpoint.hungTool.url ? ` while fetching: ${checkpoint.hungTool.url}` : '';
+  const hungToolTimeoutSec = String(Math.round(checkpoint.hungTool.timeoutMs / 1000));
+
+  const timedOutToolsSection = allTimedOut && allTimedOut.length > 0
+    ? formatTimedOutTools(allTimedOut).join('\n')
+    : 'This URL/resource is unreachable. DO NOT retry the same URL or query.';
+  const completedToolsSection = checkpoint.completedTools.length > 0
+    ? formatCompletedTools(checkpoint.completedTools).join('\n')
+    : '';
+  const inProgressToolsSection = checkpoint.inProgressTools && checkpoint.inProgressTools.length > 0
+    ? formatInProgressTools(checkpoint.inProgressTools).join('\n')
+    : '';
+  const assistantTextSection = checkpoint.assistantText
+    ? `### Your response before interruption:\n${checkpoint.assistantText.length > 8000 ? `${checkpoint.assistantText.slice(0, 8000)}...\n(truncated — full response was ${checkpoint.assistantText.length} chars)` : checkpoint.assistantText}`
+    : '';
+
+  const fromSkill = loadSkillPrompt('retry-task', {
+    hungToolName: checkpoint.hungTool.toolName,
+    hungToolTimeoutSec,
+    urlSuffix,
+    timedOutToolsSection,
+    completedToolsSection,
+    inProgressToolsSection,
+    assistantTextSection,
+    originalPrompt,
+  });
+  if (fromSkill) return fromSkill;
+
   const parts: string[] = [
     '## AUTOMATIC RETRY -- Previous Execution Interrupted',
     '',
-    `The previous execution was interrupted because ${checkpoint.hungTool.toolName} timed out after ${Math.round(checkpoint.hungTool.timeoutMs / 1000)}s${urlSuffix}.`,
+    `The previous execution was interrupted because ${checkpoint.hungTool.toolName} timed out after ${hungToolTimeoutSec}s${urlSuffix}.`,
+    '',
+    timedOutToolsSection,
     '',
   ];
-
-  if (allTimedOut && allTimedOut.length > 0) {
-    parts.push(...formatTimedOutTools(allTimedOut), '');
-  } else {
-    parts.push('This URL/resource is unreachable. DO NOT retry the same URL or query.', '');
-  }
-
-  if (checkpoint.completedTools.length > 0) {
-    parts.push(...formatCompletedTools(checkpoint.completedTools), '');
-  }
-
-  if (checkpoint.inProgressTools && checkpoint.inProgressTools.length > 0) {
-    parts.push(...formatInProgressTools(checkpoint.inProgressTools), '');
-  }
-
-  if (checkpoint.assistantText) {
-    const preview = checkpoint.assistantText.length > 8000
-      ? `${checkpoint.assistantText.slice(0, 8000)}...\n(truncated — full response was ${checkpoint.assistantText.length} chars)`
-      : checkpoint.assistantText;
-    parts.push('### Your response before interruption:', preview, '');
-  }
-
+  if (completedToolsSection) parts.push(completedToolsSection, '');
+  if (inProgressToolsSection) parts.push(inProgressToolsSection, '');
+  if (assistantTextSection) parts.push(assistantTextSection, '');
   parts.push('### Original task (continue from where you left off):');
   parts.push(originalPrompt);
   parts.push('');

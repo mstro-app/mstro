@@ -173,6 +173,73 @@ function composePrompt(systemPrompt: string | null, userPrompt: string): string 
   ].join('\n');
 }
 
+// ========== Validation ==========
+
+/** Validate request fields and deployment config. Returns an error or null if valid. */
+function validateRequest(
+  request: HeadlessSessionRequest,
+  config: DeploymentAiConfig,
+): HeadlessSessionError | null {
+  if (!request.prompt || request.prompt.trim().length === 0) {
+    return { code: 'INVALID_REQUEST', message: 'prompt is required and must not be empty.' };
+  }
+  if (!request.endUserId || request.endUserId.trim().length === 0) {
+    return { code: 'INVALID_REQUEST', message: 'endUserId is required.' };
+  }
+  if (!config.aiEnabled) {
+    return { code: 'AI_DISABLED', message: 'AI features are not enabled for this deployment.' };
+  }
+  if (!config.allowedAiCapabilities.includes('headless')) {
+    return {
+      code: 'CAPABILITY_DENIED',
+      message: "This deployment does not have the 'headless' AI capability enabled.",
+    };
+  }
+  return null;
+}
+
+/** Check estimated input tokens against the per-request cap. Returns an error or null. */
+function checkTokenLimit(
+  promptLength: number,
+  maxTokensPerRequest: number | null,
+): HeadlessSessionError | null {
+  if (maxTokensPerRequest === null) return null;
+  const estimatedInputTokens = Math.ceil(promptLength / 4);
+  if (estimatedInputTokens > maxTokensPerRequest) {
+    return {
+      code: 'RATE_LIMIT_EXCEEDED',
+      message: `Estimated input tokens (${estimatedInputTokens}) exceeds maxTokensPerRequest (${maxTokensPerRequest}). Shorten your prompt.`,
+    };
+  }
+  return null;
+}
+
+/** Emit health update and usage report callbacks after execution. */
+function emitPostExecutionCallbacks(
+  result: DeployExecutionResult,
+  config: DeploymentAiConfig,
+  request: HeadlessSessionRequest,
+  effectiveModel: string,
+  callbacks?: HeadlessSessionStreamCallbacks,
+): void {
+  callbacks?.onUsageReport?.({
+    deploymentId: config.deploymentId,
+    endUserId: request.endUserId,
+    capability: 'headless',
+    tokensUsed: result.totalTokens,
+    model: effectiveModel,
+    durationMs: result.durationMs,
+  });
+
+  const healthStatus = detectAiHealthIssue(result.error);
+  if (healthStatus) {
+    callbacks?.onHealthUpdate?.({
+      deploymentId: config.deploymentId,
+      ...healthStatus,
+    });
+  }
+}
+
 // ========== Handler ==========
 
 /**
@@ -190,60 +257,16 @@ export async function handleHeadlessSession(
   callbacks?: HeadlessSessionStreamCallbacks,
 ): Promise<HeadlessSessionResult> {
   // ── Validate request ───────────────────────────────────────
-  if (!request.prompt || request.prompt.trim().length === 0) {
-    return {
-      ok: false,
-      error: { code: 'INVALID_REQUEST', message: 'prompt is required and must not be empty.' },
-    };
-  }
-
-  if (!request.endUserId || request.endUserId.trim().length === 0) {
-    return {
-      ok: false,
-      error: { code: 'INVALID_REQUEST', message: 'endUserId is required.' },
-    };
-  }
-
-  // ── Validate AI is enabled ─────────────────────────────────
-  if (!config.aiEnabled) {
-    return {
-      ok: false,
-      error: { code: 'AI_DISABLED', message: 'AI features are not enabled for this deployment.' },
-    };
-  }
-
-  // ── Validate headless capability ───────────────────────────
-  if (!config.allowedAiCapabilities.includes('headless')) {
-    return {
-      ok: false,
-      error: {
-        code: 'CAPABILITY_DENIED',
-        message: "This deployment does not have the 'headless' AI capability enabled.",
-      },
-    };
-  }
+  const validationError = validateRequest(request, config);
+  if (validationError) return { ok: false, error: validationError };
 
   // ── Rate limit checks ─────────────────────────────────────
   const rateLimitError = checkRateLimit(config);
-  if (rateLimitError) {
-    return { ok: false, error: rateLimitError };
-  }
+  if (rateLimitError) return { ok: false, error: rateLimitError };
 
   // ── Token limit pre-check ─────────────────────────────────
-  // Estimate input tokens from prompt length (~4 chars per token).
-  // Reject if estimated input alone exceeds the cap.
-  if (config.maxTokensPerRequest !== null) {
-    const estimatedInputTokens = Math.ceil(request.prompt.length / 4);
-    if (estimatedInputTokens > config.maxTokensPerRequest) {
-      return {
-        ok: false,
-        error: {
-          code: 'RATE_LIMIT_EXCEEDED',
-          message: `Estimated input tokens (${estimatedInputTokens}) exceeds maxTokensPerRequest (${config.maxTokensPerRequest}). Shorten your prompt.`,
-        },
-      };
-    }
-  }
+  const tokenError = checkTokenLimit(request.prompt.length, config.maxTokensPerRequest);
+  if (tokenError) return { ok: false, error: tokenError };
 
   // ── Compose prompt ─────────────────────────────────────────
   // Use per-request system prompt if provided, otherwise deployment default
@@ -275,34 +298,10 @@ export async function handleHeadlessSession(
         : undefined,
     });
 
-    // Check token limit if configured
-    if (
-      config.maxTokensPerRequest !== null &&
-      result.totalTokens > config.maxTokensPerRequest
-    ) {
-      // Session already ran — log but don't fail the response.
-      // The token overage is informational; the developer can use this
-      // for billing or to tighten limits.
-    }
+    // Token overage is informational — session already ran, don't fail the response.
+    // The developer can use usage reports for billing or to tighten limits.
 
-    // Emit usage report after successful execution
-    callbacks?.onUsageReport?.({
-      deploymentId: config.deploymentId,
-      endUserId: request.endUserId,
-      capability: 'headless',
-      tokensUsed: result.totalTokens,
-      model: effectiveModel,
-      durationMs: result.durationMs,
-    });
-
-    // Check for API key health issues from execution result
-    const healthStatus = detectAiHealthIssue(result.error);
-    if (healthStatus) {
-      callbacks?.onHealthUpdate?.({
-        deploymentId: config.deploymentId,
-        ...healthStatus,
-      });
-    }
+    emitPostExecutionCallbacks(result, config, request, effectiveModel, callbacks);
 
     return { ok: true, result };
   } catch (error: unknown) {

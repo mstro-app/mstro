@@ -1,6 +1,7 @@
 // Copyright (c) 2025-present Mstro, Inc. All rights reserved.
 // Licensed under the MIT License. See LICENSE file for details.
 
+import { loadSkillPrompt } from '../plan/agent-loader.js';
 import { getPrBaseBranch, setPrBaseBranch } from '../settings.js';
 import { detectGitProvider, executeGitCommand, spawnCheck, spawnHaikuWithPrompt, spawnWithOutput, stripCoauthorLines, truncateDiff } from './git-handlers.js';
 import type { HandlerContext } from './handler-context.js';
@@ -272,27 +273,11 @@ async function handleGitGeneratePRDescription(ctx: HandlerContext, ws: WSContext
     const diffResult = await executeGitCommand(['diff', `${compareRef}...HEAD`], workingDir);
     const statResult = await executeGitCommand(['diff', `${compareRef}...HEAD`, '--stat'], workingDir);
 
-    const prompt = `You are generating a pull request title and description for the following changes.
+    const filesChanged = statResult.exitCode === 0 ? statResult.stdout.trim() : '';
+    const diff = truncateDiff(diffResult.exitCode === 0 ? diffResult.stdout : '');
 
-COMMITS (${baseBranch}..HEAD):
-${commits}
-
-FILES CHANGED:
-${statResult.exitCode === 0 ? statResult.stdout.trim() : ''}
-
-DIFF:
-${truncateDiff(diffResult.exitCode === 0 ? diffResult.stdout : '')}
-
-Generate a pull request title and description following these rules:
-1. TITLE: First line must be the PR title — imperative mood, under 70 characters
-2. Leave a blank line after the title
-3. BODY: Write a concise description in markdown with:
-   - A "## Summary" section with 1-3 bullet points explaining what changed and why
-   - Optionally a "## Details" section if the changes are complex
-4. Focus on the "why" not just the "what"
-5. No emojis
-
-Respond with ONLY the title and description, nothing else.`;
+    const prompt = loadSkillPrompt('pr-description', { baseBranch, commits, filesChanged, diff }, workingDir)
+      ?? `You are generating a pull request title and description.\n\nCOMMITS (${baseBranch}..HEAD):\n${commits}\n\nFILES CHANGED:\n${filesChanged}\n\nDIFF:\n${diff}\n\nGenerate PR title (imperative, <70 chars) then body with ## Summary (1-3 bullets). No emojis. Respond with ONLY the title and description.`;
 
     const result = await spawnHaikuWithPrompt(
       prompt,

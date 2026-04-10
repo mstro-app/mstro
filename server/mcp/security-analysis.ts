@@ -74,6 +74,23 @@ export function isDeployMode(): boolean {
   return process.env.BOUNCER_DEPLOY_MODE === 'true';
 }
 
+// ── Bash compound-command safety check ──────────────────────
+
+/** Return true if a Bash command contains compound constructs that could hide dangerous ops. */
+function bashHasUnsafeCompoundOps(op: string): boolean {
+  return containsChainOperators(op) ||
+    containsDangerousPipe(op) ||
+    containsBashExpansion(op) ||
+    containsSensitiveRedirect(op);
+}
+
+/** Return true if a Bash command contains glob or script execution patterns. */
+function bashHasConcerningPatterns(op: string): boolean {
+  if (/\*\*?/.test(op)) return true;
+  if (/^Bash:\s*\.\//.test(op)) return true;
+  return false;
+}
+
 // ── Public API ────────────────────────────────────────────────
 
 /**
@@ -126,14 +143,7 @@ export function requiresAIReview(operation: string): boolean {
   if (matchesPattern(op, SAFE_OPERATIONS)) {
     // Safe bash commands must not contain chain operators, dangerous pipes,
     // or subshell/backtick expansion that could hide dangerous operations.
-    if (/^Bash:/i.test(op) && (
-      containsChainOperators(op) ||
-      containsDangerousPipe(op) ||
-      containsBashExpansion(op) ||
-      containsSensitiveRedirect(op)
-    )) {
-      return true;
-    }
+    if (/^Bash:/i.test(op) && bashHasUnsafeCompoundOps(op)) return true;
     return false;
   }
 
@@ -144,10 +154,7 @@ export function requiresAIReview(operation: string): boolean {
   }
 
   // Glob patterns and script execution are concerning in Bash commands
-  if (/^Bash:/.test(op)) {
-    if (/\*\*?/.test(op)) return true;
-    if (/^Bash:\s*\.\//.test(op)) return true;
-  }
+  if (/^Bash:/.test(op) && bashHasConcerningPatterns(op)) return true;
 
   return false;
 }

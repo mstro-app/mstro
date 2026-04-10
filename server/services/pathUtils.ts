@@ -11,6 +11,54 @@
 import { existsSync, lstatSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, normalize, relative, resolve } from 'node:path';
 
+/** Append a trailing separator to a directory path if not already present. */
+function ensureTrailingSep(dir: string): string {
+  return dir.endsWith('/') ? dir : `${dir}/`;
+}
+
+/** Resolve symlinks for an existing path. Returns the real path if it's a symlink. */
+function resolveExistingSymlink(resolvedPath: string): string {
+  const stat = lstatSync(resolvedPath);
+  if (stat.isSymbolicLink()) {
+    return realpathSync(resolvedPath);
+  }
+  return resolvedPath;
+}
+
+/**
+ * Validate that the parent directory of a non-existent path hasn't escaped
+ * the working directory via symlink. Returns an error result or null if valid.
+ */
+function validateParentSymlink(
+  resolvedPath: string,
+  normalizedWorkingDir: string,
+  targetPath: string,
+): PathValidationResult | null {
+  const parentDir = dirname(resolvedPath);
+  if (!existsSync(parentDir)) return null;
+
+  const realParent = realpathSync(parentDir);
+  const parentWithSep = ensureTrailingSep(normalizedWorkingDir);
+  if (realParent !== normalizedWorkingDir && !realParent.startsWith(parentWithSep)) {
+    console.error(
+      `[PathUtils] SECURITY: Symlink traversal in parent directory blocked. ` +
+      `Target: "${targetPath}", RealParent: "${realParent}", WorkingDir: "${normalizedWorkingDir}"`
+    );
+    return {
+      valid: false,
+      resolvedPath: '',
+      error: 'Access denied: parent directory resolves outside working directory'
+    };
+  }
+  return null;
+}
+
+/** Check whether a resolved path is within the working directory boundary. */
+function isPathWithinDir(resolvedPath: string, normalizedWorkingDir: string): boolean {
+  return resolvedPath === normalizedWorkingDir ||
+    resolvedPath.startsWith(ensureTrailingSep(normalizedWorkingDir));
+}
+
 export interface PathValidationResult {
   valid: boolean;
   resolvedPath: string;
@@ -34,12 +82,9 @@ export function validatePathWithinWorkingDir(
     const normalizedWorkingDir = resolve(workingDir);
 
     // Resolve the target path relative to working directory
-    let resolvedPath: string;
-    if (isAbsolute(targetPath)) {
-      resolvedPath = resolve(targetPath);
-    } else {
-      resolvedPath = resolve(normalizedWorkingDir, targetPath);
-    }
+    let resolvedPath = isAbsolute(targetPath)
+      ? resolve(targetPath)
+      : resolve(normalizedWorkingDir, targetPath);
 
     // Normalize to remove any .. or . segments
     resolvedPath = normalize(resolvedPath);
@@ -47,47 +92,15 @@ export function validatePathWithinWorkingDir(
     // Resolve symlinks to prevent symlink-based path traversal.
     // A symlink at /project/link -> /etc/passwd would pass the string
     // check below but actually read outside the working directory.
-    // For existing paths: resolve the full path via realpath.
-    // For new paths (create operations): resolve the parent directory.
     if (existsSync(resolvedPath)) {
-      // If the path itself is a symlink, resolve it to the real target
-      const stat = lstatSync(resolvedPath);
-      if (stat.isSymbolicLink()) {
-        resolvedPath = realpathSync(resolvedPath);
-      }
+      resolvedPath = resolveExistingSymlink(resolvedPath);
     } else {
       // Path doesn't exist yet (create operation) — validate the parent
-      const parentDir = dirname(resolvedPath);
-      if (existsSync(parentDir)) {
-        const realParent = realpathSync(parentDir);
-        const parentWithSep = normalizedWorkingDir.endsWith('/')
-          ? normalizedWorkingDir
-          : `${normalizedWorkingDir}/`;
-        if (realParent !== normalizedWorkingDir && !realParent.startsWith(parentWithSep)) {
-          console.error(
-            `[PathUtils] SECURITY: Symlink traversal in parent directory blocked. ` +
-            `Target: "${targetPath}", RealParent: "${realParent}", WorkingDir: "${normalizedWorkingDir}"`
-          );
-          return {
-            valid: false,
-            resolvedPath: '',
-            error: 'Access denied: parent directory resolves outside working directory'
-          };
-        }
-      }
+      const parentError = validateParentSymlink(resolvedPath, normalizedWorkingDir, targetPath);
+      if (parentError) return parentError;
     }
 
-    // Check if the resolved path starts with the working directory
-    // Add trailing separator to prevent partial matches (e.g., /home/user vs /home/username)
-    const workingDirWithSep = normalizedWorkingDir.endsWith('/')
-      ? normalizedWorkingDir
-      : `${normalizedWorkingDir}/`;
-
-    const isWithinWorkingDir =
-      resolvedPath === normalizedWorkingDir ||
-      resolvedPath.startsWith(workingDirWithSep);
-
-    if (!isWithinWorkingDir) {
+    if (!isPathWithinDir(resolvedPath, normalizedWorkingDir)) {
       // Log security violation for monitoring
       console.error(
         `[PathUtils] SECURITY: Path traversal attempt blocked. ` +

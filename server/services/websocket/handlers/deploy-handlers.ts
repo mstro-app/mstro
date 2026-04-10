@@ -111,6 +111,35 @@ function sendChunkedResponse(
   }
 }
 
+/** Validate the incoming deploy HTTP request data. Returns an error response body string or null if valid. */
+function validateDeployRequest(
+  data: DeployHttpRequestData,
+): { status: number; body: string } | null {
+  if (!data?.requestId || !data?.method || !data?.url || !data?.port) {
+    return { status: 400, body: 'Bad Request: missing required fields (requestId, method, url, port)' };
+  }
+  if (data.headers && containsHeaderInjection(data.headers)) {
+    return { status: 400, body: 'Bad Request: headers contain null bytes or CRLF injection' };
+  }
+  if (data.headers && calculateHeaderSize(data.headers) > MAX_HEADER_SIZE_BYTES) {
+    return { status: 431, body: 'Request Header Fields Too Large: total headers exceed 16KB' };
+  }
+  return null;
+}
+
+/** Classify a fetch error into an HTTP status code and message. */
+function classifyFetchError(error: unknown): { status: number; body: string } {
+  if (error instanceof Error) {
+    if (error.name === 'AbortError') {
+      return { status: 504, body: 'Gateway Timeout' };
+    }
+    if (isConnectionRefused(error)) {
+      return { status: 502, body: 'Bad Gateway: target server is not running' };
+    }
+  }
+  return { status: 502, body: 'Bad Gateway' };
+}
+
 export async function handleDeployHttpRequest(
   ctx: HandlerContext,
   ws: WSContext,
@@ -118,34 +147,13 @@ export async function handleDeployHttpRequest(
 ): Promise<void> {
   const data = msg.data as DeployHttpRequestData;
 
-  if (!data?.requestId || !data?.method || !data?.url || !data?.port) {
+  const validationError = validateDeployRequest(data);
+  if (validationError) {
     sendDeployHttpResponse(ctx, ws, {
       requestId: data?.requestId || 'unknown',
-      status: 400,
+      status: validationError.status,
       headers: {},
-      body: 'Bad Request: missing required fields (requestId, method, url, port)',
-    });
-    return;
-  }
-
-  // Reject headers with null bytes or CRLF injection
-  if (data.headers && containsHeaderInjection(data.headers)) {
-    sendDeployHttpResponse(ctx, ws, {
-      requestId: data.requestId,
-      status: 400,
-      headers: {},
-      body: 'Bad Request: headers contain null bytes or CRLF injection',
-    });
-    return;
-  }
-
-  // Enforce header size limit
-  if (data.headers && calculateHeaderSize(data.headers) > MAX_HEADER_SIZE_BYTES) {
-    sendDeployHttpResponse(ctx, ws, {
-      requestId: data.requestId,
-      status: 431,
-      headers: {},
-      body: 'Request Header Fields Too Large: total headers exceed 16KB',
+      body: validationError.body,
     });
     return;
   }
@@ -201,18 +209,7 @@ export async function handleDeployHttpRequest(
       body: bodyBuffer.toString('utf-8'),
     });
   } catch (error: unknown) {
-    let status = 502;
-    let body = 'Bad Gateway';
-
-    if (error instanceof Error) {
-      if (error.name === 'AbortError') {
-        status = 504;
-        body = 'Gateway Timeout';
-      } else if (isConnectionRefused(error)) {
-        status = 502;
-        body = 'Bad Gateway: target server is not running';
-      }
-    }
+    const { status, body } = classifyFetchError(error);
 
     sendDeployHttpResponse(ctx, ws, {
       requestId: data.requestId,

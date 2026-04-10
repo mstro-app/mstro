@@ -97,6 +97,40 @@ paused: false
   }
 }
 
+/** Update front-matter fields in the board.md file. */
+function applyBoardFieldUpdates(
+  boardMdPath: string,
+  fields: Record<string, unknown>,
+): void {
+  let content = readFileSync(boardMdPath, 'utf-8');
+  for (const [key, value] of Object.entries(fields)) {
+    const yamlKey = key.replace(/([A-Z])/g, '_$1').toLowerCase();
+    content = replaceFrontMatterField(content, yamlKey, formatYamlValue(value));
+  }
+  writeFileSync(boardMdPath, content, 'utf-8');
+}
+
+/** Sync the review-custom agent file when review criteria change. */
+function syncReviewCriteriaAgent(
+  fields: Record<string, unknown>,
+  pmDir: string,
+  boardId: string,
+): void {
+  if (!('reviewCriteria' in fields)) return;
+
+  const boardDir = join(pmDir, 'boards', boardId);
+  const agentsDir = join(boardDir, 'agents');
+  const agentPath = join(agentsDir, 'review-custom.md');
+  const criteriaValue = String(fields.reviewCriteria ?? '').trim();
+
+  if (criteriaValue) {
+    if (!existsSync(agentsDir)) mkdirSync(agentsDir, { recursive: true });
+    writeFileSync(agentPath, buildBoardReviewAgent(criteriaValue), 'utf-8');
+  } else if (existsSync(agentPath)) {
+    try { unlinkSync(agentPath); } catch { /* non-fatal */ }
+  }
+}
+
 export function handleUpdateBoard(
   ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage,
   workingDir: string, permission?: 'view',
@@ -118,30 +152,11 @@ export function handleUpdateBoard(
     return;
   }
 
-  let content = readFileSync(boardMdPath, 'utf-8');
-  for (const [key, value] of Object.entries(fields as Record<string, unknown>)) {
-    const yamlKey = key.replace(/([A-Z])/g, '_$1').toLowerCase();
-    content = replaceFrontMatterField(content, yamlKey, formatYamlValue(value));
-  }
-  writeFileSync(boardMdPath, content, 'utf-8');
+  applyBoardFieldUpdates(boardMdPath, fields as Record<string, unknown>);
 
   // When review criteria are set, also write a board-level review agent file
   // so users can discover and edit the full prompt as markdown.
-  const typedFields = fields as Record<string, unknown>;
-  if ('reviewCriteria' in typedFields) {
-    const boardDir = join(pmDir, 'boards', boardId);
-    const agentsDir = join(boardDir, 'agents');
-    const agentPath = join(agentsDir, 'review-custom.md');
-    const criteriaValue = String(typedFields.reviewCriteria ?? '').trim();
-
-    if (criteriaValue) {
-      if (!existsSync(agentsDir)) mkdirSync(agentsDir, { recursive: true });
-      writeFileSync(agentPath, buildBoardReviewAgent(criteriaValue), 'utf-8');
-    } else if (existsSync(agentPath)) {
-      // Clear the agent file when criteria are removed
-      try { unlinkSync(agentPath); } catch { /* non-fatal */ }
-    }
-  }
+  syncReviewCriteriaAgent(fields as Record<string, unknown>, pmDir, boardId);
 
   const boardState = parseBoardDirectory(pmDir, boardId);
   if (boardState) {

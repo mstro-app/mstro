@@ -11,6 +11,7 @@
  * best result, error classification) live in haiku-assessments.ts.
  */
 
+import { loadSkillPrompt } from '../../services/plan/agent-loader.js';
 import { spawnHaikuRaw } from './haiku-assessments.js';
 import { hlog } from './headless-logger.js';
 
@@ -115,14 +116,27 @@ function quickHeuristic(ctx: StallContext, toolWatchdogActive = false): StallVer
 // ========== Haiku Stall Assessment ==========
 
 function buildAssessmentPrompt(ctx: StallContext): string {
-  const silenceMin = Math.round(ctx.silenceMs / 60_000);
-  const totalMin = Math.round(ctx.elapsedTotalMs / 60_000);
+  const silenceMin = String(Math.round(ctx.silenceMs / 60_000));
+  const totalMin = String(Math.round(ctx.elapsedTotalMs / 60_000));
   const promptPreview = ctx.originalPrompt.length > 500
     ? `${ctx.originalPrompt.slice(0, 500)}...`
     : ctx.originalPrompt;
   const tokenLine = ctx.tokenSilenceMs !== undefined
     ? `Token activity: last token event ${Math.round(ctx.tokenSilenceMs / 1000)}s ago (tokens flowing = process alive)`
     : 'Token activity: no token events observed';
+  const lastToolInputLine = ctx.lastToolInputSummary ? `Last tool input: ${ctx.lastToolInputSummary}` : '';
+
+  const fromSkill = loadSkillPrompt('assess-stall', {
+    silenceMin,
+    totalMin,
+    lastToolName: ctx.lastToolName || 'none',
+    lastToolInputLine,
+    pendingToolCount: String(ctx.pendingToolCount),
+    totalToolCalls: String(ctx.totalToolCalls),
+    tokenLine,
+    promptPreview,
+  });
+  if (fromSkill) return fromSkill;
 
   return [
     'You are a process health monitor. A Claude Code subprocess has been silent (no stdout) and you must determine if it is working or stalled.',
@@ -130,7 +144,7 @@ function buildAssessmentPrompt(ctx: StallContext): string {
     `Silent for: ${silenceMin} minutes`,
     `Total runtime: ${totalMin} minutes`,
     `Last tool before silence: ${ctx.lastToolName || 'none'}`,
-    ctx.lastToolInputSummary ? `Last tool input: ${ctx.lastToolInputSummary}` : '',
+    lastToolInputLine,
     `Pending tool calls: ${ctx.pendingToolCount}`,
     `Total tool calls this session: ${ctx.totalToolCalls}`,
     tokenLine,

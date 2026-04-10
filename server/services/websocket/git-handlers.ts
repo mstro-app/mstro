@@ -1,6 +1,7 @@
 // Copyright (c) 2025-present Mstro, Inc. All rights reserved.
 // Licensed under the MIT License. See LICENSE file for details.
 
+import { loadSkillPrompt } from '../plan/agent-loader.js';
 import { handleGitCheckout, handleGitCreateBranch, handleGitDeleteBranch, handleGitListBranches } from './git-branch-handlers.js';
 import { handleGitCommitDiff, handleGitDiff, handleGitShowCommit } from './git-diff-handlers.js';
 import { handleGitDiscoverRepos, handleGitLog, handleGitSetDirectory } from './git-log-handlers.js';
@@ -195,25 +196,12 @@ async function handleGitCommitWithAI(ctx: HandlerContext, ws: WSContext, msg: We
     const diffResult = await executeGitCommand(['diff', '--cached'], workingDir);
     const logResult = await executeGitCommand(['log', '--oneline', '-5'], workingDir);
 
-    const prompt = `You are generating a git commit message for the following staged changes.
+    const recentCommits = logResult.stdout.trim() || 'No recent commits';
+    const stagedFiles = staged.map(f => `${f.status} ${f.path}`).join('\n');
+    const diff = truncateDiff(diffResult.stdout);
 
-RECENT COMMIT MESSAGES (for style reference):
-${logResult.stdout.trim() || 'No recent commits'}
-
-STAGED FILES:
-${staged.map(f => `${f.status} ${f.path}`).join('\n')}
-
-DIFF OF STAGED CHANGES:
-${truncateDiff(diffResult.stdout)}
-
-Generate a commit message following these rules:
-1. First line: imperative mood, max 72 characters (e.g., "Add user authentication", "Fix memory leak in parser")
-2. If the changes are complex, add a blank line then bullet points explaining the key changes
-3. Focus on the "why" not just the "what"
-4. Match the style of recent commits if possible
-5. No emojis unless the repo already uses them
-
-Respond with ONLY the commit message, nothing else.`;
+    const prompt = loadSkillPrompt('commit-message', { recentCommits, stagedFiles, diff }, workingDir)
+      ?? `You are generating a git commit message for the following staged changes.\n\nRECENT COMMIT MESSAGES (for style reference):\n${recentCommits}\n\nSTAGED FILES:\n${stagedFiles}\n\nDIFF OF STAGED CHANGES:\n${diff}\n\nGenerate a commit message: imperative mood, max 72 characters, focus on "why". Respond with ONLY the commit message.`;
 
     const result = await spawnHaikuWithPrompt(
       prompt,

@@ -12,6 +12,7 @@ import { isAbsolute, join } from 'node:path';
 import { runWithFileLogger } from '../../cli/headless/headless-logger.js';
 import { HeadlessRunner } from '../../cli/headless/index.js';
 import type { ToolUseEvent } from '../../cli/headless/types.js';
+import { loadSkillPrompt } from '../plan/agent-loader.js';
 import type { HandlerContext } from './handler-context.js';
 import type { QualityPersistence } from './quality-persistence.js';
 import { recomputeWithAiReview } from './quality-service.js';
@@ -39,106 +40,11 @@ export function buildCodeReviewPrompt(dirPath: string, cliFindings?: Array<{ sev
     ? `\n## CLI Tool Findings (already detected)\n\nThe following issues were found by automated CLI tools (linters, formatters, complexity analyzers). Review these for context — they are already included in the final report. Focus your analysis on DEEPER issues these tools cannot detect.\n\n${cliFindings.slice(0, 50).map((f, i) => `${i + 1}. [${f.severity.toUpperCase()}] ${f.category} — ${f.file}${f.line ? `:${f.line}` : ''} — ${f.title}: ${f.description}`).join('\n')}\n${cliFindings.length > 50 ? `\n...and ${cliFindings.length - 50} more issues from CLI tools.\n` : ''}`
     : '';
 
-  return `You are a senior staff engineer performing a rigorous, honest code review. Your job is to surface the most impactful quality bottlenecks — the issues a principal engineer would flag in a code review. Be critical and objective. Do NOT inflate scores.
+  const fromSkill = loadSkillPrompt('code-review', { dirPath, cliFindingsSection }, dirPath);
+  if (fromSkill) return fromSkill;
 
-IMPORTANT: Your current working directory is "${dirPath}". Only review files within this directory.
-${cliFindingsSection}
-## Review Process
-
-1. **Discover**: Use Glob to find source files (e.g. "**/*.{ts,tsx,js,py,rs,go,java,rb,php}"). Understand the project structure.
-2. **Read**: Read the most important files — entry points, core modules, handlers, services. Prioritize files with recent git changes (\`git diff --name-only HEAD~5\` via Bash if available).
-3. **Analyze**: Look for real, actionable issues across ALL of these categories:
-
-   ### Architecture
-   - What is the current architecture (monolith, microservices, layered, etc.)?
-   - Are there architectural violations? (e.g., presentation layer directly accessing data layer, circular dependencies between modules)
-   - Is there proper separation of concerns?
-   - Are there god objects or god modules that do too much?
-
-   ### SOLID / OOP Principles
-   - **SRP**: Classes/modules with multiple unrelated responsibilities
-   - **OCP**: Code that requires modification instead of extension for new features
-   - **LSP**: Subtypes that don't properly substitute for their base types
-   - **ISP**: Interfaces/contracts that force implementations to depend on methods they don't use
-   - **DIP**: High-level modules directly depending on low-level modules instead of abstractions
-
-   ### Security
-   - Injection vulnerabilities (SQL, XSS, command), hardcoded secrets/credentials, auth bypasses, insecure crypto, path traversal, SSRF, unsafe deserialization
-
-   ### Bugs & Logic
-   - Null/undefined errors, race conditions, logic errors, unhandled edge cases, off-by-one errors, resource leaks, incorrect error handling, incorrect algorithms
-
-   ### Performance
-   - N+1 queries, unnecessary re-renders, missing memoization, blocking I/O in hot paths, unbounded data structures, missing pagination
-
-## CRITICAL — Structured Evidence Requirement
-
-For EACH finding, you MUST provide structured evidence that grounds the finding in actual code. This is required to prevent false positives.
-
-For each finding, use this reasoning process:
-
-1. **PREMISE**: State the observable fact from the code. Quote the exact code you see.
-2. **CONTEXT**: What is the surrounding code doing? Are there guards, fixes, or patterns elsewhere that might handle this?
-3. **COUNTER-CHECK**: Actively look for evidence that CONTRADICTS your finding. Check for:
-   - Guards or validation earlier in the call chain
-   - Error handling wrapping the code
-   - Configuration that changes behavior (e.g., NODE_ENV checks)
-   - Comments explaining intentional design choices
-4. **CONCLUSION**: Only report the finding if you could not find contradicting evidence.
-
-### Common False Positive Patterns to AVOID
-
-- Claiming a function uses API X when it actually uses API Y (e.g., claiming Math.random() when code uses crypto.randomInt()) — ALWAYS quote the actual function call
-- Claiming a header/value is leaked when code already deletes/filters it — READ the full function
-- Claiming there's no guard when a condition check exists nearby — READ surrounding lines
-- Claiming N fields/methods when the actual count differs — COUNT explicitly
-- Claiming a resource leaks when cleanup exists in a different handler — SEARCH for the cleanup code
-
-## Rules
-
-- Only report findings you are >90% confident about after completing the counter-check step.
-- Focus on architecture, SOLID violations, bugs, and security over style nits.
-- Each finding MUST reference a specific file and line number. Do not report vague or file-level issues.
-- Each finding MUST include an "evidence" field with the exact code snippet (1-5 lines) proving the issue exists.
-- Limit to the 25 most important findings, ranked by severity.
-- Do NOT modify any files. This is a read-only review.
-- Be HONEST about the overall quality. A codebase with serious issues should score low.
-
-## Scoring Guidelines
-
-After your analysis, provide an honest overall quality score (0-100) and letter grade:
-- **A (90-100)**: Excellent — clean architecture, minimal issues, well-tested, follows best practices
-- **B (80-89)**: Good — solid code with minor issues, mostly well-structured
-- **C (70-79)**: Adequate — functional but has notable quality issues that should be addressed
-- **D (60-69)**: Below average — significant issues in architecture, testing, or code quality
-- **F (0-59)**: Poor — serious problems: security vulnerabilities, broken architecture, major bugs, or unmaintainable code
-
-Consider ALL findings (both CLI tool findings and your own) when determining the score. The score should reflect the overall state of the codebase honestly. A project with 50+ linting errors, formatting issues, complex functions, AND architectural problems should NOT score above 70.
-
-## Output
-
-After your analysis, output EXACTLY one JSON code block with your findings. No other text after the JSON block.
-
-\`\`\`json
-{
-  "score": 72,
-  "grade": "C",
-  "scoreRationale": "Brief explanation of why this score was given, referencing key issues",
-  "findings": [
-    {
-      "severity": "critical|high|medium|low",
-      "category": "architecture|oop|security|bugs|performance|logic",
-      "file": "relative/path/to/file.ts",
-      "line": 42,
-      "title": "Short title describing the issue",
-      "description": "What the problem is and why it matters.",
-      "suggestion": "How to fix it.",
-      "evidence": "const token = Math.random().toString(36) // exact code from file proving the issue"
-    }
-  ],
-  "summary": "Brief 1-2 sentence summary of overall code quality."
-}
-\`\`\``;
+  // Inline fallback when Skill file is not available (e.g., standalone CLI install)
+  return `You are a senior staff engineer performing a rigorous code review.\n\nIMPORTANT: Your current working directory is "${dirPath}". Only review files within this directory.\n${cliFindingsSection}\nDiscover source files with Glob, read important files, analyze for architecture, SOLID, security, bugs, and performance issues. Each finding needs file, line, evidence. Output one JSON code block with score, grade, findings array, and summary.`;
 }
 
 // ── Response parsing ──────────────────────────────────────────
@@ -343,7 +249,7 @@ export function buildVerificationPrompt(
   dirPath: string,
   findings: CodeReviewFinding[],
 ): string {
-  const findingsJson = findings.map((f, i) => ({
+  const findingsJson = JSON.stringify(findings.map((f, i) => ({
     id: i + 1,
     severity: f.severity,
     category: f.category,
@@ -352,56 +258,13 @@ export function buildVerificationPrompt(
     title: f.title,
     description: f.description,
     evidence: f.evidence || '(none provided)',
-  }));
+  })), null, 2);
 
-  return `You are an independent code review VERIFIER. A separate reviewer produced the findings below. Your job is to VERIFY each finding against the actual code. You are a skeptic — do NOT trust the original reviewer's claims.
+  const fromSkill = loadSkillPrompt('verify-review', { dirPath, findingsJson }, dirPath);
+  if (fromSkill) return fromSkill;
 
-IMPORTANT: Your current working directory is "${dirPath}". Only read files within this directory.
-
-## Findings to Verify
-
-${JSON.stringify(findingsJson, null, 2)}
-
-## Verification Process
-
-For EACH finding:
-
-1. **Read the cited file and line** using the Read tool. Read at least 20 lines around the cited line for context.
-2. **Check the specific claim** in the description. Does the code actually do what the finding claims?
-3. **Search for counter-evidence**:
-   - If the finding claims something is missing (no validation, no cleanup, no guard): search for it with Grep
-   - If the finding claims an API is used: verify the actual API call at that line
-   - If the finding claims a value is leaked/exposed: check if it's filtered/deleted elsewhere in the same function
-4. **Verdict**: Mark as "confirmed" or "rejected" with a brief explanation
-
-## Rules
-
-- You MUST actually Read each cited file. Do not rely on memory or assumptions.
-- Use Grep to search for patterns the finding claims exist (or don't exist).
-- A finding is "rejected" if:
-  - The code does NOT match what the description claims
-  - There IS a guard/fix that the finding claims is missing
-  - The line number doesn't contain the relevant code
-  - The finding is about a different version of the code than what exists now
-- A finding is "confirmed" if you can independently verify the issue exists in the current code.
-- Be thorough but efficient — focus verification effort on high/critical severity findings.
-
-## Output
-
-Output EXACTLY one JSON code block. No other text after the JSON block.
-
-\`\`\`json
-{
-  "verifications": [
-    {
-      "id": 1,
-      "verdict": "confirmed|rejected",
-      "confidence": 0.95,
-      "note": "Brief explanation of what you found when checking the code"
-    }
-  ]
-}
-\`\`\``;
+  // Inline fallback
+  return `You are an independent code review VERIFIER. Verify each finding below against actual code in "${dirPath}".\n\n## Findings to Verify\n\n${findingsJson}\n\nFor each finding: Read the cited file, check the claim, search for counter-evidence. Output one JSON code block with verifications array containing id, verdict (confirmed|rejected), confidence, and note.`;
 }
 
 interface VerificationVerdict {

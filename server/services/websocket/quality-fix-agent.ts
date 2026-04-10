@@ -10,6 +10,7 @@
 import { runWithFileLogger } from '../../cli/headless/headless-logger.js';
 import { HeadlessRunner } from '../../cli/headless/index.js';
 import type { ToolUseEvent } from '../../cli/headless/types.js';
+import { loadSkillPrompt } from '../plan/agent-loader.js';
 import type { HandlerContext } from './handler-context.js';
 import type { QualityPersistence } from './quality-persistence.js';
 import { detectTools, runQualityScan } from './quality-service.js';
@@ -58,7 +59,7 @@ export function createToolProgressCallback(ctx: HandlerContext, ws: WSContext, r
 
 // ── Prompt ────────────────────────────────────────────────────
 
-function buildFixPrompt(findings: FindingForFix[], section?: string): string {
+function buildFixPrompt(findings: FindingForFix[], section?: string, workingDir?: string): string {
   const filtered = section ? findings.filter((f) => f.category === section) : findings;
   const sorted = filtered.sort((a, b) => {
     const order: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
@@ -73,22 +74,14 @@ function buildFixPrompt(findings: FindingForFix[], section?: string): string {
     return parts.join('\n');
   }).join('\n\n');
 
-  return `You are a code quality fix agent. Fix the following quality issues in the codebase.
+  const fromSkill = loadSkillPrompt('fix-quality', {
+    issueList,
+    issueCount: String(sorted.length),
+    showCount: String(Math.min(30, sorted.length)),
+  }, workingDir);
+  if (fromSkill) return fromSkill;
 
-## Issues to Fix (${sorted.length} total, showing top ${Math.min(30, sorted.length)})
-
-${issueList}
-
-## Rules
-
-- Fix each issue by editing the relevant file at the specified location.
-- For complexity issues: refactor into smaller functions. For long files: split or extract modules. For long functions: break into smaller functions.
-- For security issues: apply the suggested fix or use secure coding best practices.
-- For bugs: fix the root cause, not just the symptom.
-- For linting/formatting: apply the standard for the project.
-- Do NOT introduce new issues. Make minimal, focused changes.
-- After fixing, verify the changes compile/pass linting if tools are available.
-- Work through the issues systematically from most to least severe.`;
+  return `You are a code quality fix agent. Fix the following quality issues in the codebase.\n\n## Issues to Fix (${sorted.length} total, showing top ${Math.min(30, sorted.length)})\n\n${issueList}\n\nFix each issue by editing the relevant file. Work from most to least severe. Do NOT introduce new issues.`;
 }
 
 // ── Handler ───────────────────────────────────────────────────
@@ -128,7 +121,7 @@ export async function handleFixIssues(
       data: { path: reportPath, message: 'Starting Claude Code to fix issues...' },
     });
 
-    const prompt = buildFixPrompt(findings, section);
+    const prompt = buildFixPrompt(findings, section, workingDir);
 
     const runner = new HeadlessRunner({
       workingDir: dirPath,

@@ -68,7 +68,7 @@ export function buildClaudeArgs(
   }
 
   if (useStreamJson) {
-    args.push('--output-format', 'stream-json', '--include-partial-messages', '--verbose');
+    args.push('--output-format', 'stream-json', '--verbose');
   }
 
   if (hasImageAttachments) {

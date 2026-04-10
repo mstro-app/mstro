@@ -175,7 +175,7 @@ async function runHaikuAnalysis(
   startTime: number,
   fin: (d: BouncerDecision, layer: string, opts?: Parameters<typeof finalizeDecision>[6]) => BouncerDecision,
 ): Promise<BouncerDecision> {
-  const aiDisabledByEnv = process.env.BOUNCER_USE_AI === 'false' && process.env.NODE_ENV !== 'production';
+  const aiDisabledByEnv = process.env.BOUNCER_USE_AI === 'false';
   if (aiDisabledByEnv || request.context?._skipAI === true) {
     console.error('[Bouncer] AI analysis disabled');
     return fin({ decision: 'warn_allow', confidence: 60, reasoning: 'Operation requires review but AI analysis is disabled. Proceeding with caution.', threatLevel: 'medium' }, 'ai-disabled', { skipCache: true, skipAnalytics: true });

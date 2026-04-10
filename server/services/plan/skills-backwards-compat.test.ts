@@ -51,16 +51,16 @@ vi.mock('../websocket/quality-persistence.js', () => ({}));
 
 // ── Imports ─────────────────────────────────────────────────────────────────
 
-import { loadSkillPrompt } from './agent-loader.js';
+import type { ExecutionCheckpoint } from '../../cli/headless/types.js';
+import { buildRetryPrompt } from '../../cli/prompt-builders.js';
 import {
   buildCodeReviewPrompt,
   buildVerificationPrompt,
-  parseCodeReviewResponse,
   type CodeReviewFinding,
+  parseCodeReviewResponse,
 } from '../websocket/quality-review-agent.js';
-import { parseReviewOutput, autoPassResult } from './review-gate.js';
-import { buildRetryPrompt } from '../../cli/prompt-builders.js';
-import type { ExecutionCheckpoint } from '../../cli/headless/types.js';
+import { loadSkillPrompt } from './agent-loader.js';
+import { autoPassResult, parseReviewOutput } from './review-gate.js';
 
 const mockLoadSkillPrompt = vi.mocked(loadSkillPrompt);
 
@@ -93,7 +93,8 @@ function makeCodeFinding(overrides: Partial<CodeReviewFinding> = {}): CodeReview
     line: 42,
     title: 'SQL injection risk',
     description: 'User input is interpolated directly into a query string.',
-    evidence: 'query = `SELECT * FROM users WHERE id = ${userId}`',
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: intentional SQL injection test evidence
+    evidence: "query = `SELECT * FROM users WHERE id = ${userId}`",
     ...overrides,
   };
 }

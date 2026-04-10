@@ -52,8 +52,6 @@ function findSkillsDir(startDir: string): string | null {
 
 const hasProjectSkills = findSkillsDir(workingDir) !== null;
 
-const ALL_SKILLS = [...SYSTEM_SKILLS, ...PROJECT_ONLY_SKILLS] as const;
-
 const describeProjectSkills = hasProjectSkills ? describe : describe.skip;
 
 // ── 1. All Skills exist and load ─────────────────────────────────
@@ -353,7 +351,7 @@ describeProjectSkills('backwards compatibility — interpolated output contains 
 describeProjectSkills('findSkillsDir walks up from nested directories', () => {
   it('finds skills walking up from a deeply nested path', () => {
     // dirname() does not require the path to exist on disk — walk-up still works
-    const deepPath = workingDir + '/deep/nested/path';
+    const deepPath = `${workingDir}/deep/nested/path`;
     const result = loadSkillTemplate('commit-message', deepPath);
     expect(result).not.toBeNull();
     expect(typeof result).toBe('string');
@@ -361,14 +359,14 @@ describeProjectSkills('findSkillsDir walks up from nested directories', () => {
   });
 
   it('finds skills walking up from an extra level of nesting', () => {
-    const deeperPath = workingDir + '/a/b/c/d';
+    const deeperPath = `${workingDir}/a/b/c/d`;
     const result = loadSkillTemplate('assess-stall', deeperPath);
     expect(result).not.toBeNull();
     expect((result as string)).toContain('VERDICT');
   });
 
   it('still strips frontmatter when found via walk-up', () => {
-    const deepPath = workingDir + '/deep/nested';
+    const deepPath = `${workingDir}/deep/nested`;
     const result = loadSkillTemplate('classify-error', deepPath);
     expect(result).not.toBeNull();
     expect((result as string).trimStart()).not.toMatch(/^---/);

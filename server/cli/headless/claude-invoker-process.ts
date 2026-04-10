@@ -68,7 +68,11 @@ export function buildClaudeArgs(
   }
 
   if (useStreamJson) {
-    args.push('--output-format', 'stream-json', '--verbose');
+    // --include-partial-messages is required for the CLI to emit per-delta
+    // `stream_event` records that the stream handler consumes (text/thinking/
+    // tool deltas, per-step token usage). Without it, Claude Code 2.x only
+    // emits complete assistant messages at turn end and our callbacks go silent.
+    args.push('--output-format', 'stream-json', '--verbose', '--include-partial-messages');
   }
 
   if (hasImageAttachments) {

@@ -11,20 +11,23 @@
  * /home/username/repos/mstro/.claude/skills/.
  */
 
+import { existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { loadSkillPrompt, loadSkillTemplate } from './agent-loader.js';
 
 const workingDir = new URL('.', import.meta.url).pathname;
 
-const ALL_SKILLS = [
+/** Skills that have system defaults in agents/ and always resolve. */
+const SYSTEM_SKILLS = ['review-code', 'review-quality', 'review-custom'] as const;
+
+/** Skills that only exist in .claude/skills/ (monorepo root). */
+const PROJECT_ONLY_SKILLS = [
   'commit-message',
   'pr-description',
   'code-review',
   'fix-quality',
   'verify-review',
-  'review-code',
-  'review-quality',
-  'review-custom',
   'assess-stall',
   'detect-context-loss',
   'classify-error',
@@ -35,10 +38,37 @@ const ALL_SKILLS = [
   'review-criteria',
 ] as const;
 
+function findSkillsDir(startDir: string): string | null {
+  let dir = startDir;
+  for (let i = 0; i < 10; i++) {
+    const candidate = join(dir, '.claude', 'skills');
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+const hasProjectSkills = findSkillsDir(workingDir) !== null;
+
+const ALL_SKILLS = [...SYSTEM_SKILLS, ...PROJECT_ONLY_SKILLS] as const;
+
+const describeProjectSkills = hasProjectSkills ? describe : describe.skip;
+
 // ── 1. All Skills exist and load ─────────────────────────────────
 
-describe('all 16 skills load from filesystem', () => {
-  it.each(ALL_SKILLS)('%s — loadSkillTemplate returns non-null, non-empty string', (skillName) => {
+describe('system skills load from filesystem', () => {
+  it.each(SYSTEM_SKILLS)('%s — loadSkillTemplate returns non-null, non-empty string', (skillName) => {
+    const result = loadSkillTemplate(skillName, workingDir);
+    expect(result).not.toBeNull();
+    expect(typeof result).toBe('string');
+    expect((result as string).length).toBeGreaterThan(0);
+  });
+});
+
+describeProjectSkills('project skills load from filesystem', () => {
+  it.each(PROJECT_ONLY_SKILLS)('%s — loadSkillTemplate returns non-null, non-empty string', (skillName) => {
     const result = loadSkillTemplate(skillName, workingDir);
     expect(result).not.toBeNull();
     expect(typeof result).toBe('string');
@@ -48,8 +78,16 @@ describe('all 16 skills load from filesystem', () => {
 
 // ── 2. Frontmatter is stripped ───────────────────────────────────
 
-describe('frontmatter is stripped from all skills', () => {
-  it.each(ALL_SKILLS)('%s — template does not start with ---', (skillName) => {
+describe('frontmatter is stripped from system skills', () => {
+  it.each(SYSTEM_SKILLS)('%s — template does not start with ---', (skillName) => {
+    const result = loadSkillTemplate(skillName, workingDir);
+    expect(result).not.toBeNull();
+    expect((result as string).trimStart()).not.toMatch(/^---/);
+  });
+});
+
+describeProjectSkills('frontmatter is stripped from project skills', () => {
+  it.each(PROJECT_ONLY_SKILLS)('%s — template does not start with ---', (skillName) => {
     const result = loadSkillTemplate(skillName, workingDir);
     expect(result).not.toBeNull();
     expect((result as string).trimStart()).not.toMatch(/^---/);
@@ -58,7 +96,7 @@ describe('frontmatter is stripped from all skills', () => {
 
 // ── 3. Placeholders present ──────────────────────────────────────
 
-describe('expected {{variable}} placeholders are present in templates', () => {
+describeProjectSkills('expected {{variable}} placeholders in project skills', () => {
   it('commit-message has recentCommits, stagedFiles, diff', () => {
     const t = loadSkillTemplate('commit-message', workingDir) as string;
     expect(t).toContain('{{recentCommits}}');
@@ -92,7 +130,9 @@ describe('expected {{variable}} placeholders are present in templates', () => {
     expect(t).toContain('{{dirPath}}');
     expect(t).toContain('{{findingsJson}}');
   });
+});
 
+describe('expected {{variable}} placeholders in system skills', () => {
   it('review-code has issue_id, issue_title, files_modified, acceptance_criteria', () => {
     const t = loadSkillTemplate('review-code', workingDir) as string;
     expect(t).toContain('{{issue_id}}');
@@ -115,7 +155,9 @@ describe('expected {{variable}} placeholders are present in templates', () => {
     expect(t).toContain('{{review_criteria}}');
     expect(t).toContain('{{acceptance_criteria}}');
   });
+});
 
+describeProjectSkills('expected {{variable}} placeholders in remaining project skills', () => {
   it('assess-stall has silenceMin, totalMin, lastToolName', () => {
     const t = loadSkillTemplate('assess-stall', workingDir) as string;
     expect(t).toContain('{{silenceMin}}');
@@ -163,7 +205,7 @@ describe('expected {{variable}} placeholders are present in templates', () => {
 
 // ── 4. Backwards compatibility — interpolation produces expected phrases ─────
 
-describe('backwards compatibility — interpolated output contains key phrases', () => {
+describeProjectSkills('backwards compatibility — interpolated output contains key phrases', () => {
   it('commit-message contains imperative mood guidance and section headers', () => {
     const result = loadSkillPrompt(
       'commit-message',
@@ -308,7 +350,7 @@ describe('backwards compatibility — interpolated output contains key phrases',
 
 // ── 5. Skills resolution from nested directory (walk-up behavior) ─────────────
 
-describe('findSkillsDir walks up from nested directories', () => {
+describeProjectSkills('findSkillsDir walks up from nested directories', () => {
   it('finds skills walking up from a deeply nested path', () => {
     // dirname() does not require the path to exist on disk — walk-up still works
     const deepPath = workingDir + '/deep/nested/path';

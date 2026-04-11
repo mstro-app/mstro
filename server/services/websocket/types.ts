@@ -170,7 +170,9 @@ export interface WebSocketMessage {
     | 'deployUsageReport'
     | 'deployAiHealthUpdate'
     // Skill discovery
-    | 'listSkills';
+    | 'listSkills'
+    // Chat-to-board (cross-view skill actions)
+    | 'chatToBoard';
   tabId?: string;
   terminalId?: string;
   // biome-ignore lint/suspicious/noExplicitAny: message envelope carries heterogeneous payloads
@@ -262,6 +264,7 @@ export interface WebSocketResponse {
     | 'gitWorktreeCreatedAndAssigned'
     | 'gitWorktreeRemoved'
     | 'tabWorktreeSwitched'
+    | 'gitBranchChanged'
     | 'gitWorktreePushed'
     | 'gitWorktreePRCreated'
     // Merge response types
@@ -350,7 +353,9 @@ export interface WebSocketResponse {
     | 'deployUsageReportAck'
     | 'deployAiHealthAck'
     // Skill discovery response types
-    | 'skillsList';
+    | 'skillsList'
+    // Chat-to-board response types
+    | 'chatToBoardCreated';
   tabId?: string;
   terminalId?: string;
   // biome-ignore lint/suspicious/noExplicitAny: message envelope carries heterogeneous payloads

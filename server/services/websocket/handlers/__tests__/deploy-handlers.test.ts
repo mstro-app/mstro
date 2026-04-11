@@ -28,6 +28,7 @@ function createMockCtx(): HandlerContext & { sentMessages: Array<{ type: string;
     autocompleteService: {} as HandlerContext['autocompleteService'],
     usageReporter: null,
     fileUploadHandler: null,
+    gitHeadWatcher: null,
     getRegistry: vi.fn() as unknown as HandlerContext['getRegistry'],
     send: vi.fn((_ws, response) => {
       sentMessages.push(response as { type: string; data: unknown });

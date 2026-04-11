@@ -9,7 +9,7 @@
  */
 
 import type { HandlerContext } from './handler-context.js';
-import { handleArchiveBoard, handleCreateBoard, handleGetBoard, handleGetBoardArtifacts, handleGetBoardState, handleReorderBoards, handleSetActiveBoard, handleUpdateBoard } from './plan-board-handlers.js';
+import { handleArchiveBoard, handleChatToBoard, handleCreateBoard, handleGetBoard, handleGetBoardArtifacts, handleGetBoardState, handleReorderBoards, handleSetActiveBoard, handleUpdateBoard } from './plan-board-handlers.js';
 import { handleExecute, handleExecuteEpic, handlePause, handlePrompt, handleResume, handleStop } from './plan-execution-handlers.js';
 import { handleCreateIssue, handleDeleteIssue, handleGetIssue, handleGetMilestone, handleGetSprint, handleListIssues, handlePlanInit, handleScaffold, handleUpdateIssue } from './plan-issue-handlers.js';
 import { handleActivateSprint, handleCompleteSprint, handleCreateSprint, handleGetSprintArtifacts } from './plan-sprint-handlers.js';
@@ -52,6 +52,8 @@ export function handlePlanMessage(
     planReorderBoards: () => handleReorderBoards(ctx, ws, msg, workingDir, permission),
     planSetActiveBoard: () => handleSetActiveBoard(ctx, ws, msg, workingDir, permission),
     planGetBoardArtifacts: () => handleGetBoardArtifacts(ctx, ws, msg, workingDir),
+    // Chat-to-board (from /board and /ship skills)
+    chatToBoard: () => handleChatToBoard(ctx, ws, msg, workingDir, permission),
     // Sprint lifecycle (legacy)
     planCreateSprint: () => handleCreateSprint(ctx, ws, msg, workingDir, permission),
     planActivateSprint: () => handleActivateSprint(ctx, ws, msg, workingDir, permission),

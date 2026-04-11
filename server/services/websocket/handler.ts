@@ -19,6 +19,7 @@ import { handleDeployMessage } from './deploy-handlers.js';
 import { handleFileExplorerMessage, handleFileMessage } from './file-explorer-handlers.js';
 import { FileUploadHandler } from './file-upload-handler.js';
 import { handleGitMessage } from './git-handlers.js';
+import { GitHeadWatcher } from './git-head-watcher.js';
 import type { HandlerContext, UsageReporter } from './handler-context.js';
 import { handlePlanMessage } from './plan-handlers.js';
 import { handleQualityMessage } from './quality-handlers.js';
@@ -46,6 +47,7 @@ export class WebSocketImproviseHandler implements HandlerContext {
   terminalListenerCleanups: Map<string, () => void> = new Map();
   terminalSubscribers: Map<string, Set<WSContext>> = new Map();
   fileUploadHandler: FileUploadHandler | null = null;
+  gitHeadWatcher: GitHeadWatcher | null = null;
 
   constructor() {
     this.frecencyPath = join(homedir(), '.mstro', 'autocomplete-frecency.json');
@@ -103,9 +105,14 @@ export class WebSocketImproviseHandler implements HandlerContext {
     }
   }
 
-  handleConnection(ws: WSContext, _workingDir: string): void {
+  handleConnection(ws: WSContext, workingDir: string): void {
     this.connections.set(ws, new Map());
     this.allConnections.add(ws);
+
+    if (!this.gitHeadWatcher && workingDir) {
+      this.gitHeadWatcher = new GitHeadWatcher(workingDir, this);
+      this.gitHeadWatcher.start();
+    }
   }
 
   async handleMessage(
@@ -147,7 +154,7 @@ export class WebSocketImproviseHandler implements HandlerContext {
     // Quality
     qualityDetectTools: 'quality', qualityScan: 'quality', qualityInstallTools: 'quality', qualityCodeReview: 'quality', qualityFixIssues: 'quality', qualityLoadState: 'quality', qualitySaveDirectories: 'quality',
     // Plan + boards + sprints
-    planInit: 'plan', planGetState: 'plan', planListIssues: 'plan', planGetIssue: 'plan', planGetSprint: 'plan', planGetMilestone: 'plan', planCreateIssue: 'plan', planUpdateIssue: 'plan', planDeleteIssue: 'plan', planScaffold: 'plan', planPrompt: 'plan', planExecute: 'plan', planExecuteEpic: 'plan', planPause: 'plan', planStop: 'plan', planResume: 'plan', planCreateBoard: 'plan', planUpdateBoard: 'plan', planArchiveBoard: 'plan', planGetBoard: 'plan', planGetBoardState: 'plan', planReorderBoards: 'plan', planSetActiveBoard: 'plan', planGetBoardArtifacts: 'plan', planCreateSprint: 'plan', planActivateSprint: 'plan', planCompleteSprint: 'plan', planGetSprintArtifacts: 'plan',
+    planInit: 'plan', planGetState: 'plan', planListIssues: 'plan', planGetIssue: 'plan', planGetSprint: 'plan', planGetMilestone: 'plan', planCreateIssue: 'plan', planUpdateIssue: 'plan', planDeleteIssue: 'plan', planScaffold: 'plan', planPrompt: 'plan', planExecute: 'plan', planExecuteEpic: 'plan', planPause: 'plan', planStop: 'plan', planResume: 'plan', planCreateBoard: 'plan', planUpdateBoard: 'plan', planArchiveBoard: 'plan', planGetBoard: 'plan', planGetBoardState: 'plan', planReorderBoards: 'plan', planSetActiveBoard: 'plan', planGetBoardArtifacts: 'plan', planCreateSprint: 'plan', planActivateSprint: 'plan', planCompleteSprint: 'plan', planGetSprintArtifacts: 'plan', chatToBoard: 'plan',
     // File upload
     fileUploadStart: 'fileUpload', fileUploadChunk: 'fileUpload', fileUploadComplete: 'fileUpload', fileUploadCancel: 'fileUpload',
     // Deploy management + HTTP relay
@@ -243,10 +250,16 @@ export class WebSocketImproviseHandler implements HandlerContext {
     this.allConnections.delete(ws);
     cleanupTerminalSubscribers(this, ws);
 
-    // Clean up file upload handler when no connections remain
-    if (this.allConnections.size === 0 && this.fileUploadHandler) {
-      this.fileUploadHandler.destroy();
-      this.fileUploadHandler = null;
+    // Clean up resources when no connections remain
+    if (this.allConnections.size === 0) {
+      if (this.fileUploadHandler) {
+        this.fileUploadHandler.destroy();
+        this.fileUploadHandler = null;
+      }
+      if (this.gitHeadWatcher) {
+        this.gitHeadWatcher.stop();
+        this.gitHeadWatcher = null;
+      }
     }
   }
 

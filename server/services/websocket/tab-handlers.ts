@@ -51,8 +51,14 @@ export function handleGetActiveTabs(ctx: HandlerContext, ws: WSContext, workingD
   const tabs: Record<string, unknown> = {};
   for (const [tabId, regTab] of Object.entries(allTabs)) {
     const session = ctx.sessions.get(regTab.sessionId);
-    const worktreePath = ctx.gitDirectories.get(tabId);
-    const worktreeBranch = ctx.gitBranches.get(tabId);
+    let worktreePath = ctx.gitDirectories.get(tabId);
+    let worktreeBranch = ctx.gitBranches.get(tabId);
+    if (!worktreePath && regTab.worktreePath) {
+      worktreePath = regTab.worktreePath;
+      worktreeBranch = regTab.worktreeBranch;
+      ctx.gitDirectories.set(tabId, worktreePath);
+      if (worktreeBranch) ctx.gitBranches.set(tabId, worktreeBranch);
+    }
     tabs[tabId] = session
       ? buildActiveTabData(regTab, session, worktreePath, worktreeBranch)
       : buildInactiveTabData(regTab, worktreePath, worktreeBranch);

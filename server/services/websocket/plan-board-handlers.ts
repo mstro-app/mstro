@@ -3,6 +3,7 @@
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { handlePlanPrompt } from '../plan/composer.js';
 import { replaceFrontMatterField } from '../plan/front-matter.js';
 import { getNextBoardId, getNextBoardNumber, parseBoardArtifacts, parseBoardDirectory, parsePlanDirectory, resolvePmDir } from '../plan/parser.js';
 import type { Workspace } from '../plan/types.js';
@@ -307,6 +308,121 @@ export function handleGetBoardArtifacts(
   }
 
   ctx.send(ws, { type: 'planBoardArtifacts', data: artifacts });
+}
+
+// ============================================================================
+// Chat-to-board: create board from conversation and run prompt
+// ============================================================================
+
+export function handleChatToBoard(
+  ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage,
+  workingDir: string, permission?: 'view',
+): void {
+  if (denyIfViewOnly(ctx, ws, permission)) return;
+
+  const { conversation, autoImplement, focusHint } = (msg.data || {}) as {
+    conversation?: string;
+    autoImplement?: boolean;
+    focusHint?: string;
+  };
+
+  if (!conversation) {
+    ctx.send(ws, { type: 'planError', data: { error: 'Conversation text is required' } });
+    return;
+  }
+
+  const pmDir = resolvePmDir(workingDir);
+  if (!pmDir) {
+    ctx.send(ws, { type: 'planError', data: { error: 'No PM directory found. Run planScaffold first.' } });
+    return;
+  }
+
+  const fullState = parsePlanDirectory(workingDir);
+  if (!fullState) {
+    ctx.send(ws, { type: 'planError', data: { error: 'Failed to parse PM directory' } });
+    return;
+  }
+
+  const boardId = getNextBoardId(fullState.boards);
+  const boardNum = getNextBoardNumber(fullState.boards);
+  const title = `Board ${boardNum}`;
+  const boardDir = join(pmDir, 'boards', boardId);
+
+  for (const dir of ['backlog', 'out', 'reviews', 'logs']) {
+    mkdirSync(join(boardDir, dir), { recursive: true });
+  }
+
+  const today = new Date().toISOString().split('T')[0];
+  const goalLine = focusHint || 'Generated from chat conversation';
+
+  writeFileSync(join(boardDir, 'board.md'), `---
+id: ${boardId}
+title: "${title}"
+status: draft
+created: "${today}"
+completed_at: null
+goal: "${goalLine.replace(/"/g, '\\"')}"
+---
+
+# ${title}
+
+## Goal
+${goalLine}
+
+## Notes
+`, 'utf-8');
+
+  writeFileSync(join(boardDir, 'STATE.md'), `---
+project: ../../project.md
+board: board.md
+paused: false
+---
+
+# Board State
+
+## Ready to Work
+
+## In Progress
+
+## Blocked
+
+## Recently Completed
+
+## Warnings
+`, 'utf-8');
+
+  writeFileSync(join(boardDir, 'progress.md'), '# Board Progress\n', 'utf-8');
+
+  const wsPath = join(pmDir, 'workspace.json');
+  if (!existsSync(wsPath)) {
+    writeFileSync(wsPath, JSON.stringify({ activeBoardId: null, boardOrder: [] }, null, 2), 'utf-8');
+  }
+  const workspace: Workspace = JSON.parse(readFileSync(wsPath, 'utf-8'));
+  workspace.boardOrder.push(boardId);
+  workspace.activeBoardId = boardId;
+  writeFileSync(wsPath, JSON.stringify(workspace, null, 2), 'utf-8');
+
+  const boardState = parseBoardDirectory(pmDir, boardId);
+  if (boardState) {
+    ctx.broadcastToAll({ type: 'planBoardCreated', data: boardState.board });
+    ctx.broadcastToAll({ type: 'planWorkspaceUpdated', data: workspace });
+  }
+
+  ctx.send(ws, {
+    type: 'chatToBoardCreated',
+    data: { boardId, autoImplement: !!autoImplement },
+  });
+
+  let prompt = conversation;
+  if (focusHint) {
+    prompt = `Focus on: ${focusHint}\n\n${conversation}`;
+  }
+  handlePlanPrompt(ctx, ws, prompt, workingDir, boardId).catch(error => {
+    ctx.send(ws, {
+      type: 'planError',
+      data: { error: error instanceof Error ? error.message : String(error) },
+    });
+  });
 }
 
 // ── Private helpers ──────────────────────────────────────────────────

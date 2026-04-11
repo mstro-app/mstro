@@ -65,6 +65,7 @@ async function checkToolInstalled(check: string[], cwd: string): Promise<boolean
   return new Promise((resolve) => {
     const proc = spawn(check[0], check.slice(1), {
       cwd,
+      shell: true,
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 10000,
     });
@@ -109,13 +110,16 @@ export async function installTools(
     if (tool.installCommand.startsWith('(')) continue;
     const commands = tool.installCommand.split(' || ');
     let installed = false;
+    let lastStderr = '';
     for (const cmd of commands) {
       const parts = cmd.trim().split(' ');
       const result = await runCommand(parts[0], parts.slice(1), dirPath);
       if (result.exitCode === 0) { installed = true; break; }
+      lastStderr = result.stderr;
     }
     if (!installed) {
-      failures.push(`${tool.name}: all install methods failed`);
+      const detail = lastStderr ? ` (${lastStderr.trim().split('\n').pop()})` : '';
+      failures.push(`${tool.name}: install failed${detail}`);
     }
   }
 
@@ -241,6 +245,7 @@ export function runCommand(cmd: string, args: string[], cwd: string): Promise<{ 
   return new Promise((resolve) => {
     const proc = spawn(cmd, args, {
       cwd,
+      shell: true,
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 120000,
     });

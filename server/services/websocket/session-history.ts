@@ -2,6 +2,7 @@
 // Licensed under the MIT License. See LICENSE file for details.
 
 import { existsSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { HandlerContext } from './handler-context.js';
 import type { WebSocketMessage, WSContext } from './types.js';
@@ -9,8 +10,9 @@ import type { WebSocketMessage, WSContext } from './types.js';
 export function handleHistoryMessage(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): void {
   switch (msg.type) {
     case 'getSessions': {
-      const result = getSessionsList(workingDir, msg.data?.limit ?? 20, msg.data?.offset ?? 0);
-      ctx.send(ws, { type: 'sessions', tabId, data: result });
+      getSessionsList(workingDir, msg.data?.limit ?? 20, msg.data?.offset ?? 0).then(result => {
+        ctx.send(ws, { type: 'sessions', tabId, data: result });
+      });
       break;
     }
     case 'getSessionsCount':
@@ -42,7 +44,7 @@ function getSessionsCount(workingDir: string): number {
   return readdirSync(sessionsDir).filter((name: string) => name.endsWith('.json')).length;
 }
 
-function getSessionsList(workingDir: string, limit: number = 20, offset: number = 0): { sessions: Array<Record<string, unknown> | null>; total: number; hasMore: boolean } {
+async function getSessionsList(workingDir: string, limit: number = 20, offset: number = 0): Promise<{ sessions: Array<Record<string, unknown> | null>; total: number; hasMore: boolean }> {
   const sessionsDir = join(workingDir, '.mstro', 'history');
 
   if (!existsSync(sessionsDir)) {
@@ -60,17 +62,17 @@ function getSessionsList(workingDir: string, limit: number = 20, offset: number 
   const total = historyFiles.length;
   const pageFiles = historyFiles.slice(offset, offset + limit);
 
-  const sessions = pageFiles.map((filename: string) => {
+  const sessions = await Promise.all(pageFiles.map(async (filename: string) => {
     const historyPath = join(sessionsDir, filename);
     try {
-      const historyData = JSON.parse(readFileSync(historyPath, 'utf-8'));
-      return buildSessionSummary(historyData);
+      const raw = await readFile(historyPath, 'utf-8');
+      return buildSessionSummary(JSON.parse(raw));
     } catch {
       return null;
     }
-  }).filter(Boolean);
+  }));
 
-  return { sessions, total, hasMore: offset + limit < total };
+  return { sessions: sessions.filter(Boolean), total, hasMore: offset + limit < total };
 }
 
 function getSessionById(workingDir: string, sessionId: string): Record<string, unknown> | null {

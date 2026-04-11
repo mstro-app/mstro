@@ -25,6 +25,7 @@ import { handleQualityMessage } from './quality-handlers.js';
 import { handleHistoryMessage, handleSessionMessage, initializeTab, resumeHistoricalSession } from './session-handlers.js';
 import { SessionRegistry } from './session-registry.js';
 import { generateNotificationSummary, handleGetSettings, handleUpdateSettings } from './settings-handlers.js';
+import { handleListSkills } from './skill-handlers.js';
 import { handleCreateTab, handleGetActiveTabs, handleMarkTabViewed, handleRemoveTab, handleReorderTabs, handleSyncPromptText, handleSyncTabMeta } from './tab-handlers.js';
 import { cleanupTerminalSubscribers, handleTerminalMessage } from './terminal-handlers.js';
 import type { FrecencyData, WebSocketMessage, WebSocketResponse, WSContext } from './types.js';
@@ -53,6 +54,9 @@ export class WebSocketImproviseHandler implements HandlerContext {
   }
 
   getRegistry(workingDir: string): SessionRegistry {
+    if (!this.sessionRegistry && workingDir) {
+      this.sessionRegistry = new SessionRegistry(workingDir);
+    }
     if (!this.sessionRegistry) {
       this.sessionRegistry = new SessionRegistry(workingDir);
     }
@@ -87,9 +91,16 @@ export class WebSocketImproviseHandler implements HandlerContext {
     }
   }
 
+  private frecencySaveTimer: ReturnType<typeof setTimeout> | null = null;
+
   recordFileSelection(filePath: string): void {
     this.autocompleteService.recordFileSelection(filePath);
-    this.saveFrecencyData();
+    if (!this.frecencySaveTimer) {
+      this.frecencySaveTimer = setTimeout(() => {
+        this.frecencySaveTimer = null;
+        this.saveFrecencyData();
+      }, 2000);
+    }
   }
 
   handleConnection(ws: WSContext, _workingDir: string): void {
@@ -175,6 +186,8 @@ export class WebSocketImproviseHandler implements HandlerContext {
         return handleGetSettings(this, ws);
       case 'updateSettings':
         return handleUpdateSettings(this, ws, msg);
+      case 'listSkills':
+        return handleListSkills(this, ws, workingDir);
     }
 
     // Dispatch table lookup for domain handlers
@@ -222,32 +235,38 @@ export class WebSocketImproviseHandler implements HandlerContext {
   }
 
   handleClose(ws: WSContext): void {
-    // Destroy sessions owned by this connection to free interval timers
     const tabMap = this.connections.get(ws);
     if (tabMap) {
-      const sessionIds = new Set(tabMap.values());
-      for (const sessionId of sessionIds) {
-        const session = this.sessions.get(sessionId);
-        if (session) {
-          session.destroy();
-          this.sessions.delete(sessionId);
-        }
-      }
+      this.cleanupConnectionResources(tabMap);
     }
     this.connections.delete(ws);
     this.allConnections.delete(ws);
     cleanupTerminalSubscribers(this, ws);
 
-    // Kill any active search processes to prevent resource leaks
-    for (const [key, process] of this.activeSearches) {
-      try { process.kill(); } catch { /* ignore */ }
-      this.activeSearches.delete(key);
-    }
-
     // Clean up file upload handler when no connections remain
     if (this.allConnections.size === 0 && this.fileUploadHandler) {
       this.fileUploadHandler.destroy();
       this.fileUploadHandler = null;
+    }
+  }
+
+  private cleanupConnectionResources(tabMap: Map<string, string>): void {
+    // Destroy sessions owned by this connection
+    const sessionIds = new Set(tabMap.values());
+    for (const sessionId of sessionIds) {
+      const session = this.sessions.get(sessionId);
+      if (session) {
+        session.destroy();
+        this.sessions.delete(sessionId);
+      }
+    }
+    // Kill search processes owned by this connection's tabs
+    for (const tabId of tabMap.keys()) {
+      const searchProcess = this.activeSearches.get(tabId);
+      if (searchProcess) {
+        try { searchProcess.kill(); } catch { /* ignore */ }
+        this.activeSearches.delete(tabId);
+      }
     }
   }
 

@@ -168,7 +168,9 @@ export interface WebSocketMessage {
     | 'deployHttpRequest'
     // Deploy usage/health message types (cli→server)
     | 'deployUsageReport'
-    | 'deployAiHealthUpdate';
+    | 'deployAiHealthUpdate'
+    // Skill discovery
+    | 'listSkills';
   tabId?: string;
   terminalId?: string;
   // biome-ignore lint/suspicious/noExplicitAny: message envelope carries heterogeneous payloads
@@ -346,7 +348,9 @@ export interface WebSocketResponse {
     | 'deployHttpResponseChunk'
     | 'deployStatus'
     | 'deployUsageReportAck'
-    | 'deployAiHealthAck';
+    | 'deployAiHealthAck'
+    // Skill discovery response types
+    | 'skillsList';
   tabId?: string;
   terminalId?: string;
   // biome-ignore lint/suspicious/noExplicitAny: message envelope carries heterogeneous payloads
@@ -356,6 +360,13 @@ export interface WebSocketResponse {
 export interface ConnectionData {
   tabId: string;
   workingDir: string;
+}
+
+export interface SkillEntry {
+  name: string;
+  displayName: string;
+  description: string;
+  source: 'project' | 'system' | 'builtin';
 }
 
 // Extended autocomplete option with metadata

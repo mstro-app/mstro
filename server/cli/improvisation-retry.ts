@@ -455,6 +455,23 @@ function isPrematureCompletionCandidate(
   return result.stopReason === 'max_tokens' || result.stopReason === 'end_turn';
 }
 
+/**
+ * Fast heuristic: detect response abandonment without a Haiku call.
+ * When thinking is significantly longer than the response and the response
+ * contains no tool calls, Claude likely planned work it never executed.
+ * This pattern occurs after context compaction or heavy parallel tool results.
+ */
+function isResponseAbandoned(result: HeadlessRunResult): boolean {
+  const thinkingLen = result.thinkingOutput?.length ?? 0;
+  const responseLen = result.assistantResponse?.length ?? 0;
+  const toolCallsInResponse = result.toolUseHistory?.filter(t => t.result !== undefined).length ?? 0;
+
+  if (thinkingLen < 500 || responseLen > 1000) return false;
+  if (toolCallsInResponse > 0 && responseLen > 200) return false;
+
+  return thinkingLen >= responseLen * 3;
+}
+
 /** Use Haiku to assess whether an end_turn response is genuinely complete */
 async function assessEndTurnCompletion(result: HeadlessRunResult, verbose: boolean): Promise<boolean> {
   if (!result.assistantResponse) return false;
@@ -531,7 +548,8 @@ export async function shouldRetryPrematureCompletion(
 
   const stopReason = result.stopReason!;
   const isMaxTokens = stopReason === 'max_tokens';
-  const isIncomplete = isMaxTokens || await assessEndTurnCompletion(result, session.options.verbose);
+  const abandoned = isResponseAbandoned(result);
+  const isIncomplete = isMaxTokens || abandoned || await assessEndTurnCompletion(result, session.options.verbose);
 
   if (!isIncomplete) return false;
 

@@ -111,9 +111,30 @@ export function handleFileExplorerMessage(ctx: HandlerContext, ws: WSContext, ms
       handleRenameFile(ctx, ws, msg, tabId, workingDir);
     },
     notifyFileOpened: () => handleNotifyFileOpened(ctx, ws, msg, workingDir),
-    searchFileContents: () => handleSearchFileContents(ctx, ws, msg, tabId, workingDir),
+    searchFileContents: () => {
+      if (isSandboxed && msg.data?.query) {
+        const searchPath = msg.data.path || msg.data.dirPath;
+        if (searchPath) {
+          const validation = validatePathWithinWorkingDir(searchPath, workingDir);
+          if (!validation.valid) {
+            ctx.send(ws, { type: 'contentSearchError', tabId, data: { error: 'Sandboxed: search path outside project directory' } });
+            return;
+          }
+        }
+      }
+      handleSearchFileContents(ctx, ws, msg, tabId, workingDir);
+    },
     cancelSearch: () => handleCancelSearch(ctx, tabId),
-    findDefinition: () => handleFindDefinition(ctx, ws, msg, tabId, workingDir),
+    findDefinition: () => {
+      if (isSandboxed && msg.data?.filePath) {
+        const validation = validatePathWithinWorkingDir(msg.data.filePath, workingDir);
+        if (!validation.valid) {
+          ctx.send(ws, { type: 'definitionResult', tabId, data: { definitions: [], symbol: msg.data.symbol || '' } });
+          return;
+        }
+      }
+      handleFindDefinition(ctx, ws, msg, tabId, workingDir);
+    },
   };
   const handler = handlers[msg.type];
   if (!handler) return;

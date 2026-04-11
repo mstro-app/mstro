@@ -115,7 +115,7 @@ export class ImprovisationSessionManager extends EventEmitter {
   // ========== Output Queue ==========
 
   private startQueueProcessor(): void {
-    this.queueTimer = setInterval(() => { this.flushOutputQueue(); }, 10);
+    this.queueTimer = setInterval(() => { this.flushOutputQueue(); }, 50);
   }
 
   private queueOutput(text: string): void {
@@ -136,6 +136,10 @@ export class ImprovisationSessionManager extends EventEmitter {
     this._isExecuting = true;
     this._cancelled = false;
     this._cancelCompleteEmitted = false;
+    if (userPrompt !== 'continue') {
+      this._autoContinueCount = 0;
+      this._autoContinuePending = false;
+    }
     this._executionStartTimestamp = _execStart;
     this.executionEventLog = [];
 
@@ -212,6 +216,11 @@ export class ImprovisationSessionManager extends EventEmitter {
       this.executionEventLog = [];
 
       this.emitMovementComplete(movement, result, _execStart, sequenceNumber);
+
+      if (this.shouldAutoContinue(result, userPrompt)) {
+        this.scheduleAutoContinue();
+      }
+
       return movement;
 
     } catch (error: unknown) {
@@ -472,6 +481,40 @@ export class ImprovisationSessionManager extends EventEmitter {
       model: this.options.model || 'default',
     });
     this.emit('onSessionUpdate', this.getHistory());
+  }
+
+  // ========== Auto-Continue ==========
+
+  private _autoContinueCount = 0;
+  private _autoContinuePending = false;
+  private static readonly MAX_AUTO_CONTINUES = 1;
+
+  private shouldAutoContinue(result: HeadlessRunResult, _userPrompt: string): boolean {
+    if (this._autoContinueCount >= ImprovisationSessionManager.MAX_AUTO_CONTINUES) return false;
+    if (this._cancelled) return false;
+    if (!result.completed || result.signalName) return false;
+    if (result.stopReason !== 'end_turn') return false;
+
+    const thinkingLen = result.thinkingOutput?.length ?? 0;
+    const responseLen = result.assistantResponse?.length ?? 0;
+
+    if (thinkingLen < 500 || responseLen > 1000) return false;
+    return thinkingLen >= responseLen * 3;
+  }
+
+  private scheduleAutoContinue(): void {
+    this._autoContinueCount++;
+    this._autoContinuePending = true;
+    this.queueOutput('\n⟳ Response appears incomplete — auto-continuing…\n');
+    this.flushOutputQueue();
+
+    setImmediate(() => {
+      if (this._cancelled || this._isExecuting || !this._autoContinuePending) return;
+      this._autoContinuePending = false;
+      this.executePrompt('continue').catch((err) => {
+        herror('Auto-continue failed:', err);
+      });
+    });
   }
 
   // ========== History I/O ==========

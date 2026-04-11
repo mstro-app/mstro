@@ -115,8 +115,13 @@ export class FileService {
           isDirectory: entry.isDirectory()
         })
 
-        // Recursively search directories (with depth limit)
-        if (entry.isDirectory() && results.length < 1000) {
+        if (results.length >= 1000) {
+          console.warn('[FilesService] Directory scan hit 1000-item limit — results may be incomplete');
+          return results;
+        }
+
+        // Recursively search directories
+        if (entry.isDirectory()) {
           this.scanDirectory(fullPath, baseDir, results)
         }
       }

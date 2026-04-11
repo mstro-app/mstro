@@ -16,6 +16,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { findSkillsDir } from '../../utils/paths.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SYSTEM_AGENTS_DIR = join(__dirname, 'agents');
@@ -44,22 +45,6 @@ function tryLoadFile(filePath: string, variables: Record<string, string>): strin
   } catch {
     return null;
   }
-}
-
-/**
- * Resolve the project root by walking up from a directory looking for `.claude/skills/`.
- * Returns the `.claude/skills/` path if found, or null.
- */
-function findSkillsDir(startDir: string): string | null {
-  let dir = startDir;
-  for (let i = 0; i < 10; i++) {
-    const candidate = join(dir, '.claude', 'skills');
-    if (existsSync(candidate)) return candidate;
-    const parent = dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return null;
 }
 
 /**

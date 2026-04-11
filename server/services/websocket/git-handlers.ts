@@ -1,6 +1,7 @@
 // Copyright (c) 2025-present Mstro, Inc. All rights reserved.
 // Licensed under the MIT License. See LICENSE file for details.
 
+import { resolve } from 'node:path';
 import { loadSkillPrompt } from '../plan/agent-loader.js';
 import { handleGitCheckout, handleGitCreateBranch, handleGitDeleteBranch, handleGitListBranches } from './git-branch-handlers.js';
 import { handleGitCommitDiff, handleGitDiff, handleGitShowCommit } from './git-diff-handlers.js';
@@ -120,6 +121,16 @@ async function handleGitStage(ctx: HandlerContext, ws: WSContext, msg: WebSocket
     return;
   }
 
+  if (!stageAll && paths) {
+    const resolvedRoot = resolve(workingDir);
+    for (const p of paths) {
+      if (!resolve(workingDir, p).startsWith(resolvedRoot)) {
+        ctx.send(ws, { type: 'gitError', tabId, data: { error: `Path traversal not allowed: ${p}` } });
+        return;
+      }
+    }
+  }
+
   try {
     const args = stageAll ? ['add', '-A'] : ['add', '--', ...paths!];
     const result = await executeGitCommand(args, workingDir);
@@ -154,10 +165,16 @@ async function handleGitUnstage(ctx: HandlerContext, ws: WSContext, msg: WebSock
   }
 }
 
+const MAX_COMMIT_MESSAGE_LENGTH = 10_000;
+
 async function handleGitCommit(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): Promise<void> {
   const message = msg.data?.message as string | undefined;
   if (!message) {
     ctx.send(ws, { type: 'gitError', tabId, data: { error: 'Commit message is required' } });
+    return;
+  }
+  if (message.length > MAX_COMMIT_MESSAGE_LENGTH) {
+    ctx.send(ws, { type: 'gitError', tabId, data: { error: `Commit message too long (${message.length} chars, max ${MAX_COMMIT_MESSAGE_LENGTH})` } });
     return;
   }
 

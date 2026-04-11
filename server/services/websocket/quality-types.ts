@@ -35,6 +35,22 @@ export interface QualityFinding {
   verificationNote?: string;
 }
 
+export interface CategoryPenalty {
+  category: string;
+  score: number;
+  grade: string;
+  penalty: number;
+  findingCount: number;
+}
+
+export interface ScoreBreakdown {
+  penaltyDensity: number;
+  totalPenalty: number;
+  issueDensity: number;
+  kloc: number;
+  categoryPenalties: CategoryPenalty[];
+}
+
 export interface QualityResults {
   overall: number;
   grade: string;
@@ -45,8 +61,7 @@ export interface QualityResults {
   totalLines: number;
   timestamp: string;
   ecosystem: string[];
-  /** AI-generated rationale for the score */
-  scoreRationale?: string;
+  scoreBreakdown?: ScoreBreakdown;
 }
 
 export interface ScanProgress {

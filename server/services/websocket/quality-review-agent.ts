@@ -443,18 +443,8 @@ function persistReviewResults(
   }
 
   let updatedResults: import('./quality-service.js').QualityResults;
-  if (reviewResult.score !== null && reviewResult.grade !== null) {
-    updatedResults = {
-      ...existingReport,
-      overall: reviewResult.score,
-      grade: reviewResult.grade,
-      codeReview: findings,
-      scoreRationale: reviewResult.scoreRationale ?? undefined,
-    };
-  } else {
-    updatedResults = recomputeWithAiReview(existingReport, reviewResult.findings);
-    updatedResults = { ...updatedResults, codeReview: findings };
-  }
+  updatedResults = recomputeWithAiReview(existingReport, reviewResult.findings);
+  updatedResults = { ...updatedResults, codeReview: findings };
 
   persistence.saveReport(reportPath, updatedResults);
   persistence.appendHistory(updatedResults, reportPath);

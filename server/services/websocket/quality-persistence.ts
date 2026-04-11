@@ -34,10 +34,18 @@ export interface HistoryDirectoryEntry {
   grade: string;
 }
 
+export interface HistoryCategoryScore {
+  category: string;
+  score: number;
+  grade: string;
+}
+
 export interface QualityHistoryEntry {
   timestamp: string;
   overall: number;
   grade: string;
+  issueDensity?: number;
+  categoryScores?: HistoryCategoryScore[];
   directories: HistoryDirectoryEntry[];
 }
 
@@ -187,12 +195,10 @@ export class QualityPersistence {
   appendHistory(results: QualityResults, dirPath: string): void {
     const history = this.loadHistory();
 
-    // Find or create entry for this timestamp batch
-    // If the last entry was within 60 seconds, merge into it (for multi-dir scans)
     const now = new Date();
     const lastEntry = history[history.length - 1];
     const lastTime = lastEntry ? new Date(lastEntry.timestamp).getTime() : 0;
-    const mergeWindow = 60_000; // 60 seconds
+    const mergeWindow = 60_000;
 
     const dirEntry: HistoryDirectoryEntry = {
       path: dirPath,
@@ -200,30 +206,40 @@ export class QualityPersistence {
       grade: results.grade,
     };
 
+    const categoryScores: HistoryCategoryScore[] | undefined = results.scoreBreakdown
+      ? results.scoreBreakdown.categoryPenalties.map((cp) => ({
+          category: cp.category,
+          score: cp.score,
+          grade: cp.grade,
+        }))
+      : undefined;
+
+    const issueDensity = results.scoreBreakdown?.issueDensity;
+
     if (lastEntry && now.getTime() - lastTime < mergeWindow) {
-      // Merge: update or add this directory in the last entry
       const existing = lastEntry.directories.findIndex((d) => d.path === dirPath);
       if (existing >= 0) {
         lastEntry.directories[existing] = dirEntry;
       } else {
         lastEntry.directories.push(dirEntry);
       }
-      // Recompute overall as average of all directories in this entry
       const totalScore = lastEntry.directories.reduce((sum, d) => sum + d.score, 0);
       lastEntry.overall = Math.round(totalScore / lastEntry.directories.length);
       lastEntry.grade = gradeFromScore(lastEntry.overall);
       lastEntry.timestamp = now.toISOString();
+      if (categoryScores) lastEntry.categoryScores = categoryScores;
+      if (issueDensity !== undefined) lastEntry.issueDensity = issueDensity;
     } else {
-      // New entry
       history.push({
         timestamp: now.toISOString(),
         overall: results.overall,
         grade: results.grade,
+        issueDensity,
+        categoryScores,
         directories: [dirEntry],
       });
     }
 
-    // Trim to max entries
     while (history.length > MAX_HISTORY_ENTRIES) {
       history.shift();
     }

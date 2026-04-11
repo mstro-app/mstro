@@ -5,11 +5,11 @@ import { extname } from 'node:path';
 import { analyzeComplexity, analyzeFunctionLength } from './quality-complexity.js';
 import { analyzeLinting } from './quality-linting.js';
 import { collectSourceFiles, detectEcosystem, runCommand, type SourceFile } from './quality-tools.js';
-import { type CategoryScore, type Ecosystem, FILE_LENGTH_THRESHOLD, hasInstalledToolInCategory, type QualityFinding, type QualityResults, type ScanProgress, TOTAL_STEPS } from './quality-types.js';
+import { type CategoryPenalty, type CategoryScore, type Ecosystem, FILE_LENGTH_THRESHOLD, hasInstalledToolInCategory, type QualityFinding, type QualityResults, type ScanProgress, type ScoreBreakdown, TOTAL_STEPS } from './quality-types.js';
 
 export { detectEcosystem, detectTools, installTools } from './quality-tools.js';
 // Re-export public API for backward compatibility
-export type { CategoryScore, QualityFinding, QualityResults, QualityTool, ScanProgress } from './quality-types.js';
+export type { CategoryPenalty, CategoryScore, QualityFinding, QualityResults, QualityTool, ScanProgress, ScoreBreakdown } from './quality-types.js';
 
 // ============================================================================
 // Formatting Analysis
@@ -124,7 +124,7 @@ function analyzeFileLength(files: SourceFile[]): { score: number; findings: Qual
 }
 
 // ============================================================================
-// Scoring
+// Deterministic Scoring — penalty-density exponential decay
 // ============================================================================
 
 function computeGrade(score: number): string {
@@ -135,66 +135,107 @@ function computeGrade(score: number): string {
   return 'F';
 }
 
-interface CategoryWeights {
-  linting: number;
-  formatting: number;
-  complexity: number;
-  fileLength: number;
-  functionLength: number;
-  aiReview: number;
-}
-
-const DEFAULT_WEIGHTS: CategoryWeights = {
-  linting: 0.25,
-  formatting: 0.10,
-  complexity: 0.20,
-  fileLength: 0.12,
-  functionLength: 0.13,
-  aiReview: 0.20,
-};
-
-// ============================================================================
-// AI Code Review Score
-// ============================================================================
-
-const SEVERITY_PENALTY: Record<string, number> = {
-  critical: 10.0,
-  high: 5.0,
-  medium: 2.0,
+const SEVERITY_WEIGHT: Record<string, number> = {
+  critical: 10,
+  high: 5,
+  medium: 2,
   low: 0.5,
 };
 
-/** Exponential decay constant — higher = harsher scoring */
-const AI_REVIEW_DECAY = 0.10;
+const CATEGORY_MULTIPLIER: Record<string, number> = {
+  security: 2.0,
+  bugs: 1.5,
+  architecture: 1.2,
+  logic: 1.2,
+  performance: 1.0,
+  oop: 0.8,
+  maintainability: 0.8,
+  complexity: 0.7,
+  lint: 0.5,
+  linting: 0.5,
+  format: 0.3,
+  'file-length': 0.3,
+  'function-length': 0.3,
+};
 
+const OVERALL_DECAY = 0.09;
+const CATEGORY_DECAY = 0.20;
+
+function findingPenalty(f: { severity: string; category: string }): number {
+  return (SEVERITY_WEIGHT[f.severity] ?? 2) * (CATEGORY_MULTIPLIER[f.category] ?? 1.0);
+}
+
+export function computeFormulaScore(
+  allFindings: Array<{ severity: string; category: string }>,
+  totalLines: number,
+): { score: number; breakdown: ScoreBreakdown } {
+  const kloc = Math.max(totalLines / 1000, 1.0);
+
+  if (allFindings.length === 0) {
+    return {
+      score: 100,
+      breakdown: { penaltyDensity: 0, totalPenalty: 0, issueDensity: 0, kloc, categoryPenalties: [] },
+    };
+  }
+
+  const byCategory = new Map<string, { penalty: number; count: number }>();
+  let totalPenalty = 0;
+
+  for (const f of allFindings) {
+    const p = findingPenalty(f);
+    totalPenalty += p;
+    const existing = byCategory.get(f.category);
+    if (existing) {
+      existing.penalty += p;
+      existing.count++;
+    } else {
+      byCategory.set(f.category, { penalty: p, count: 1 });
+    }
+  }
+
+  const penaltyDensity = totalPenalty / kloc;
+  const score = Math.round(100 * Math.exp(-OVERALL_DECAY * penaltyDensity));
+
+  const categoryPenalties: CategoryPenalty[] = [];
+  for (const [cat, data] of byCategory) {
+    const catDensity = data.penalty / kloc;
+    const catScore = Math.round(100 * Math.exp(-CATEGORY_DECAY * catDensity));
+    categoryPenalties.push({
+      category: cat,
+      score: catScore,
+      grade: computeGrade(catScore),
+      penalty: Math.round(data.penalty * 10) / 10,
+      findingCount: data.count,
+    });
+  }
+
+  categoryPenalties.sort((a, b) => a.score - b.score);
+
+  return {
+    score,
+    breakdown: {
+      penaltyDensity: Math.round(penaltyDensity * 100) / 100,
+      totalPenalty: Math.round(totalPenalty * 10) / 10,
+      issueDensity: Math.round((allFindings.length / kloc) * 100) / 100,
+      kloc: Math.round(kloc * 10) / 10,
+      categoryPenalties,
+    },
+  };
+}
+
+/** @deprecated — use computeFormulaScore instead */
 export function computeAiReviewScore(
   findings: Array<{ severity: string }>,
   totalLines: number,
 ): number {
   if (findings.length === 0) return 100;
-
   const effectiveKloc = Math.max(totalLines / 1000, 1.0);
   const totalPenalty = findings.reduce(
-    (sum, f) => sum + (SEVERITY_PENALTY[f.severity] ?? 2.0),
+    (sum, f) => sum + (SEVERITY_WEIGHT[f.severity] ?? 2.0),
     0,
   );
   const penaltyDensity = totalPenalty / effectiveKloc;
-  return Math.round(100 * Math.exp(-AI_REVIEW_DECAY * penaltyDensity));
-}
-
-function computeOverallScore(categories: CategoryScore[]): number {
-  const available = categories.filter((c) => c.available);
-  if (available.length === 0) return 0;
-
-  const totalWeight = available.reduce((sum, c) => sum + c.weight, 0);
-  let weighted = 0;
-  for (const cat of available) {
-    const effectiveWeight = cat.weight / totalWeight;
-    cat.effectiveWeight = effectiveWeight;
-    weighted += cat.score * effectiveWeight;
-  }
-
-  return Math.round(Math.max(0, Math.min(100, weighted)));
+  return Math.round(100 * Math.exp(-0.10 * penaltyDensity));
 }
 
 // ============================================================================
@@ -250,64 +291,58 @@ export async function runQualityScan(
   // Step 7: Compute scores
   progress('Computing scores', 7);
 
-  const categories: CategoryScore[] = [
-    {
-      name: 'Linting',
-      score: lintResult.score,
-      weight: DEFAULT_WEIGHTS.linting,
-      effectiveWeight: DEFAULT_WEIGHTS.linting,
-      available: lintResult.available,
-      issueCount: lintResult.issueCount,
-    },
-    {
-      name: 'Formatting',
-      score: fmtResult.score,
-      weight: DEFAULT_WEIGHTS.formatting,
-      effectiveWeight: DEFAULT_WEIGHTS.formatting,
-      available: fmtResult.available,
-      issueCount: fmtResult.issueCount,
-    },
-    {
-      name: 'Complexity',
-      score: complexityResult.score,
-      weight: DEFAULT_WEIGHTS.complexity,
-      effectiveWeight: DEFAULT_WEIGHTS.complexity,
-      available: complexityResult.available,
-      issueCount: complexityResult.issueCount,
-    },
-    {
-      name: 'File Length',
-      score: fileLengthResult.score,
-      weight: DEFAULT_WEIGHTS.fileLength,
-      effectiveWeight: DEFAULT_WEIGHTS.fileLength,
-      available: true,
-      issueCount: fileLengthResult.issueCount,
-    },
-    {
-      name: 'Function Length',
-      score: funcLengthResult.score,
-      weight: DEFAULT_WEIGHTS.functionLength,
-      effectiveWeight: DEFAULT_WEIGHTS.functionLength,
-      available: true,
-      issueCount: funcLengthResult.issueCount,
-    },
-    {
-      name: 'AI Review',
-      score: 0,
-      weight: DEFAULT_WEIGHTS.aiReview,
-      effectiveWeight: DEFAULT_WEIGHTS.aiReview,
-      available: false,
-      issueCount: 0,
-    },
-  ];
-
-  const overall = computeOverallScore(categories);
   const allFindings = [
     ...lintResult.findings,
     ...fmtResult.findings,
     ...complexityResult.findings,
     ...fileLengthResult.findings,
     ...funcLengthResult.findings,
+  ];
+
+  const totalLines = files.reduce((sum, f) => sum + f.lines, 0);
+  const { score: overall, breakdown } = computeFormulaScore(allFindings, totalLines);
+
+  const categories: CategoryScore[] = [
+    {
+      name: 'Linting',
+      score: lintResult.score,
+      weight: 0,
+      effectiveWeight: 0,
+      available: lintResult.available,
+      issueCount: lintResult.issueCount,
+    },
+    {
+      name: 'Formatting',
+      score: fmtResult.score,
+      weight: 0,
+      effectiveWeight: 0,
+      available: fmtResult.available,
+      issueCount: fmtResult.issueCount,
+    },
+    {
+      name: 'Complexity',
+      score: complexityResult.score,
+      weight: 0,
+      effectiveWeight: 0,
+      available: complexityResult.available,
+      issueCount: complexityResult.issueCount,
+    },
+    {
+      name: 'File Length',
+      score: fileLengthResult.score,
+      weight: 0,
+      effectiveWeight: 0,
+      available: true,
+      issueCount: fileLengthResult.issueCount,
+    },
+    {
+      name: 'Function Length',
+      score: funcLengthResult.score,
+      weight: 0,
+      effectiveWeight: 0,
+      available: true,
+      issueCount: funcLengthResult.issueCount,
+    },
   ];
 
   return {
@@ -317,9 +352,10 @@ export async function runQualityScan(
     findings: allFindings.slice(0, 200),
     codeReview: [],
     analyzedFiles: files.length,
-    totalLines: files.reduce((sum, f) => sum + f.lines, 0),
+    totalLines,
     timestamp: new Date().toISOString(),
     ecosystem: ecosystems,
+    scoreBreakdown: breakdown,
   };
 }
 
@@ -329,39 +365,20 @@ export async function runQualityScan(
 
 /**
  * Recompute the overall score after AI code review findings become available.
- * Returns a new QualityResults with the AI Review category enabled and score updated.
+ * Merges CLI + AI findings and runs the deterministic penalty-density formula.
  */
 export function recomputeWithAiReview(
   results: QualityResults,
-  aiFindings: Array<{ severity: string }>,
+  aiFindings: Array<{ severity: string; category: string }>,
 ): QualityResults {
-  const aiScore = computeAiReviewScore(aiFindings, results.totalLines);
-
-  // Update or add the AI Review category
-  const categories = results.categories.map((cat) => ({ ...cat }));
-  const aiCatIndex = categories.findIndex((c) => c.name === 'AI Review');
-  const aiCategory: CategoryScore = {
-    name: 'AI Review',
-    score: aiScore,
-    weight: DEFAULT_WEIGHTS.aiReview,
-    effectiveWeight: DEFAULT_WEIGHTS.aiReview,
-    available: true,
-    issueCount: aiFindings.length,
-  };
-
-  if (aiCatIndex >= 0) {
-    categories[aiCatIndex] = aiCategory;
-  } else {
-    categories.push(aiCategory);
-  }
-
-  const overall = computeOverallScore(categories);
+  const allFindings = [...results.findings, ...aiFindings];
+  const { score: overall, breakdown } = computeFormulaScore(allFindings, results.totalLines);
 
   return {
     ...results,
     overall,
     grade: computeGrade(overall),
-    categories,
     codeReview: results.codeReview,
+    scoreBreakdown: breakdown,
   };
 }

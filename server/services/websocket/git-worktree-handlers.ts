@@ -397,26 +397,44 @@ async function cleanupAfterMerge(
   strategy: string,
   deleteWorktree: boolean,
   deleteBranch: boolean,
-): Promise<void> {
+): Promise<{ warnings: string[]; removedWorktreePath: string | null }> {
+  const warnings: string[] = [];
+  let removedWorktreePath: string | null = null;
+
   if (deleteWorktree) {
     const wtList = await executeGitCommand(['worktree', 'list', '--porcelain'], mainPath);
     const worktreePath = findWorktreePathForBranch(wtList.stdout, sourceBranch);
     if (worktreePath && worktreePath !== mainPath) {
-      await executeGitCommand(['worktree', 'remove', worktreePath], mainPath);
+      const removeResult = await executeGitCommand(['worktree', 'remove', worktreePath], mainPath);
+      if (removeResult.exitCode !== 0) {
+        const forceResult = await executeGitCommand(['worktree', 'remove', '--force', worktreePath], mainPath);
+        if (forceResult.exitCode !== 0) {
+          warnings.push(`Failed to remove worktree: ${forceResult.stderr || 'unknown error'}`);
+        } else {
+          removedWorktreePath = worktreePath;
+        }
+      } else {
+        removedWorktreePath = worktreePath;
+      }
     }
   }
   if (deleteBranch) {
     const deleteFlag = strategy === 'squash' ? '-D' : '-d';
-    await executeGitCommand(['branch', deleteFlag, sourceBranch], mainPath);
+    const branchResult = await executeGitCommand(['branch', deleteFlag, sourceBranch], mainPath);
+    if (branchResult.exitCode !== 0) {
+      warnings.push(`Failed to delete branch: ${branchResult.stderr || 'unknown error'}`);
+    }
   }
   await executeGitCommand(['worktree', 'prune'], mainPath);
+  return { warnings, removedWorktreePath };
 }
 
 function findWorktreePathForBranch(porcelainOutput: string, branchName: string): string | null {
   let currentWtPath = '';
+  const fullRef = `refs/heads/${branchName}`;
   for (const line of porcelainOutput.split('\n')) {
     if (line.startsWith('worktree ')) currentWtPath = line.slice(9).trim();
-    if (line.startsWith('branch ') && line.includes(branchName)) return currentWtPath;
+    if (line.startsWith('branch ') && line.slice(7).trim() === fullRef) return currentWtPath;
   }
   return null;
 }
@@ -437,6 +455,8 @@ async function handleGitWorktreeMerge(ctx: HandlerContext, ws: WSContext, msg: W
       return;
     }
 
+    const headBefore = await executeGitCommand(['rev-parse', 'HEAD'], mainPath);
+
     const mergeResult = await executeMergeStrategy(strategy, sourceBranch, commitMessage, mainPath);
     if (mergeResult.exitCode !== 0) {
       const conflictFiles = await detectMergeConflicts(mainPath);
@@ -447,10 +467,24 @@ async function handleGitWorktreeMerge(ctx: HandlerContext, ws: WSContext, msg: W
       return;
     }
 
-    const commitHashResult = await executeGitCommand(['rev-parse', '--short', 'HEAD'], mainPath);
-    await cleanupAfterMerge(mainPath, sourceBranch, strategy, !!deleteWorktree, !!deleteBranch);
+    const headAfter = await executeGitCommand(['rev-parse', 'HEAD'], mainPath);
+    if (headBefore.stdout.trim() === headAfter.stdout.trim()) {
+      ctx.send(ws, { type: 'gitWorktreeMergeResult', tabId, data: { success: false, error: `Already up to date — "${sourceBranch}" has no new commits to merge into "${targetBranch}"` } });
+      return;
+    }
 
-    ctx.send(ws, { type: 'gitWorktreeMergeResult', tabId, data: { success: true, mergeCommit: commitHashResult.stdout.trim() } });
+    const commitHashResult = await executeGitCommand(['rev-parse', '--short', 'HEAD'], mainPath);
+    const { warnings, removedWorktreePath } = await cleanupAfterMerge(mainPath, sourceBranch, strategy, !!deleteWorktree, !!deleteBranch);
+
+    if (removedWorktreePath) {
+      cleanupWorktreeReferences(ctx, workingDir, removedWorktreePath);
+    }
+
+    const data: Record<string, unknown> = { success: true, mergeCommit: commitHashResult.stdout.trim() };
+    if (warnings.length > 0) {
+      data.warnings = warnings;
+    }
+    ctx.send(ws, { type: 'gitWorktreeMergeResult', tabId, data });
   } catch (error: unknown) {
     ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
   }

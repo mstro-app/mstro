@@ -138,9 +138,15 @@ export interface BoardExecutionSummary {
 // Workspace (workspace.json)
 // ============================================================================
 
+export interface BoardWorktreeEntry {
+  path: string;
+  branch: string;
+}
+
 export interface Workspace {
   activeBoardId: string | null;
   boardOrder: string[];
+  boardWorktrees?: Record<string, BoardWorktreeEntry>;
 }
 
 // ============================================================================

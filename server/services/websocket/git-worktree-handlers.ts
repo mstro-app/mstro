@@ -1,10 +1,34 @@
 // Copyright (c) 2025-present Mstro, Inc. All rights reserved.
 // Licensed under the MIT License. See LICENSE file for details.
 
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { resolvePmDir } from '../plan/parser.js';
+import type { Workspace } from '../plan/types.js';
 import { executeGitCommand, handleGitStatus, spawnWithOutput } from './git-handlers.js';
 import type { HandlerContext } from './handler-context.js';
 import type { WebSocketMessage, WorktreeInfo, WSContext } from './types.js';
+
+function persistBoardWorktree(workingDir: string, boardId: string, worktreePath: string | null, branch: string | null): void {
+  const pmDir = resolvePmDir(workingDir);
+  if (!pmDir) return;
+  const wsPath = join(pmDir, 'workspace.json');
+  if (!existsSync(wsPath)) return;
+  try {
+    const workspace: Workspace = JSON.parse(readFileSync(wsPath, 'utf-8'));
+    if (!workspace.boardWorktrees) workspace.boardWorktrees = {};
+    if (worktreePath && branch) {
+      workspace.boardWorktrees[boardId] = { path: worktreePath, branch };
+    } else {
+      delete workspace.boardWorktrees[boardId];
+    }
+    writeFileSync(wsPath, JSON.stringify(workspace, null, 2), 'utf-8');
+  } catch { /* non-fatal */ }
+}
+
+function isBoardId(id: string): boolean {
+  return id.startsWith('BOARD-');
+}
 
 export async function handleGitWorktreeMessage(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, gitDir: string, workingDir: string): Promise<void> {
   const handlers: Record<string, () => Promise<void>> = {
@@ -116,6 +140,9 @@ async function handleGitWorktreeCreateAndAssign(ctx: HandlerContext, ws: WSConte
     ctx.gitBranches.set(tabId, branchName);
     const registry = ctx.getRegistry(workingDir);
     registry.updateTabWorktree(tabId, wtPath, branchName);
+    if (isBoardId(tabId)) {
+      persistBoardWorktree(workingDir, tabId, wtPath, branchName);
+    }
 
     ctx.send(ws, {
       type: 'gitWorktreeCreatedAndAssigned',
@@ -126,6 +153,17 @@ async function handleGitWorktreeCreateAndAssign(ctx: HandlerContext, ws: WSConte
     handleGitStatus(ctx, ws, tabId, wtPath);
   } catch (error: unknown) {
     ctx.send(ws, { type: 'gitError', tabId, data: { error: error instanceof Error ? error.message : String(error) } });
+  }
+}
+
+function cleanupWorktreeReferences(ctx: HandlerContext, workingDir: string, wtPath: string): void {
+  const resolvedWtPath = join(wtPath);
+  for (const [tid, dir] of ctx.gitDirectories) {
+    if (dir === resolvedWtPath || dir === wtPath) {
+      ctx.gitDirectories.delete(tid);
+      ctx.gitBranches.delete(tid);
+      if (isBoardId(tid)) persistBoardWorktree(workingDir, tid, null, null);
+    }
   }
 }
 
@@ -155,15 +193,7 @@ async function handleGitWorktreeRemove(ctx: HandlerContext, ws: WSContext, msg: 
     }
 
     await executeGitCommand(['worktree', 'prune'], workingDir);
-
-    // Clean up gitDirectories entries for any tabs referencing the removed worktree
-    const resolvedWtPath = join(wtPath); // normalize
-    for (const [tid, dir] of ctx.gitDirectories) {
-      if (dir === resolvedWtPath || dir === wtPath) {
-        ctx.gitDirectories.delete(tid);
-        ctx.gitBranches.delete(tid);
-      }
-    }
+    cleanupWorktreeReferences(ctx, workingDir, wtPath);
 
     ctx.send(ws, { type: 'gitWorktreeRemoved', tabId, data: { path: wtPath } });
   } catch (error: unknown) {
@@ -180,6 +210,9 @@ async function handleTabWorktreeSwitch(ctx: HandlerContext, ws: WSContext, msg: 
       ctx.gitDirectories.delete(resolvedTabId);
       ctx.gitBranches.delete(resolvedTabId);
       registry.updateTabWorktree(resolvedTabId, null, null);
+      if (isBoardId(resolvedTabId)) {
+        persistBoardWorktree(workingDir, resolvedTabId, null, null);
+      }
       ctx.send(ws, { type: 'tabWorktreeSwitched', tabId: resolvedTabId, data: { tabId: resolvedTabId, worktreePath: workingDir, branch: '' } });
       handleGitStatus(ctx, ws, resolvedTabId, workingDir);
       return;
@@ -191,6 +224,9 @@ async function handleTabWorktreeSwitch(ctx: HandlerContext, ws: WSContext, msg: 
     const branch = branchResult.stdout.trim();
     ctx.gitBranches.set(resolvedTabId, branch);
     registry.updateTabWorktree(resolvedTabId, worktreePath, branch);
+    if (isBoardId(resolvedTabId)) {
+      persistBoardWorktree(workingDir, resolvedTabId, worktreePath, branch);
+    }
 
     ctx.send(ws, { type: 'tabWorktreeSwitched', tabId: resolvedTabId, data: { tabId: resolvedTabId, worktreePath, branch } });
     handleGitStatus(ctx, ws, resolvedTabId, worktreePath);

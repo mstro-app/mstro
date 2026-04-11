@@ -129,6 +129,7 @@ export async function handlePlanPrompt(
   userPrompt: string,
   workingDir: string,
   boardId?: string,
+  executionDir?: string,
 ): Promise<void> {
   const pmDir = resolvePmDir(workingDir) ?? defaultPmDir(workingDir);
   const projectContent = readFileOrEmpty(join(pmDir, 'project.md'));
@@ -246,7 +247,7 @@ User request: ${userPrompt}`;
     });
 
     const runner = new HeadlessRunner({
-      workingDir,
+      workingDir: executionDir || workingDir,
       directPrompt: enrichedPrompt,
       stallWarningMs: 300_000,   // 5 min — compose usually finishes quickly
       stallKillMs: 900_000,      // 15 min

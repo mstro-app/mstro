@@ -26,6 +26,16 @@ export function handlePlanInit(ctx: HandlerContext, ws: WSContext, workingDir: s
     return;
   }
 
+  // Restore board worktree assignments into runtime maps
+  if (fullState.workspace?.boardWorktrees) {
+    for (const [boardId, entry] of Object.entries(fullState.workspace.boardWorktrees)) {
+      if (!ctx.gitDirectories.has(boardId)) {
+        ctx.gitDirectories.set(boardId, entry.path);
+        ctx.gitBranches.set(boardId, entry.branch);
+      }
+    }
+  }
+
   ctx.send(ws, { type: 'planState', data: fullState });
 
   const watcher = getWatcher(workingDir, ctx);

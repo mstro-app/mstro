@@ -402,12 +402,26 @@ export function parseBoard(content: string, filePath: string): Board {
   };
 }
 
+function parseWorktreeEntry(v: unknown): { path: string; branch: string } | null {
+  if (!v || typeof v !== 'object' || !('path' in v) || !('branch' in v)) return null;
+  const e = v as { path: unknown; branch: unknown };
+  return typeof e.path === 'string' && typeof e.branch === 'string' ? { path: e.path, branch: e.branch } : null;
+}
+
 export function parseWorkspace(content: string): Workspace {
   try {
     const parsed = JSON.parse(content) as Record<string, unknown>;
+    const boardWorktrees: Record<string, { path: string; branch: string }> = {};
+    if (parsed.boardWorktrees && typeof parsed.boardWorktrees === 'object') {
+      for (const [k, v] of Object.entries(parsed.boardWorktrees as Record<string, unknown>)) {
+        const entry = parseWorktreeEntry(v);
+        if (entry) boardWorktrees[k] = entry;
+      }
+    }
     return {
       activeBoardId: typeof parsed.activeBoardId === 'string' ? parsed.activeBoardId : null,
       boardOrder: Array.isArray(parsed.boardOrder) ? parsed.boardOrder.map(String) : [],
+      ...(Object.keys(boardWorktrees).length > 0 ? { boardWorktrees } : {}),
     };
   } catch {
     return { activeBoardId: null, boardOrder: [] };

@@ -73,6 +73,8 @@ export class PlanExecutor extends EventEmitter {
   private _scopeSetByCall = false;
   /** Extra environment variables forwarded to HeadlessRunner child processes (e.g. API keys) */
   private extraEnv?: Record<string, string>;
+  /** Optional worktree directory for running AI agents. PM data is always read from workingDir. */
+  private executionDir: string | null = null;
   private metrics: ExecutionMetrics = {
     issuesCompleted: 0,
     issuesAttempted: 0,
@@ -98,8 +100,9 @@ export class PlanExecutor extends EventEmitter {
   }
 
   /** Start execution, optionally scoped to a specific board. */
-  async startBoard(boardId: string): Promise<void> {
+  async startBoard(boardId: string, executionDir?: string): Promise<void> {
     this.boardId = boardId;
+    this.executionDir = executionDir ?? null;
     this._scopeSetByCall = true;
     return this.start();
   }
@@ -113,6 +116,7 @@ export class PlanExecutor extends EventEmitter {
     if (!this._scopeSetByCall) {
       this.epicScope = null;
       this.boardId = null;
+      this.executionDir = null;
     }
     this._scopeSetByCall = false;
     this.status = 'starting';
@@ -247,10 +251,11 @@ export class PlanExecutor extends EventEmitter {
     waveLabel: string,
     abortSignal?: AbortSignal,
   ): Promise<void> {
+    const effectiveDir = this.executionDir || this.workingDir;
     const outputPath = resolveOutputPath(issue, this.workingDir, this.boardDir);
     const prompt = buildIssuePrompt({
       issue,
-      workingDir: this.workingDir,
+      workingDir: effectiveDir,
       pmDir,
       boardDir: this.boardDir,
       existingDocs,
@@ -259,7 +264,7 @@ export class PlanExecutor extends EventEmitter {
 
     const boardLogDir = this.boardDir ? join(this.boardDir, 'logs') : undefined;
     const result = await runWithFileLogger(`pm-issue-${issue.id}`, () => runIssueWithRetry({
-      workingDir: this.workingDir,
+      workingDir: effectiveDir,
       prompt,
       stallWarningMs: ISSUE_STALL_WARNING_MS,
       stallKillMs: ISSUE_STALL_KILL_MS,

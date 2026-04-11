@@ -24,7 +24,8 @@ export function handlePrompt(
     ctx.send(ws, { type: 'planError', data: { error: 'Prompt required' } });
     return;
   }
-  handlePlanPrompt(ctx, ws, prompt, workingDir, boardId).catch(error => {
+  const executionDir = boardId ? ctx.gitDirectories.get(boardId) : undefined;
+  handlePlanPrompt(ctx, ws, prompt, workingDir, boardId, executionDir).catch(error => {
     ctx.send(ws, {
       type: 'planError',
       data: { error: error instanceof Error ? error.message : String(error) },
@@ -109,8 +110,9 @@ export function handleExecute(
   wireExecutorEvents(executor, ctx, workingDir);
 
   const boardId = msg.data?.boardId as string | undefined;
+  const executionDir = boardId ? ctx.gitDirectories.get(boardId) : undefined;
   ctx.send(ws, { type: 'planExecutionStarted', data: { status: 'executing', boardId } });
-  const startPromise = boardId ? executor.startBoard(boardId) : executor.start();
+  const startPromise = boardId ? executor.startBoard(boardId, executionDir) : executor.start();
   startPromise.catch(error => {
     ctx.send(ws, {
       type: 'planExecutionError',

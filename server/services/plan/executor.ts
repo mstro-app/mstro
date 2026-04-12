@@ -129,6 +129,8 @@ export class PlanExecutor extends EventEmitter {
     this.pmDir = resolvePmDir(this.workingDir);
     this.boardDir = this.resolveBoardDir();
 
+    this.recoverStaleIssues();
+
     const stallResult = await this.runWaveLoop();
 
     this.metrics.totalDuration = Date.now() - startTime;
@@ -409,6 +411,45 @@ export class PlanExecutor extends EventEmitter {
     return 0;
   }
 
+  // ── Recovery ─────────────────────────────────────────────────
+
+  /**
+   * Recover from a previous interrupted execution by reverting stale
+   * `in_progress` and `in_review` issues back to `todo`. Without this,
+   * these issues block the dependency graph and cause the executor to
+   * find zero ready issues, making "Implement" appear to do nothing.
+   */
+  private recoverStaleIssues(): void {
+    const pmDir = this.pmDir;
+    if (!pmDir) return;
+
+    const effectiveBoardId = this.boardId ?? this.resolveActiveBoardId();
+    const issues = effectiveBoardId
+      ? this.loadBoardIssues(pmDir, effectiveBoardId)
+      : this.loadProjectIssues();
+
+    if (!issues) return;
+
+    const staleStatuses = new Set(['in_progress', 'in_review']);
+    const recovered: string[] = [];
+
+    for (const issue of issues) {
+      if (issue.type === 'epic') continue;
+      if (staleStatuses.has(issue.status)) {
+        this.updateIssueFrontMatter(issue.path, 'todo');
+        recovered.push(`${issue.id} (${issue.status} → todo)`);
+      }
+    }
+
+    if (recovered.length > 0) {
+      this.emit('output', {
+        issueId: 'recovery',
+        text: `Recovered ${recovered.length} issue${recovered.length > 1 ? 's' : ''} from previous interrupted execution: ${recovered.join(', ')}`,
+      });
+      this.emit('stateUpdated');
+    }
+  }
+
   // ── Helpers ──────────────────────────────────────────────────
 
   /** Read the board's maxParallelAgents setting, falling back to default. */
@@ -470,7 +511,7 @@ export class PlanExecutor extends EventEmitter {
 
     const readyIssues = resolveReadyToWork(issues, this.epicScope ?? undefined);
     if (readyIssues.length === 0) {
-      this.emit('complete', this.epicScope ? 'All epic issues are done or blocked' : 'All work is done or blocked');
+      this.emit('complete', this.buildCompletionReason(issues));
       if (effectiveBoardId) {
         this.tryCompleteBoardIfDone(pmDir, effectiveBoardId, issues);
       }
@@ -549,6 +590,15 @@ export class PlanExecutor extends EventEmitter {
     } catch {
       return null;
     }
+  }
+
+  private buildCompletionReason(issues: Issue[]): string {
+    const nonEpic = issues.filter(i => i.type !== 'epic');
+    const done = nonEpic.filter(i => i.status === 'done' || i.status === 'cancelled').length;
+    const blocked = nonEpic.filter(i => i.status === 'todo').length;
+    if (done === nonEpic.length) return this.epicScope ? 'All epic issues are done' : 'All issues are done';
+    if (blocked > 0) return `${done}/${nonEpic.length} issues done, ${blocked} blocked by incomplete dependencies`;
+    return this.epicScope ? 'All epic issues are done or blocked' : 'All work is done or blocked';
   }
 
   private revertIncompleteIssues(issues: Issue[]): void {

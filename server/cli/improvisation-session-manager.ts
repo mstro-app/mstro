@@ -131,9 +131,10 @@ export class ImprovisationSessionManager extends EventEmitter {
 
   // ========== Main Execution ==========
 
-  async executePrompt(userPrompt: string, attachments?: FileAttachment[], options?: { workingDir?: string; isAutoContinue?: boolean }): Promise<MovementRecord> {
+  async executePrompt(userPrompt: string, attachments?: FileAttachment[], options?: { workingDir?: string; isAutoContinue?: boolean; displayPrompt?: string }): Promise<MovementRecord> {
     const _execStart = Date.now();
     const isAutoContinue = options?.isAutoContinue ?? false;
+    const displayPrompt = options?.displayPrompt ?? userPrompt;
     this._isExecuting = true;
     this._cancelled = false;
     this._cancelCompleteEmitted = false;
@@ -145,9 +146,9 @@ export class ImprovisationSessionManager extends EventEmitter {
     this.executionEventLog = [];
 
     const sequenceNumber = this.history.movements.length + 1;
-    this._currentUserPrompt = userPrompt;
+    this._currentUserPrompt = displayPrompt;
     this._currentSequenceNumber = sequenceNumber;
-    this.emit('onMovementStart', sequenceNumber, userPrompt, isAutoContinue);
+    this.emit('onMovementStart', sequenceNumber, displayPrompt, isAutoContinue);
     trackEvent(AnalyticsEvents.IMPROVISE_PROMPT_RECEIVED, {
       prompt_length: userPrompt.length,
       has_attachments: !!(attachments && attachments.length > 0),
@@ -162,7 +163,7 @@ export class ImprovisationSessionManager extends EventEmitter {
     const pendingMovement: MovementRecord = {
       id: `prompt-${sequenceNumber}`,
       sequenceNumber,
-      userPrompt,
+      userPrompt: displayPrompt,
       timestamp: new Date().toISOString(),
       tokensUsed: 0,
       summary: '',
@@ -176,7 +177,7 @@ export class ImprovisationSessionManager extends EventEmitter {
     try {
       this.executionEventLog.push({
         type: 'movementStart',
-        data: { sequenceNumber, prompt: userPrompt, timestamp: Date.now(), executionStartTimestamp: this._executionStartTimestamp },
+        data: { sequenceNumber, prompt: displayPrompt, timestamp: Date.now(), executionStartTimestamp: this._executionStartTimestamp },
         timestamp: Date.now(),
       });
 
@@ -201,7 +202,7 @@ export class ImprovisationSessionManager extends EventEmitter {
       let result = await this.runRetryLoop(state, sequenceNumber, promptWithAttachments, imageAttachments, options?.workingDir);
 
       if (this._cancelled) {
-        return this.handleCancelledExecution(result, userPrompt, sequenceNumber, _execStart);
+        return this.handleCancelledExecution(result, displayPrompt, sequenceNumber, _execStart);
       }
 
       if (state.contextLost) this.claudeSessionId = undefined;
@@ -209,7 +210,7 @@ export class ImprovisationSessionManager extends EventEmitter {
       this.captureSessionAndSurfaceErrors(result);
       this.isFirstPrompt = false;
 
-      const movement = this.buildMovementRecord(result, userPrompt, sequenceNumber, _execStart, state.retryLog, isAutoContinue);
+      const movement = this.buildMovementRecord(result, displayPrompt, sequenceNumber, _execStart, state.retryLog, isAutoContinue);
       this.handleConflicts(result);
       this.persistMovement(movement);
 
@@ -218,44 +219,12 @@ export class ImprovisationSessionManager extends EventEmitter {
       this.executionEventLog = [];
 
       this.emitMovementComplete(movement, result, _execStart, sequenceNumber);
-
-      if (this.shouldAutoContinue(result, userPrompt)) {
-        this.scheduleAutoContinue();
-      }
+      this.maybeAutoContinue(result, userPrompt);
 
       return movement;
 
     } catch (error: unknown) {
-      this._isExecuting = false;
-      this._executionStartTimestamp = undefined;
-      this.executionEventLog = [];
-      this.currentRunner = null;
-
-      // Update the pending movement with error info so it's not lost
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      const errorMovement: MovementRecord = {
-        id: `prompt-${sequenceNumber}`,
-        sequenceNumber,
-        userPrompt,
-        timestamp: new Date().toISOString(),
-        tokensUsed: 0,
-        summary: '',
-        filesModified: [],
-        errorOutput: errorMessage,
-        durationMs: Date.now() - _execStart,
-      };
-      this.persistMovement(errorMovement);
-
-      this.emit('onMovementError', error);
-      trackEvent(AnalyticsEvents.IMPROVISE_MOVEMENT_ERROR, {
-        error_message: errorMessage.slice(0, 200),
-        sequence_number: sequenceNumber,
-        duration_ms: Date.now() - _execStart,
-        model: this.options.model || 'default',
-      });
-      this.queueOutput(`\n❌ Error: ${errorMessage}\n`);
-      this.flushOutputQueue();
-      throw error;
+      this.handleExecutionError(error, displayPrompt, sequenceNumber, _execStart);
     } finally {
       this.flushOutputQueue();
     }
@@ -410,6 +379,43 @@ export class ImprovisationSessionManager extends EventEmitter {
     return cancelledMovement;
   }
 
+  private handleExecutionError(
+    error: unknown,
+    displayPrompt: string,
+    sequenceNumber: number,
+    execStart: number,
+  ): never {
+    this._isExecuting = false;
+    this._executionStartTimestamp = undefined;
+    this.executionEventLog = [];
+    this.currentRunner = null;
+
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorMovement: MovementRecord = {
+      id: `prompt-${sequenceNumber}`,
+      sequenceNumber,
+      userPrompt: displayPrompt,
+      timestamp: new Date().toISOString(),
+      tokensUsed: 0,
+      summary: '',
+      filesModified: [],
+      errorOutput: errorMessage,
+      durationMs: Date.now() - execStart,
+    };
+    this.persistMovement(errorMovement);
+
+    this.emit('onMovementError', error);
+    trackEvent(AnalyticsEvents.IMPROVISE_MOVEMENT_ERROR, {
+      error_message: errorMessage.slice(0, 200),
+      sequence_number: sequenceNumber,
+      duration_ms: Date.now() - execStart,
+      model: this.options.model || 'default',
+    });
+    this.queueOutput(`\n❌ Error: ${errorMessage}\n`);
+    this.flushOutputQueue();
+    throw error;
+  }
+
   // ========== Post-Execution Helpers ==========
 
   private captureSessionAndSurfaceErrors(result: HeadlessRunResult): void {
@@ -493,6 +499,15 @@ export class ImprovisationSessionManager extends EventEmitter {
   private _autoContinuePending = false;
   private static readonly MAX_AUTO_CONTINUES = 1;
 
+  private maybeAutoContinue(result: HeadlessRunResult, userPrompt: string): void {
+    const isStallKill = !this._cancelled && !!result.signalName;
+    if (isStallKill && this._autoContinueCount < ImprovisationSessionManager.MAX_AUTO_CONTINUES) {
+      this.scheduleAutoContinue('Process stalled');
+    } else if (this.shouldAutoContinue(result, userPrompt)) {
+      this.scheduleAutoContinue();
+    }
+  }
+
   private shouldAutoContinue(result: HeadlessRunResult, _userPrompt: string): boolean {
     if (this._autoContinueCount >= ImprovisationSessionManager.MAX_AUTO_CONTINUES) return false;
     if (this._cancelled) return false;
@@ -510,10 +525,11 @@ export class ImprovisationSessionManager extends EventEmitter {
     return thinkingLen >= responseLen * 3;
   }
 
-  private scheduleAutoContinue(): void {
+  private scheduleAutoContinue(reason?: string): void {
     this._autoContinueCount++;
     this._autoContinuePending = true;
-    this.queueOutput('\n⟳ Response appears incomplete — auto-continuing…\n');
+    const msg = reason || 'Response appears incomplete';
+    this.queueOutput(`\n[[MSTRO_AUTO_CONTINUE]] ${msg} — resuming session (retry ${this._autoContinueCount}/${ImprovisationSessionManager.MAX_AUTO_CONTINUES}).\n`);
     this.flushOutputQueue();
 
     setImmediate(() => {

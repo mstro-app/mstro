@@ -63,6 +63,8 @@ export async function executeClaudeCommand(
     apiTokenUsage: { inputTokens: 0, outputTokens: 0 },
     currentStepOutputTokens: 0,
     lastTokenActivityTime: Date.now(),
+    hasReceivedTextDeltas: false,
+    hasReceivedThinkingDeltas: false,
   };
 
   const stallState: StallState = {

@@ -391,6 +391,30 @@ async function detectMergeConflicts(mainPath: string): Promise<string[]> {
   return result.stdout.trim().split('\n').filter(f => f.trim());
 }
 
+async function removeWorktreeWithFallback(
+  mainPath: string,
+  worktreePath: string,
+): Promise<{ success: boolean; warning?: string }> {
+  const removeResult = await executeGitCommand(['worktree', 'remove', worktreePath], mainPath);
+  if (removeResult.exitCode === 0) return { success: true };
+  const forceResult = await executeGitCommand(['worktree', 'remove', '--force', worktreePath], mainPath);
+  if (forceResult.exitCode === 0) return { success: true };
+  return { success: false, warning: `Failed to remove worktree: ${forceResult.stderr || 'unknown error'}` };
+}
+
+async function deleteBranchAfterMerge(
+  mainPath: string,
+  branchName: string,
+  strategy: string,
+): Promise<string | undefined> {
+  const deleteFlag = strategy === 'squash' ? '-D' : '-d';
+  const result = await executeGitCommand(['branch', deleteFlag, branchName], mainPath);
+  if (result.exitCode !== 0) {
+    return `Failed to delete branch: ${result.stderr || 'unknown error'}`;
+  }
+  return undefined;
+}
+
 async function cleanupAfterMerge(
   mainPath: string,
   sourceBranch: string,
@@ -405,25 +429,17 @@ async function cleanupAfterMerge(
     const wtList = await executeGitCommand(['worktree', 'list', '--porcelain'], mainPath);
     const worktreePath = findWorktreePathForBranch(wtList.stdout, sourceBranch);
     if (worktreePath && worktreePath !== mainPath) {
-      const removeResult = await executeGitCommand(['worktree', 'remove', worktreePath], mainPath);
-      if (removeResult.exitCode !== 0) {
-        const forceResult = await executeGitCommand(['worktree', 'remove', '--force', worktreePath], mainPath);
-        if (forceResult.exitCode !== 0) {
-          warnings.push(`Failed to remove worktree: ${forceResult.stderr || 'unknown error'}`);
-        } else {
-          removedWorktreePath = worktreePath;
-        }
-      } else {
+      const result = await removeWorktreeWithFallback(mainPath, worktreePath);
+      if (result.success) {
         removedWorktreePath = worktreePath;
+      } else if (result.warning) {
+        warnings.push(result.warning);
       }
     }
   }
   if (deleteBranch) {
-    const deleteFlag = strategy === 'squash' ? '-D' : '-d';
-    const branchResult = await executeGitCommand(['branch', deleteFlag, sourceBranch], mainPath);
-    if (branchResult.exitCode !== 0) {
-      warnings.push(`Failed to delete branch: ${branchResult.stderr || 'unknown error'}`);
-    }
+    const warning = await deleteBranchAfterMerge(mainPath, sourceBranch, strategy);
+    if (warning) warnings.push(warning);
   }
   await executeGitCommand(['worktree', 'prune'], mainPath);
   return { warnings, removedWorktreePath };

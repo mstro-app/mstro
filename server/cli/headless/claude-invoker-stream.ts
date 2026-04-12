@@ -6,8 +6,73 @@ import type { NativeTimeoutDetector } from './native-timeout-detector.js';
 import { classifyError } from './stall-assessor.js';
 import type { ResolvedHeadlessConfig, ToolUseAccumulator } from './types.js';
 
-// biome-ignore lint/suspicious/noExplicitAny: external CLI stream JSON with heterogeneous shapes
-type StreamJson = any;
+interface StreamContentBlock {
+  type: string;
+  text?: string;
+  thinking?: string;
+  name?: string;
+  id?: string;
+  input?: Record<string, unknown>;
+  tool_use_id?: string;
+  content?: string | unknown;
+  is_error?: boolean;
+}
+
+interface StreamTokenUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cache_read_input_tokens?: number;
+}
+
+type StreamJson = {
+  type: string;
+  subtype?: string;
+  session_id?: string;
+  stop_reason?: string;
+  is_error?: boolean;
+  error?: string | { message?: string };
+  result?: string;
+  message?: {
+    content?: StreamContentBlock[];
+    usage?: StreamTokenUsage;
+  };
+  event?: {
+    type: string;
+    delta?: {
+      type: string;
+      thinking?: string;
+      text?: string;
+      partial_json?: string;
+    };
+    content_block?: {
+      type: string;
+      name?: string;
+      id?: string;
+    };
+    index?: number;
+    message?: { usage?: StreamTokenUsage };
+    usage?: { output_tokens?: number };
+  };
+  usage?: StreamTokenUsage;
+  delta?: {
+    type: string;
+    thinking?: string;
+    text?: string;
+    partial_json?: string;
+  };
+  content_block?: {
+    type: string;
+    name?: string;
+    id?: string;
+  };
+  index?: number;
+  text?: string;
+  thinking?: string;
+  name?: string;
+  id?: string;
+  input?: Record<string, unknown>;
+};
 
 export interface StreamHandlerContext {
   config: ResolvedHeadlessConfig;
@@ -29,6 +94,11 @@ export interface StreamHandlerContext {
   lastTokenActivityTime: number;
   /** Claude Code result event stop_reason (e.g., 'end_turn', 'max_tokens') */
   stopReason?: string;
+  /** True once any stream_event text_delta has been received — used to skip
+   *  duplicate text from assistant messages emitted alongside streaming deltas. */
+  hasReceivedTextDeltas: boolean;
+  /** Same guard for thinking deltas */
+  hasReceivedThinkingDeltas: boolean;
 }
 
 /** Log messages when verbose mode is enabled */
@@ -61,6 +131,8 @@ function handleThinkingDelta(event: StreamJson, ctx: StreamHandlerContext): stri
     return ctx.accumulatedThinking;
   }
 
+  ctx.hasReceivedThinkingDeltas = true;
+
   if (ctx.resumeAssessmentActive) {
     ctx.resumeAssessmentActive = false;
     if (ctx.resumeAssessmentBuffer) {
@@ -92,6 +164,7 @@ function handleTextDelta(event: StreamJson, ctx: StreamHandlerContext): string {
     return ctx.accumulatedAssistantResponse;
   }
 
+  ctx.hasReceivedTextDeltas = true;
   const text = event.delta.text;
   const updated = ctx.accumulatedAssistantResponse + text;
 
@@ -211,30 +284,32 @@ function handleToolResult(parsed: StreamJson, ctx: StreamHandlerContext): void {
 // ========== Stream Processing ==========
 
 function handleAssistantTextBlock(block: StreamJson, ctx: StreamHandlerContext): void {
-  ctx.accumulatedAssistantResponse += block.text;
-  ctx.config.outputCallback?.(block.text);
+  if (ctx.hasReceivedTextDeltas) return;
+  ctx.accumulatedAssistantResponse += block.text!;
+  ctx.config.outputCallback?.(block.text!);
 }
 
 function handleAssistantThinkingBlock(block: StreamJson, ctx: StreamHandlerContext): void {
-  ctx.accumulatedThinking += block.thinking;
+  if (ctx.hasReceivedThinkingDeltas) return;
+  ctx.accumulatedThinking += block.thinking!;
   if (ctx.config.thinkingCallback) {
-    ctx.config.thinkingCallback(block.thinking);
+    ctx.config.thinkingCallback(block.thinking!);
   } else {
-    ctx.config.outputCallback?.(block.thinking);
+    ctx.config.outputCallback?.(block.thinking!);
   }
 }
 
 function handleAssistantToolUseBlock(block: StreamJson, ctx: StreamHandlerContext): void {
   const toolInput = block.input || {};
   ctx.accumulatedToolUse.push({
-    toolName: block.name, toolId: block.id,
+    toolName: block.name!, toolId: block.id!,
     toolInput, startTime: Date.now(),
   });
   ctx.config.toolUseCallback?.({
-    type: 'tool_start', toolName: block.name, toolId: block.id, index: 0,
+    type: 'tool_start', toolName: block.name!, toolId: block.id!, index: 0,
   });
   ctx.config.toolUseCallback?.({
-    type: 'tool_complete', toolName: block.name, toolId: block.id,
+    type: 'tool_complete', toolName: block.name!, toolId: block.id!,
     index: 0, completeInput: toolInput,
   });
 }
@@ -266,29 +341,36 @@ function handleAssistantMessage(parsed: StreamJson, ctx: StreamHandlerContext): 
   }
 }
 
+function extractErrorMessage(parsed: StreamJson): string {
+  const errObj = typeof parsed.error === 'object' ? parsed.error?.message : parsed.error;
+  return errObj || String(parsed.message ?? '') || JSON.stringify(parsed);
+}
+
+function handleResultEvent(parsed: StreamJson, ctx: StreamHandlerContext): boolean {
+  handleResultTokenUsage(parsed, ctx);
+  if (parsed.stop_reason) {
+    ctx.stopReason = parsed.stop_reason;
+  }
+  if (parsed.is_error) {
+    const errorMessage = parsed.error || parsed.result || 'Unknown error in result';
+    ctx.config.outputCallback?.(`\n[[MSTRO_ERROR:CLAUDE_RESULT_ERROR]] ${errorMessage}\n`);
+    return true;
+  }
+  if (!ctx.accumulatedAssistantResponse && parsed.result && typeof parsed.result === 'string') {
+    ctx.accumulatedAssistantResponse = parsed.result;
+    ctx.config.outputCallback?.(parsed.result);
+  }
+  return false;
+}
+
 export function processStreamEvent(parsed: StreamJson, ctx: StreamHandlerContext): void {
   if (parsed.type === 'error') {
-    const errorMessage = parsed.error?.message || parsed.message || JSON.stringify(parsed);
-    ctx.config.outputCallback?.(`\n[[MSTRO_ERROR:CLAUDE_ERROR]] ${errorMessage}\n`);
+    ctx.config.outputCallback?.(`\n[[MSTRO_ERROR:CLAUDE_ERROR]] ${extractErrorMessage(parsed)}\n`);
     return;
   }
 
   if (parsed.type === 'result') {
-    handleResultTokenUsage(parsed, ctx);
-    if (parsed.stop_reason) {
-      ctx.stopReason = parsed.stop_reason;
-    }
-    if (parsed.is_error) {
-      const errorMessage = parsed.error || parsed.result || 'Unknown error in result';
-      ctx.config.outputCallback?.(`\n[[MSTRO_ERROR:CLAUDE_RESULT_ERROR]] ${errorMessage}\n`);
-      return;
-    }
-    // Fallback: capture the result text if streaming deltas didn't accumulate anything.
-    // This happens when Claude Code runs skill commands or other non-streaming code paths.
-    if (!ctx.accumulatedAssistantResponse && parsed.result && typeof parsed.result === 'string') {
-      ctx.accumulatedAssistantResponse = parsed.result;
-      ctx.config.outputCallback?.(parsed.result);
-    }
+    if (handleResultEvent(parsed, ctx)) return;
   }
 
   if (parsed.type === 'stream_event' && parsed.event) {
@@ -314,9 +396,9 @@ function handleToolStart(event: StreamJson, ctx: StreamHandlerContext): void {
     }
   }
 
-  const toolName = event.content_block.name;
-  const toolId = event.content_block.id;
-  const index = event.index;
+  const toolName = event.content_block.name!;
+  const toolId = event.content_block.id!;
+  const index = event.index!;
 
   ctx.toolInputBuffers.set(index, { name: toolName, id: toolId, inputJson: '', startTime: Date.now() });
   ctx.config.toolUseCallback?.({ type: 'tool_start', toolName, toolId, index });
@@ -326,7 +408,7 @@ function handleToolStart(event: StreamJson, ctx: StreamHandlerContext): void {
 function handleToolInputDelta(event: StreamJson, ctx: StreamHandlerContext): void {
   if (event.type !== 'content_block_delta' || event.delta?.type !== 'input_json_delta') return;
 
-  const index = event.index;
+  const index = event.index!;
   const partialJson = event.delta.partial_json;
   const toolBuffer = ctx.toolInputBuffers.get(index);
   if (toolBuffer) toolBuffer.inputJson += partialJson;
@@ -337,7 +419,7 @@ function handleToolInputDelta(event: StreamJson, ctx: StreamHandlerContext): voi
 function handleToolComplete(event: StreamJson, ctx: StreamHandlerContext): void {
   if (event.type !== 'content_block_stop') return;
 
-  const index = event.index;
+  const index = event.index!;
   const toolBuffer = ctx.toolInputBuffers.get(index);
   if (!toolBuffer) return;
 

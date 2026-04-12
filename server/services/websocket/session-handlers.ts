@@ -5,6 +5,7 @@ import type { FileAttachment, ImprovisationSessionManager } from '../../cli/impr
 import { getModel } from '../settings.js';
 import type { HandlerContext } from './handler-context.js';
 import { runQualityScan } from './quality-service.js';
+import { resolveSkillPrompt } from './skill-handlers.js';
 import type { WebSocketMessage, WSContext } from './types.js';
 
 // Re-export from extracted modules for backward compatibility
@@ -191,7 +192,22 @@ export function handleSessionMessage(ctx: HandlerContext, ws: WSContext, msg: We
       const session = requireSession(ctx, ws, tabId);
       const worktreeDir = ctx.gitDirectories.get(tabId);
       const attachments = mergePreUploadedAttachments(ctx, tabId, msg.data.attachments);
-      session.executePrompt(msg.data.prompt, attachments, { workingDir: worktreeDir });
+
+      // Resolve slash commands (e.g. "/code-review") to their SKILL.md prompt content.
+      // Claude Code's -p headless mode doesn't support skills natively, so we load
+      // the skill's instructions and pass them as the actual prompt.
+      const rawPrompt = msg.data.prompt as string;
+      const effectiveDir = worktreeDir || session.getSessionInfo().workingDir;
+      const resolved = resolveSkillPrompt(rawPrompt, effectiveDir);
+
+      session.executePrompt(
+        resolved ? resolved.prompt : rawPrompt,
+        attachments,
+        {
+          workingDir: worktreeDir,
+          displayPrompt: resolved ? rawPrompt : undefined,
+        },
+      );
       break;
     }
     case 'cancel': {

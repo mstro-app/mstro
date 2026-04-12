@@ -20,345 +20,139 @@ export interface WSContext {
   _ws?: unknown
 }
 
+const CoreMessages = ['execute', 'cancel', 'getHistory', 'getSessions', 'getSessionsCount', 'deleteSession', 'getSessionById', 'clearHistory', 'searchHistory', 'new', 'autocomplete', 'readFile', 'ping', 'initTab', 'resumeSession', 'approve', 'reject', 'recordSelection', 'requestNotificationSummary'] as const;
+
+const TerminalMessages = ['terminalInit', 'terminalReconnect', 'terminalList', 'terminalInput', 'terminalResize', 'terminalClose'] as const;
+
+const FileExplorerMessages = ['listDirectory', 'writeFile', 'createFile', 'createDirectory', 'deleteFile', 'renameFile', 'notifyFileOpened', 'searchFileContents', 'cancelSearch', 'findDefinition'] as const;
+
+const GitMessages = ['gitStatus', 'gitStage', 'gitUnstage', 'gitCommit', 'gitCommitWithAI', 'gitPush', 'gitPull', 'gitLog', 'gitDiscoverRepos', 'gitSetDirectory', 'gitGetRemoteInfo', 'gitCreatePR', 'gitGeneratePRDescription'] as const;
+
+const GitBranchMessages = ['gitListBranches', 'gitCheckout', 'gitCreateBranch', 'gitDeleteBranch'] as const;
+
+const GitDiffMessages = ['gitDiff', 'gitShowCommit', 'gitCommitDiff'] as const;
+
+const GitTagMessages = ['gitListTags', 'gitCreateTag', 'gitPushTag'] as const;
+
+const GitWorktreeMessages = ['gitWorktreeList', 'gitWorktreeCreate', 'gitWorktreeCreateAndAssign', 'gitWorktreeRemove', 'tabWorktreeSwitch', 'gitWorktreePush', 'gitWorktreeCreatePR'] as const;
+
+const GitMergeMessages = ['gitMergePreview', 'gitWorktreeMerge', 'gitMergeAbort', 'gitMergeComplete'] as const;
+
+const SessionSyncMessages = ['getActiveTabs', 'createTab', 'reorderTabs', 'syncTabMeta', 'syncPromptText', 'removeTab', 'markTabViewed'] as const;
+
+const SettingsMessages = ['getSettings', 'updateSettings'] as const;
+
+const QualityMessages = ['qualityDetectTools', 'qualityScan', 'qualityInstallTools', 'qualityCodeReview', 'qualityFixIssues', 'qualityLoadState', 'qualitySaveDirectories'] as const;
+
+const FileUploadMessages = ['fileUploadStart', 'fileUploadChunk', 'fileUploadComplete', 'fileUploadCancel'] as const;
+
+const PlanMessages = ['planInit', 'planGetState', 'planListIssues', 'planGetIssue', 'planGetSprint', 'planGetMilestone', 'planCreateIssue', 'planUpdateIssue', 'planDeleteIssue', 'planScaffold', 'planPrompt', 'planExecute', 'planExecuteEpic', 'planPause', 'planStop', 'planResume'] as const;
+
+const PlanBoardMessages = ['planCreateBoard', 'planUpdateBoard', 'planArchiveBoard', 'planGetBoard', 'planGetBoardState', 'planReorderBoards', 'planSetActiveBoard', 'planGetBoardArtifacts'] as const;
+
+const PlanSprintMessages = ['planCreateSprint', 'planActivateSprint', 'planCompleteSprint', 'planGetSprintArtifacts'] as const;
+
+const DeployMessages = ['deployCreate', 'deployStop', 'deployResume', 'deployDelete', 'deployList', 'deployGetStatus', 'deployUpdateConfig', 'deploySetApiKey', 'deployValidateApiKey'] as const;
+
+const DeployRelayMessages = ['deployHttpRequest', 'deployUsageReport', 'deployAiHealthUpdate'] as const;
+
+const SkillMessages = ['listSkills', 'chatToBoard'] as const;
+
+type WebSocketMessageType =
+  | typeof CoreMessages[number]
+  | typeof TerminalMessages[number]
+  | typeof FileExplorerMessages[number]
+  | typeof GitMessages[number]
+  | typeof GitBranchMessages[number]
+  | typeof GitDiffMessages[number]
+  | typeof GitTagMessages[number]
+  | typeof GitWorktreeMessages[number]
+  | typeof GitMergeMessages[number]
+  | typeof SessionSyncMessages[number]
+  | typeof SettingsMessages[number]
+  | typeof QualityMessages[number]
+  | typeof FileUploadMessages[number]
+  | typeof PlanMessages[number]
+  | typeof PlanBoardMessages[number]
+  | typeof PlanSprintMessages[number]
+  | typeof DeployMessages[number]
+  | typeof DeployRelayMessages[number]
+  | typeof SkillMessages[number];
+
 export interface WebSocketMessage {
-  type:
-    | 'execute'
-    | 'cancel'
-    | 'getHistory'
-    | 'getSessions'
-    | 'getSessionsCount'
-    | 'deleteSession'
-    | 'getSessionById'
-    | 'clearHistory'
-    | 'searchHistory'
-    | 'new'
-    | 'autocomplete'
-    | 'readFile'
-    | 'ping'
-    | 'initTab'
-    | 'resumeSession'
-    | 'approve'
-    | 'reject'
-    | 'recordSelection'
-    | 'requestNotificationSummary'
-    | 'terminalInit'
-    | 'terminalReconnect'
-    | 'terminalList'
-    | 'terminalInput'
-    | 'terminalResize'
-    | 'terminalClose'
-    // File explorer message types
-    | 'listDirectory'
-    | 'writeFile'
-    | 'createFile'
-    | 'createDirectory'
-    | 'deleteFile'
-    | 'renameFile'
-    | 'notifyFileOpened'
-    | 'searchFileContents'
-    | 'cancelSearch'
-    | 'findDefinition'
-    // Git message types
-    | 'gitStatus'
-    | 'gitStage'
-    | 'gitUnstage'
-    | 'gitCommit'
-    | 'gitCommitWithAI'
-    | 'gitPush'
-    | 'gitPull'
-    | 'gitLog'
-    | 'gitDiscoverRepos'
-    | 'gitSetDirectory'
-    | 'gitGetRemoteInfo'
-    | 'gitCreatePR'
-    | 'gitGeneratePRDescription'
-    // Branch operations
-    | 'gitListBranches'
-    | 'gitCheckout'
-    | 'gitCreateBranch'
-    | 'gitDeleteBranch'
-    // Diff operations
-    | 'gitDiff'
-    // Commit detail operations
-    | 'gitShowCommit'
-    | 'gitCommitDiff'
-    // Tag operations
-    | 'gitListTags'
-    | 'gitCreateTag'
-    | 'gitPushTag'
-    // Worktree operations
-    | 'gitWorktreeList'
-    | 'gitWorktreeCreate'
-    | 'gitWorktreeCreateAndAssign'
-    | 'gitWorktreeRemove'
-    | 'tabWorktreeSwitch'
-    | 'gitWorktreePush'
-    | 'gitWorktreeCreatePR'
-    // Merge operations
-    | 'gitMergePreview'
-    | 'gitWorktreeMerge'
-    | 'gitMergeAbort'
-    | 'gitMergeComplete'
-    // Session sync message types
-    | 'getActiveTabs'
-    | 'createTab'
-    | 'reorderTabs'
-    | 'syncTabMeta'
-    | 'syncPromptText'
-    | 'removeTab'
-    | 'markTabViewed'
-    // Settings message types
-    | 'getSettings'
-    | 'updateSettings'
-    // Quality message types
-    | 'qualityDetectTools'
-    | 'qualityScan'
-    | 'qualityInstallTools'
-    | 'qualityCodeReview'
-    | 'qualityFixIssues'
-    | 'qualityLoadState'
-    | 'qualitySaveDirectories'
-    // File upload message types (chunked remote uploads)
-    | 'fileUploadStart'
-    | 'fileUploadChunk'
-    | 'fileUploadComplete'
-    | 'fileUploadCancel'
-    // Plan message types
-    | 'planInit'
-    | 'planGetState'
-    | 'planListIssues'
-    | 'planGetIssue'
-    | 'planGetSprint'
-    | 'planGetMilestone'
-    | 'planCreateIssue'
-    | 'planUpdateIssue'
-    | 'planDeleteIssue'
-    | 'planScaffold'
-    | 'planPrompt'
-    | 'planExecute'
-    | 'planExecuteEpic'
-    | 'planPause'
-    | 'planStop'
-    | 'planResume'
-    // Board lifecycle message types
-    | 'planCreateBoard'
-    | 'planUpdateBoard'
-    | 'planArchiveBoard'
-    | 'planGetBoard'
-    | 'planGetBoardState'
-    | 'planReorderBoards'
-    | 'planSetActiveBoard'
-    | 'planGetBoardArtifacts'
-    // Sprint lifecycle message types (legacy)
-    | 'planCreateSprint'
-    | 'planActivateSprint'
-    | 'planCompleteSprint'
-    | 'planGetSprintArtifacts'
-    // Deploy message types
-    | 'deployCreate'
-    | 'deployStop'
-    | 'deployResume'
-    | 'deployDelete'
-    | 'deployList'
-    | 'deployGetStatus'
-    | 'deployUpdateConfig'
-    | 'deploySetApiKey'
-    | 'deployValidateApiKey'
-    // Deploy HTTP relay message types (server→cli)
-    | 'deployHttpRequest'
-    // Deploy usage/health message types (cli→server)
-    | 'deployUsageReport'
-    | 'deployAiHealthUpdate'
-    // Skill discovery
-    | 'listSkills'
-    // Chat-to-board (cross-view skill actions)
-    | 'chatToBoard';
+  type: WebSocketMessageType;
   tabId?: string;
   terminalId?: string;
-  // biome-ignore lint/suspicious/noExplicitAny: message envelope carries heterogeneous payloads
+  // biome-ignore lint/suspicious/noExplicitAny: message envelope carries heterogeneous payloads — typed per-handler via destructuring
   data?: any;
   /** Injected by server relay for view-only shared users */
   _permission?: 'view';
 }
 
+const CoreResponseMessages = ['output', 'thinking', 'movementStart', 'movementComplete', 'movementError', 'sessionUpdate', 'history', 'sessions', 'sessionsCount', 'sessionDeleted', 'sessionData', 'historyCleared', 'searchResults', 'newSession', 'autocomplete', 'fileContent', 'error', 'pong', 'tabInitialized', 'approvalRequired', 'toolUse', 'streamingTokens', 'notificationSummary'] as const;
+
+const TerminalResponseMessages = ['terminalOutput', 'terminalReady', 'terminalExit', 'terminalError', 'terminalList', 'terminalScrollback', 'terminalCreated', 'terminalClosed'] as const;
+
+const FileExplorerResponseMessages = ['directoryListing', 'fileWritten', 'fileCreated', 'directoryCreated', 'fileDeleted', 'fileRenamed', 'fileOpened', 'fileContentChanged', 'contentSearchResults', 'contentSearchComplete', 'contentSearchError', 'definitionResult', 'fileError'] as const;
+
+const GitResponseMessages = ['gitStatus', 'gitStaged', 'gitUnstaged', 'gitCommitted', 'gitCommitMessage', 'gitPushed', 'gitPulled', 'gitLog', 'gitError', 'gitReposDiscovered', 'gitDirectorySet', 'gitRemoteInfo', 'gitPRCreated', 'gitPRDescription'] as const;
+
+const GitBranchResponseMessages = ['gitBranchList', 'gitCheckedOut', 'gitBranchCreated', 'gitBranchDeleted'] as const;
+
+const GitDiffResponseMessages = ['gitDiffResult', 'gitCommitDetail', 'gitCommitDiffResult'] as const;
+
+const GitTagResponseMessages = ['gitTagList', 'gitTagCreated', 'gitTagPushed'] as const;
+
+const GitWorktreeResponseMessages = ['gitWorktreeListResult', 'gitWorktreeCreated', 'gitWorktreeCreatedAndAssigned', 'gitWorktreeRemoved', 'tabWorktreeSwitched', 'gitBranchChanged', 'gitWorktreePushed', 'gitWorktreePRCreated'] as const;
+
+const GitMergeResponseMessages = ['gitMergePreviewResult', 'gitWorktreeMergeResult', 'gitMergeAborted', 'gitMergeCompleted'] as const;
+
+const SessionSyncResponseMessages = ['activeTabs', 'tabCreated', 'tabRemoved', 'tabRenamed', 'tabsReordered', 'promptTextSync', 'tabViewed', 'tabStateChanged'] as const;
+
+const SettingsResponseMessages = ['settings', 'settingsUpdated'] as const;
+
+const QualityResponseMessages = ['qualityToolsDetected', 'qualityScanProgress', 'qualityScanResults', 'qualityInstallProgress', 'qualityInstallComplete', 'qualityCodeReview', 'qualityCodeReviewProgress', 'qualityPostSession', 'qualityFixProgress', 'qualityFixComplete', 'qualityError', 'qualityStateLoaded'] as const;
+
+const FileUploadResponseMessages = ['fileUploadAck', 'fileUploadReady', 'fileUploadError'] as const;
+
+const PlanResponseMessages = ['planState', 'planIssueList', 'planIssue', 'planSprint', 'planMilestone', 'planNotFound', 'planStateUpdated', 'planIssueUpdated', 'planIssueCreated', 'planIssueDeleted', 'planScaffolded', 'planPromptStreaming', 'planPromptProgress', 'planPromptResponse', 'planExecutionStarted', 'planExecutionProgress', 'planExecutionOutput', 'planExecutionMetrics', 'planExecutionComplete', 'planExecutionError', 'planError'] as const;
+
+const PlanBoardResponseMessages = ['planBoardCreated', 'planBoardUpdated', 'planBoardArchived', 'planBoardState', 'planBoardArtifacts', 'planWorkspaceUpdated'] as const;
+
+const PlanSprintResponseMessages = ['planSprintCreated', 'planSprintUpdated', 'planSprintCompleted', 'planSprintArtifacts', 'planReviewProgress'] as const;
+
+const DeployResponseMessages = ['deployCreated', 'deployStopped', 'deployResumed', 'deployDeleted', 'deployListResult', 'deployStatusResult', 'deployConfigUpdated', 'deployApiKeyStatus', 'deployError'] as const;
+
+const DeployRelayResponseMessages = ['deployHttpResponse', 'deployHttpResponseChunk', 'deployStatus', 'deployUsageReportAck', 'deployAiHealthAck'] as const;
+
+const SkillResponseMessages = ['skillsList', 'chatToBoardCreated'] as const;
+
+type WebSocketResponseType =
+  | typeof CoreResponseMessages[number]
+  | typeof TerminalResponseMessages[number]
+  | typeof FileExplorerResponseMessages[number]
+  | typeof GitResponseMessages[number]
+  | typeof GitBranchResponseMessages[number]
+  | typeof GitDiffResponseMessages[number]
+  | typeof GitTagResponseMessages[number]
+  | typeof GitWorktreeResponseMessages[number]
+  | typeof GitMergeResponseMessages[number]
+  | typeof SessionSyncResponseMessages[number]
+  | typeof SettingsResponseMessages[number]
+  | typeof QualityResponseMessages[number]
+  | typeof FileUploadResponseMessages[number]
+  | typeof PlanResponseMessages[number]
+  | typeof PlanBoardResponseMessages[number]
+  | typeof PlanSprintResponseMessages[number]
+  | typeof DeployResponseMessages[number]
+  | typeof DeployRelayResponseMessages[number]
+  | typeof SkillResponseMessages[number];
+
 export interface WebSocketResponse {
-  type:
-    | 'output'
-    | 'thinking'
-    | 'movementStart'
-    | 'movementComplete'
-    | 'movementError'
-    | 'sessionUpdate'
-    | 'history'
-    | 'sessions'
-    | 'sessionsCount'
-    | 'sessionDeleted'
-    | 'sessionData'
-    | 'historyCleared'
-    | 'searchResults'
-    | 'newSession'
-    | 'autocomplete'
-    | 'fileContent'
-    | 'error'
-    | 'pong'
-    | 'tabInitialized'
-    | 'approvalRequired'
-    | 'toolUse'
-    | 'streamingTokens'
-    | 'notificationSummary'
-    | 'terminalOutput'
-    | 'terminalReady'
-    | 'terminalExit'
-    | 'terminalError'
-    | 'terminalList'
-    // File explorer response types
-    | 'directoryListing'
-    | 'fileWritten'
-    | 'fileCreated'
-    | 'directoryCreated'
-    | 'fileDeleted'
-    | 'fileRenamed'
-    | 'fileOpened'
-    | 'fileContentChanged'
-    | 'contentSearchResults'
-    | 'contentSearchComplete'
-    | 'contentSearchError'
-    | 'definitionResult'
-    | 'fileError'
-    | 'terminalScrollback'
-    // Terminal sync response types
-    | 'terminalCreated'
-    | 'terminalClosed'
-    // Git response types
-    | 'gitStatus'
-    | 'gitStaged'
-    | 'gitUnstaged'
-    | 'gitCommitted'
-    | 'gitCommitMessage'
-    | 'gitPushed'
-    | 'gitPulled'
-    | 'gitLog'
-    | 'gitError'
-    | 'gitReposDiscovered'
-    | 'gitDirectorySet'
-    | 'gitRemoteInfo'
-    | 'gitPRCreated'
-    | 'gitPRDescription'
-    // Branch response types
-    | 'gitBranchList'
-    | 'gitCheckedOut'
-    | 'gitBranchCreated'
-    | 'gitBranchDeleted'
-    // Diff response types
-    | 'gitDiffResult'
-    // Commit detail response types
-    | 'gitCommitDetail'
-    | 'gitCommitDiffResult'
-    // Tag response types
-    | 'gitTagList'
-    | 'gitTagCreated'
-    | 'gitTagPushed'
-    // Worktree response types
-    | 'gitWorktreeListResult'
-    | 'gitWorktreeCreated'
-    | 'gitWorktreeCreatedAndAssigned'
-    | 'gitWorktreeRemoved'
-    | 'tabWorktreeSwitched'
-    | 'gitBranchChanged'
-    | 'gitWorktreePushed'
-    | 'gitWorktreePRCreated'
-    // Merge response types
-    | 'gitMergePreviewResult'
-    | 'gitWorktreeMergeResult'
-    | 'gitMergeAborted'
-    | 'gitMergeCompleted'
-    // Session sync response types
-    | 'activeTabs'
-    | 'tabCreated'
-    | 'tabRemoved'
-    | 'tabRenamed'
-    | 'tabsReordered'
-    | 'promptTextSync'
-    | 'tabViewed'
-    | 'tabStateChanged'
-    // Settings response types
-    | 'settings'
-    | 'settingsUpdated'
-    // Quality response types
-    | 'qualityToolsDetected'
-    | 'qualityScanProgress'
-    | 'qualityScanResults'
-    | 'qualityInstallProgress'
-    | 'qualityInstallComplete'
-    | 'qualityCodeReview'
-    | 'qualityCodeReviewProgress'
-    | 'qualityPostSession'
-    | 'qualityFixProgress'
-    | 'qualityFixComplete'
-    | 'qualityError'
-    | 'qualityStateLoaded'
-    // File upload response types
-    | 'fileUploadAck'
-    | 'fileUploadReady'
-    | 'fileUploadError'
-    // Plan response types
-    | 'planState'
-    | 'planIssueList'
-    | 'planIssue'
-    | 'planSprint'
-    | 'planMilestone'
-    | 'planNotFound'
-    | 'planStateUpdated'
-    | 'planIssueUpdated'
-    | 'planIssueCreated'
-    | 'planIssueDeleted'
-    | 'planScaffolded'
-    | 'planPromptStreaming'
-    | 'planPromptProgress'
-    | 'planPromptResponse'
-    | 'planExecutionStarted'
-    | 'planExecutionProgress'
-    | 'planExecutionOutput'
-    | 'planExecutionMetrics'
-    | 'planExecutionComplete'
-    | 'planExecutionError'
-    | 'planError'
-    // Board lifecycle response types
-    | 'planBoardCreated'
-    | 'planBoardUpdated'
-    | 'planBoardArchived'
-    | 'planBoardState'
-    | 'planBoardArtifacts'
-    | 'planWorkspaceUpdated'
-    // Sprint lifecycle response types (legacy)
-    | 'planSprintCreated'
-    | 'planSprintUpdated'
-    | 'planSprintCompleted'
-    | 'planSprintArtifacts'
-    | 'planReviewProgress'
-    // Deploy response types
-    | 'deployCreated'
-    | 'deployStopped'
-    | 'deployResumed'
-    | 'deployDeleted'
-    | 'deployListResult'
-    | 'deployStatusResult'
-    | 'deployConfigUpdated'
-    | 'deployApiKeyStatus'
-    | 'deployError'
-    // Deploy HTTP relay response types (cli→server)
-    | 'deployHttpResponse'
-    | 'deployHttpResponseChunk'
-    | 'deployStatus'
-    | 'deployUsageReportAck'
-    | 'deployAiHealthAck'
-    // Skill discovery response types
-    | 'skillsList'
-    // Chat-to-board response types
-    | 'chatToBoardCreated';
+  type: WebSocketResponseType;
   tabId?: string;
   terminalId?: string;
-  // biome-ignore lint/suspicious/noExplicitAny: message envelope carries heterogeneous payloads
+  // biome-ignore lint/suspicious/noExplicitAny: message envelope carries heterogeneous payloads — typed per-handler via destructuring
   data?: any;
 }
 
@@ -371,7 +165,7 @@ export interface SkillEntry {
   name: string;
   displayName: string;
   description: string;
-  source: 'project' | 'system' | 'builtin';
+  source: 'project' | 'user' | 'system' | 'builtin' | 'platform';
 }
 
 // Extended autocomplete option with metadata

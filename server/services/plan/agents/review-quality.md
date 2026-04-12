@@ -1,7 +1,10 @@
 ---
 name: review-quality
-description: Reviews non-code output (writing, research, plans, designs, analysis) for completeness, accuracy, and quality against acceptance criteria
+description: "Reviews non-code output (writing, research, plans, designs, analysis) for completeness, accuracy, and quality against acceptance criteria. Use when reviewing completed PM board issues that produce documents or deliverables."
+user-invocable: false
 type: review
+allowed-tools: Read, Grep, Glob, Bash
+context: fork
 variables: [issue_id, issue_title, output_path, issue_spec_path, acceptance_criteria]
 checks: [criteria_met, output_quality, completeness]
 ---

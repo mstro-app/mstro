@@ -1,7 +1,10 @@
 ---
 name: review-custom
-description: Reviews work using board-defined custom criteria alongside acceptance criteria — works for code, content, research, planning, and any other task type
+description: "Reviews work using board-defined custom criteria alongside acceptance criteria — works for code, content, research, planning, and any other task type. Use when a PM board has custom review criteria configured."
+user-invocable: false
 type: review
+allowed-tools: Read, Grep, Glob, Bash
+context: fork
 variables: [issue_id, issue_title, context_section, acceptance_criteria, review_criteria, read_instruction]
 checks: [criteria_met, review_criteria]
 ---

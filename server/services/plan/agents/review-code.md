@@ -1,7 +1,10 @@
 ---
 name: review-code
-description: Reviews tasks that modify files — checks acceptance criteria, code quality where applicable, and output correctness
+description: "Reviews tasks that modify files — checks acceptance criteria, code quality where applicable, and output correctness. Use when reviewing completed PM board issues that involve code changes."
+user-invocable: false
 type: review
+allowed-tools: Read, Grep, Glob, Bash
+context: fork
 variables: [issue_id, issue_title, files_modified, acceptance_criteria, output_path]
 checks: [criteria_met, code_quality, no_obvious_bugs]
 ---

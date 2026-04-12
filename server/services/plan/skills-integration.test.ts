@@ -2,13 +2,12 @@
 // Licensed under the MIT License. See LICENSE file for details.
 
 /**
- * Integration tests that verify all 16 Skill files in .claude/skills/ load correctly
- * through agent-loader.ts and maintain backwards compatibility with the original
- * hardcoded prompts they replaced.
+ * Integration tests that verify all skill/agent files load correctly through
+ * agent-loader.ts. System agents live in agents/ (always available). Project
+ * skills live in .claude/skills/ (only available in the monorepo).
  *
  * These tests use the REAL filesystem — no mocking. The workingDir is resolved to the
- * directory containing this test file. findSkillsDir() walks up from there to find
- * /home/username/repos/mstro/.claude/skills/.
+ * directory containing this test file.
  */
 
 import { existsSync } from 'node:fs';
@@ -19,7 +18,11 @@ import { loadSkillPrompt, loadSkillTemplate } from './agent-loader.js';
 const workingDir = new URL('.', import.meta.url).pathname;
 
 /** Skills that have system defaults in agents/ and always resolve. */
-const SYSTEM_SKILLS = ['review-code', 'review-quality', 'review-custom'] as const;
+const SYSTEM_SKILLS = [
+  'review-code', 'review-quality', 'review-custom',
+  'assess-stall', 'check-injection', 'classify-error', 'detect-context-loss',
+  'retry-task', 'execute-issue', 'plan-coordinator', 'verify-review', 'review-criteria',
+] as const;
 
 /** Skills that only exist in .claude/skills/ (monorepo root). */
 const PROJECT_ONLY_SKILLS = [
@@ -27,15 +30,6 @@ const PROJECT_ONLY_SKILLS = [
   'pr-description',
   'code-review',
   'fix-quality',
-  'verify-review',
-  'assess-stall',
-  'detect-context-loss',
-  'classify-error',
-  'check-injection',
-  'retry-task',
-  'execute-issue',
-  'plan-coordinator',
-  'review-criteria',
 ] as const;
 
 function findSkillsDir(startDir: string): string | null {
@@ -122,12 +116,6 @@ describeProjectSkills('expected {{variable}} placeholders in project skills', ()
     expect(t).toContain('{{issueCount}}');
     expect(t).toContain('{{showCount}}');
   });
-
-  it('verify-review has dirPath, findingsJson', () => {
-    const t = loadSkillTemplate('verify-review', workingDir) as string;
-    expect(t).toContain('{{dirPath}}');
-    expect(t).toContain('{{findingsJson}}');
-  });
 });
 
 describe('expected {{variable}} placeholders in system skills', () => {
@@ -155,7 +143,7 @@ describe('expected {{variable}} placeholders in system skills', () => {
   });
 });
 
-describeProjectSkills('expected {{variable}} placeholders in remaining project skills', () => {
+describe('expected {{variable}} placeholders in moved system skills', () => {
   it('assess-stall has silenceMin, totalMin, lastToolName', () => {
     const t = loadSkillTemplate('assess-stall', workingDir) as string;
     expect(t).toContain('{{silenceMin}}');
@@ -199,11 +187,17 @@ describeProjectSkills('expected {{variable}} placeholders in remaining project s
     expect(t).toContain('{{workingDir}}');
     expect(t).toContain('{{issueBlocks}}');
   });
+
+  it('verify-review has dirPath, findingsJson', () => {
+    const t = loadSkillTemplate('verify-review', workingDir) as string;
+    expect(t).toContain('{{dirPath}}');
+    expect(t).toContain('{{findingsJson}}');
+  });
 });
 
 // ── 4. Backwards compatibility — interpolation produces expected phrases ─────
 
-describeProjectSkills('backwards compatibility — interpolated output contains key phrases', () => {
+describeProjectSkills('backwards compatibility — project skill interpolation', () => {
   it('commit-message contains imperative mood guidance and section headers', () => {
     const result = loadSkillPrompt(
       'commit-message',
@@ -273,7 +267,9 @@ describeProjectSkills('backwards compatibility — interpolated output contains 
     expect(lc).toContain('quality');
     expect(out).toContain('Issues to Fix');
   });
+});
 
+describe('backwards compatibility — system skill interpolation', () => {
   it('assess-stall output contains VERDICT, WORKING, and STALLED', () => {
     const result = loadSkillPrompt(
       'assess-stall',
@@ -348,27 +344,29 @@ describeProjectSkills('backwards compatibility — interpolated output contains 
 
 // ── 5. Skills resolution from nested directory (walk-up behavior) ─────────────
 
-describeProjectSkills('findSkillsDir walks up from nested directories', () => {
-  it('finds skills walking up from a deeply nested path', () => {
+describe('system skills resolve from nested directories', () => {
+  it('system skill resolves from a deeply nested path', () => {
+    const deepPath = `${workingDir}/a/b/c/d`;
+    const result = loadSkillTemplate('assess-stall', deepPath);
+    expect(result).not.toBeNull();
+    expect((result as string)).toContain('VERDICT');
+  });
+
+  it('system skill strips frontmatter when found via nested path', () => {
+    const deepPath = `${workingDir}/deep/nested`;
+    const result = loadSkillTemplate('classify-error', deepPath);
+    expect(result).not.toBeNull();
+    expect((result as string).trimStart()).not.toMatch(/^---/);
+  });
+});
+
+describeProjectSkills('project skills resolve via walk-up from nested directories', () => {
+  it('finds project skills walking up from a deeply nested path', () => {
     // dirname() does not require the path to exist on disk — walk-up still works
     const deepPath = `${workingDir}/deep/nested/path`;
     const result = loadSkillTemplate('commit-message', deepPath);
     expect(result).not.toBeNull();
     expect(typeof result).toBe('string');
     expect((result as string).length).toBeGreaterThan(0);
-  });
-
-  it('finds skills walking up from an extra level of nesting', () => {
-    const deeperPath = `${workingDir}/a/b/c/d`;
-    const result = loadSkillTemplate('assess-stall', deeperPath);
-    expect(result).not.toBeNull();
-    expect((result as string)).toContain('VERDICT');
-  });
-
-  it('still strips frontmatter when found via walk-up', () => {
-    const deepPath = `${workingDir}/deep/nested`;
-    const result = loadSkillTemplate('classify-error', deepPath);
-    expect(result).not.toBeNull();
-    expect((result as string).trimStart()).not.toMatch(/^---/);
   });
 });

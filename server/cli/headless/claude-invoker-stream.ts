@@ -210,6 +210,62 @@ function handleToolResult(parsed: StreamJson, ctx: StreamHandlerContext): void {
 
 // ========== Stream Processing ==========
 
+function handleAssistantTextBlock(block: StreamJson, ctx: StreamHandlerContext): void {
+  ctx.accumulatedAssistantResponse += block.text;
+  ctx.config.outputCallback?.(block.text);
+}
+
+function handleAssistantThinkingBlock(block: StreamJson, ctx: StreamHandlerContext): void {
+  ctx.accumulatedThinking += block.thinking;
+  if (ctx.config.thinkingCallback) {
+    ctx.config.thinkingCallback(block.thinking);
+  } else {
+    ctx.config.outputCallback?.(block.thinking);
+  }
+}
+
+function handleAssistantToolUseBlock(block: StreamJson, ctx: StreamHandlerContext): void {
+  const toolInput = block.input || {};
+  ctx.accumulatedToolUse.push({
+    toolName: block.name, toolId: block.id,
+    toolInput, startTime: Date.now(),
+  });
+  ctx.config.toolUseCallback?.({
+    type: 'tool_start', toolName: block.name, toolId: block.id, index: 0,
+  });
+  ctx.config.toolUseCallback?.({
+    type: 'tool_complete', toolName: block.name, toolId: block.id,
+    index: 0, completeInput: toolInput,
+  });
+}
+
+function handleAssistantContentBlock(block: StreamJson, ctx: StreamHandlerContext): void {
+  if (block.type === 'text' && block.text) handleAssistantTextBlock(block, ctx);
+  else if (block.type === 'thinking' && block.thinking) handleAssistantThinkingBlock(block, ctx);
+  else if (block.type === 'tool_use' && block.name && block.id) handleAssistantToolUseBlock(block, ctx);
+}
+
+/**
+ * Handle a complete `assistant` message event.
+ * Claude Code emits these instead of (or alongside) stream_event deltas when
+ * running skill commands or when --include-partial-messages is unsupported.
+ */
+function handleAssistantMessage(parsed: StreamJson, ctx: StreamHandlerContext): void {
+  if (parsed.type !== 'assistant' || !parsed.message?.content) return;
+  const content = parsed.message.content;
+  if (!Array.isArray(content)) return;
+
+  for (const block of content) handleAssistantContentBlock(block, ctx);
+
+  if (ctx.resumeAssessmentActive) {
+    ctx.resumeAssessmentActive = false;
+    if (ctx.resumeAssessmentBuffer) {
+      ctx.config.outputCallback?.(ctx.resumeAssessmentBuffer);
+      ctx.resumeAssessmentBuffer = '';
+    }
+  }
+}
+
 export function processStreamEvent(parsed: StreamJson, ctx: StreamHandlerContext): void {
   if (parsed.type === 'error') {
     const errorMessage = parsed.error?.message || parsed.message || JSON.stringify(parsed);
@@ -227,6 +283,12 @@ export function processStreamEvent(parsed: StreamJson, ctx: StreamHandlerContext
       ctx.config.outputCallback?.(`\n[[MSTRO_ERROR:CLAUDE_RESULT_ERROR]] ${errorMessage}\n`);
       return;
     }
+    // Fallback: capture the result text if streaming deltas didn't accumulate anything.
+    // This happens when Claude Code runs skill commands or other non-streaming code paths.
+    if (!ctx.accumulatedAssistantResponse && parsed.result && typeof parsed.result === 'string') {
+      ctx.accumulatedAssistantResponse = parsed.result;
+      ctx.config.outputCallback?.(parsed.result);
+    }
   }
 
   if (parsed.type === 'stream_event' && parsed.event) {
@@ -236,6 +298,7 @@ export function processStreamEvent(parsed: StreamJson, ctx: StreamHandlerContext
     handleToolStreamEvents(event, ctx);
     handleTokenUsage(event, ctx);
   }
+  handleAssistantMessage(parsed, ctx);
   handleToolResult(parsed, ctx);
 }
 

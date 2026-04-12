@@ -104,8 +104,8 @@ export function setupSessionListeners(ctx: HandlerContext, session: Improvisatio
     ctx.send(ws, { type: 'thinking', tabId, data: { text } });
   });
 
-  session.on('onMovementStart', (sequenceNumber: number, prompt: string) => {
-    ctx.send(ws, { type: 'movementStart', tabId, data: { sequenceNumber, prompt, timestamp: Date.now(), executionStartTimestamp: session.executionStartTimestamp } });
+  session.on('onMovementStart', (sequenceNumber: number, prompt: string, isAutoContinue?: boolean) => {
+    ctx.send(ws, { type: 'movementStart', tabId, data: { sequenceNumber, prompt, timestamp: Date.now(), executionStartTimestamp: session.executionStartTimestamp, isAutoContinue } });
     ctx.broadcastToAll({ type: 'tabStateChanged', data: { tabId, isExecuting: true, executionStartTimestamp: session.executionStartTimestamp } });
   });
 

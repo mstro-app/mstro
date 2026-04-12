@@ -51,6 +51,7 @@ export interface MovementRecord {
   errorOutput?: string;
   durationMs?: number;
   retryLog?: RetryLogEntry[];
+  isAutoContinue?: boolean;
 }
 
 export interface SessionHistory {

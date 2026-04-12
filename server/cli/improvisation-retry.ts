@@ -472,14 +472,30 @@ function isResponseAbandoned(result: HeadlessRunResult): boolean {
   return thinkingLen >= responseLen * 3;
 }
 
+/**
+ * Extract the final text block from a concatenated response.
+ * The assistantResponse concatenates all text deltas including interleaved
+ * progress messages between tool calls. The final paragraph (after the last
+ * double-newline break) is the actual conclusion — earlier fragments are
+ * progress updates that were already acted on via tool calls.
+ */
+function extractFinalTextBlock(response: string, maxLen: number): string {
+  const lastBreak = response.lastIndexOf('\n\n');
+  if (lastBreak !== -1 && response.length - lastBreak > 20) {
+    return response.slice(lastBreak + 2).slice(-maxLen);
+  }
+  return response.slice(-maxLen);
+}
+
 /** Use Haiku to assess whether an end_turn response is genuinely complete */
 async function assessEndTurnCompletion(result: HeadlessRunResult, verbose: boolean): Promise<boolean> {
   if (!result.assistantResponse) return false;
 
+  const successfulToolCalls = result.toolUseHistory?.filter(t => t.result !== undefined && !t.isError).length ?? 0;
   const claudeCmd = process.env.CLAUDE_COMMAND || 'claude';
   const verdict = await assessPrematureCompletion({
-    responseTail: result.assistantResponse.slice(-800),
-    successfulToolCalls: result.toolUseHistory?.filter(t => t.result !== undefined && !t.isError).length ?? 0,
+    responseTail: extractFinalTextBlock(result.assistantResponse, 800),
+    successfulToolCalls,
     hasThinking: !!result.thinkingOutput,
     responseLength: result.assistantResponse.length,
   }, claudeCmd, verbose);

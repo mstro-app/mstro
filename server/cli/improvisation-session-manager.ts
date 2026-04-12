@@ -131,12 +131,13 @@ export class ImprovisationSessionManager extends EventEmitter {
 
   // ========== Main Execution ==========
 
-  async executePrompt(userPrompt: string, attachments?: FileAttachment[], options?: { workingDir?: string }): Promise<MovementRecord> {
+  async executePrompt(userPrompt: string, attachments?: FileAttachment[], options?: { workingDir?: string; isAutoContinue?: boolean }): Promise<MovementRecord> {
     const _execStart = Date.now();
+    const isAutoContinue = options?.isAutoContinue ?? false;
     this._isExecuting = true;
     this._cancelled = false;
     this._cancelCompleteEmitted = false;
-    if (userPrompt !== 'continue') {
+    if (!isAutoContinue) {
       this._autoContinueCount = 0;
       this._autoContinuePending = false;
     }
@@ -146,7 +147,7 @@ export class ImprovisationSessionManager extends EventEmitter {
     const sequenceNumber = this.history.movements.length + 1;
     this._currentUserPrompt = userPrompt;
     this._currentSequenceNumber = sequenceNumber;
-    this.emit('onMovementStart', sequenceNumber, userPrompt);
+    this.emit('onMovementStart', sequenceNumber, userPrompt, isAutoContinue);
     trackEvent(AnalyticsEvents.IMPROVISE_PROMPT_RECEIVED, {
       prompt_length: userPrompt.length,
       has_attachments: !!(attachments && attachments.length > 0),
@@ -167,6 +168,7 @@ export class ImprovisationSessionManager extends EventEmitter {
       summary: '',
       filesModified: [],
       durationMs: 0,
+      ...(isAutoContinue && { isAutoContinue: true }),
     };
     this.history.movements.push(pendingMovement);
     this.saveHistory();
@@ -207,7 +209,7 @@ export class ImprovisationSessionManager extends EventEmitter {
       this.captureSessionAndSurfaceErrors(result);
       this.isFirstPrompt = false;
 
-      const movement = this.buildMovementRecord(result, userPrompt, sequenceNumber, _execStart, state.retryLog);
+      const movement = this.buildMovementRecord(result, userPrompt, sequenceNumber, _execStart, state.retryLog, isAutoContinue);
       this.handleConflicts(result);
       this.persistMovement(movement);
 
@@ -427,6 +429,7 @@ export class ImprovisationSessionManager extends EventEmitter {
     sequenceNumber: number,
     execStart: number,
     retryLog?: import('./improvisation-types.js').RetryLogEntry[],
+    isAutoContinue?: boolean,
   ): MovementRecord {
     return {
       id: `prompt-${sequenceNumber}`,
@@ -445,6 +448,7 @@ export class ImprovisationSessionManager extends EventEmitter {
       errorOutput: result.error,
       durationMs: Date.now() - execStart,
       retryLog: retryLog && retryLog.length > 0 ? retryLog : undefined,
+      ...(isAutoContinue && { isAutoContinue: true }),
     };
   }
 
@@ -497,8 +501,12 @@ export class ImprovisationSessionManager extends EventEmitter {
 
     const thinkingLen = result.thinkingOutput?.length ?? 0;
     const responseLen = result.assistantResponse?.length ?? 0;
+    const successfulToolCalls = result.toolUseHistory?.filter(t => t.result !== undefined && !t.isError).length ?? 0;
 
     if (thinkingLen < 500 || responseLen > 1000) return false;
+    // When the agent executed tool calls and produced a non-trivial response,
+    // long thinking is expected — the work happened in the tools, not the text.
+    if (successfulToolCalls > 0 && responseLen > 200) return false;
     return thinkingLen >= responseLen * 3;
   }
 
@@ -511,7 +519,7 @@ export class ImprovisationSessionManager extends EventEmitter {
     setImmediate(() => {
       if (this._cancelled || this._isExecuting || !this._autoContinuePending) return;
       this._autoContinuePending = false;
-      this.executePrompt('continue').catch((err) => {
+      this.executePrompt('continue', undefined, { isAutoContinue: true }).catch((err) => {
         herror('Auto-continue failed:', err);
       });
     });

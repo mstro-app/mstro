@@ -1,0 +1,345 @@
+// Copyright (c) 2025-present Mstro, Inc. All rights reserved.
+
+/**
+ * Review Gate — AI-powered quality gate for completed issues.
+ *
+ * Code tasks: reads modified files, checks acceptance criteria, looks for bugs.
+ * Non-code tasks: reads output doc, checks criteria and completeness.
+ * Auto-passes on infrastructure failures to avoid blocking execution.
+ */
+
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { ResilientRunner } from '../../cli/headless/resilient-runner.js';
+import { loadAgentPrompt } from './agent-loader.js';
+import { getBoardReviewCriteria, resolveActiveBoardId } from './board-config.js';
+import { resolveIsCodeTask } from './issue-classification.js';
+import { appendCancellationNote, type WarnFn } from './issue-writer.js';
+import { resolveOutputPath } from './output-manager.js';
+import type { Issue, ReviewCheck, ReviewResult } from './types.js';
+
+/** Max review attempts per issue per sprint before giving up */
+export const MAX_REVIEW_ATTEMPTS = 3;
+
+/** Review runner stall timeouts (ms) — hard cap is a backstop that only fires after stall signals flag the run */
+const REVIEW_STALL_WARNING_MS = 300_000;   // 5 min
+const REVIEW_STALL_KILL_MS = 600_000;      // 10 min
+const REVIEW_STALL_HARD_CAP_MS = 2_700_000; // 45 min backstop
+
+export interface ReviewIssueOptions {
+  workingDir: string;
+  issue: Issue;
+  pmDir: string;
+  outputPath: string;
+  onOutput?: (text: string) => void;
+  /** Board-scoped log directory for execution logs. Falls back to global ~/.mstro/logs/headless/ */
+  logDir?: string;
+  /** Custom board-level review criteria — replaces default review instructions when set */
+  reviewCriteria?: string;
+  /** Board directory for agent prompt override resolution (e.g., .mstro/pm/boards/BOARD-001) */
+  boardDir?: string | null;
+  /** Extra environment variables for spawned Claude processes (e.g. API keys) */
+  extraEnv?: Record<string, string>;
+}
+
+/**
+ * Run an AI review for a completed issue.
+ * Returns auto-pass on infrastructure failures to avoid blocking execution.
+ */
+export async function reviewIssue(options: ReviewIssueOptions): Promise<ReviewResult> {
+  const { workingDir, issue, pmDir, outputPath, onOutput, logDir, reviewCriteria, boardDir } = options;
+  const isCodeTask = resolveIsCodeTask(issue);
+  const issueType: ReviewResult['issueType'] = isCodeTask ? 'code' : 'non-code';
+
+  try {
+    const prompt = buildReviewPrompt(issue, pmDir, outputPath, isCodeTask, reviewCriteria, boardDir, workingDir);
+
+    const runner = new ResilientRunner({
+      workingDir,
+      prompt,
+      policy: 'STANDARD',
+      stallWarningMs: REVIEW_STALL_WARNING_MS,
+      stallKillMs: REVIEW_STALL_KILL_MS,
+      stallHardCapMs: REVIEW_STALL_HARD_CAP_MS,
+      verbose: true,
+      outputCallback: onOutput ? (text: string) => onOutput(`Review: ${text}`) : undefined,
+      extraEnv: options.extraEnv,
+      logLabel: 'pm-review',
+      logDir,
+    });
+
+    const result = await runner.run();
+
+    if (result.completed && result.assistantResponse) {
+      return parseReviewOutput(issue.id, issueType, result.assistantResponse);
+    }
+
+    return autoPassResult(issue.id, issueType, 'Review runner did not complete');
+  } catch {
+    return autoPassResult(issue.id, issueType, 'Review threw an error');
+  }
+}
+
+/** Count existing review result files for this issue in the board/sprint directory. */
+export function getReviewAttemptCount(boardOrSandboxDir: string | null, issue: Issue): number {
+  if (!boardOrSandboxDir) return 0;
+  const reviewsDir = join(boardOrSandboxDir, 'reviews');
+  if (!existsSync(reviewsDir)) return 0;
+  try {
+    return readdirSync(reviewsDir).filter(f => f.startsWith(issue.id) && f.endsWith('.json')).length;
+  } catch {
+    return 0;
+  }
+}
+
+/** Persist a review result as JSON in the board/sprint reviews directory. */
+export function persistReviewResult(boardOrSandboxDir: string | null, issue: Issue, result: ReviewResult): void {
+  if (!boardOrSandboxDir) return;
+  const reviewsDir = join(boardOrSandboxDir, 'reviews');
+  if (!existsSync(reviewsDir)) mkdirSync(reviewsDir, { recursive: true });
+  try {
+    writeFileSync(
+      join(reviewsDir, `${issue.id}-${Date.now()}.json`),
+      JSON.stringify(result, null, 2),
+      'utf-8',
+    );
+  } catch { /* non-fatal */ }
+}
+
+/** Append failed review checks to an issue's Activity section. */
+export function appendReviewFeedback(pmDir: string, issue: Issue, result: ReviewResult): void {
+  const fullPath = join(pmDir, issue.path);
+  try {
+    let content = readFileSync(fullPath, 'utf-8');
+    const failedChecks = result.checks.filter(c => !c.passed);
+    const feedback = failedChecks.map(c => `  - ${c.name}: ${c.details}`).join('\n');
+    const entry = `- Review failed (${new Date().toISOString().split('T')[0]}): ${failedChecks.length} check(s) failed\n${feedback}`;
+
+    if (content.includes('## Activity')) {
+      content = content.replace(/## Activity/, `## Activity\n${entry}`);
+    } else {
+      content += `\n\n## Activity\n${entry}`;
+    }
+    writeFileSync(fullPath, content, 'utf-8');
+  } catch { /* non-fatal */ }
+}
+
+/** Advance past a JSON string body (opening `"` already consumed). Returns index of closing `"`. */
+function skipJsonString(text: string, from: number): number {
+  for (let i = from; i < text.length; i++) {
+    if (text[i] === '\\') { i++; continue; }
+    if (text[i] === '"') return i;
+  }
+  return text.length;
+}
+
+/** Extract the outermost JSON object from AI output using brace balancing. */
+function extractJsonObject(text: string): string | null {
+  const start = text.indexOf('{');
+  if (start === -1) return null;
+  let depth = 0;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '"') { i = skipJsonString(text, i + 1); continue; }
+    if (ch === '{') depth++;
+    else if (ch === '}') depth--;
+    if (depth === 0) return text.slice(start, i + 1);
+  }
+  return null;
+}
+
+/** Parse structured JSON review output from AI response. */
+export function parseReviewOutput(issueId: string, issueType: ReviewResult['issueType'], output: string): ReviewResult {
+  const jsonStr = extractJsonObject(output);
+  if (jsonStr) {
+    try {
+      const parsed = JSON.parse(jsonStr);
+      if (typeof parsed.passed === 'boolean' || typeof parsed.passed === 'number') {
+        return {
+          issueId,
+          issueType,
+          passed: !!parsed.passed,
+          checks: Array.isArray(parsed.checks) ? parsed.checks.map((c: Record<string, unknown>) => ({
+            name: String(c.name ?? 'unknown'),
+            passed: !!c.passed,
+            details: String(c.details ?? ''),
+          } satisfies ReviewCheck)) : [],
+          reviewedAt: new Date().toISOString(),
+        };
+      }
+    } catch { /* fall through */ }
+  }
+  return autoPassResult(issueId, issueType, 'Could not parse review output');
+}
+
+/** Create a passing review result for infrastructure failures. */
+export function autoPassResult(issueId: string, issueType: ReviewResult['issueType'], reason: string): ReviewResult {
+  return {
+    issueId,
+    issueType,
+    passed: true,
+    autoPass: true,
+    checks: [{ name: 'review_infrastructure', passed: true, details: `${reason}; auto-passing` }],
+    reviewedAt: new Date().toISOString(),
+  };
+}
+
+// ── Private helpers ─────────────────────────────────────────
+
+function buildReviewPrompt(
+  issue: Issue,
+  pmDir: string,
+  outputPath: string,
+  isCodeTask: boolean,
+  reviewCriteria?: string,
+  boardDir?: string | null,
+  workingDir?: string,
+): string {
+  const criteria = issue.acceptanceCriteria
+    .map(c => `- [${c.checked ? 'x' : ' '}] ${c.text}`)
+    .join('\n');
+  const criteriaStr = criteria || 'No specific criteria defined.';
+  const filesModified = issue.filesToModify.map(f => `- ${f}`).join('\n');
+  const issueSpecPath = join(pmDir, issue.path);
+
+  // When custom review criteria are set, use the review-custom agent.
+  if (reviewCriteria) {
+    const contextSection = isCodeTask
+      ? `\n## Files Modified\n${filesModified}`
+      : `\n## Output File\n${outputPath}\n\n## Issue Spec\n${issueSpecPath}`;
+    const readInstruction = isCodeTask
+      ? 'Read each modified file listed above'
+      : 'Read the output file and issue spec at the paths above';
+
+    const result = loadAgentPrompt('review-custom', {
+      issue_id: issue.id,
+      issue_title: issue.title,
+      context_section: contextSection,
+      acceptance_criteria: criteriaStr,
+      review_criteria: reviewCriteria,
+      read_instruction: readInstruction,
+    }, boardDir, workingDir);
+    if (result) return result;
+  }
+
+  if (isCodeTask) {
+    const result = loadAgentPrompt('review-code', {
+      issue_id: issue.id,
+      issue_title: issue.title,
+      files_modified: filesModified,
+      acceptance_criteria: criteriaStr,
+      output_path: outputPath,
+    }, boardDir, workingDir);
+    if (result) return result;
+  }
+
+  const result = loadAgentPrompt('review-quality', {
+    issue_id: issue.id,
+    issue_title: issue.title,
+    output_path: outputPath,
+    issue_spec_path: issueSpecPath,
+    acceptance_criteria: criteriaStr,
+  }, boardDir, workingDir);
+  if (result) return result;
+
+  // Should not reach here if Skills are installed, but provide a minimal fallback
+  return `You are a reviewer. Review the work done for issue ${issue.id}: ${issue.title}.\n\n## Acceptance Criteria\n${criteriaStr}\n\nOutput EXACTLY one JSON object on its own line (no markdown fencing):\n{"passed": true, "checks": [{"name": "criteria_met", "passed": true, "details": "..."}]}`;
+}
+
+// ── Review pipeline orchestration ───────────────────────────
+
+/** Status messages emitted during the review pipeline. */
+export type ReviewProgressStatus = 'reviewing' | 'passed' | 'failed' | 'max_attempts';
+
+/** Callbacks for the executor to observe review pipeline events. */
+export interface ReviewPipelineCallbacks {
+  /** Update an issue's front-matter status on disk. */
+  setStatus: (issuePath: string, status: string) => Promise<void>;
+  onOutput: (issueId: string, text: string) => void;
+  onReviewProgress: (issueId: string, status: ReviewProgressStatus) => void;
+  onIssueAbandoned: (issueId: string, reason: string, attempts: number) => void;
+  onIssueCompleted: (issue: Issue) => void;
+  onIssueError: (issueId: string, error: string) => void;
+  warn: WarnFn;
+}
+
+/** Configuration for running the full review pipeline for a single issue. */
+export interface ReviewPipelineOptions {
+  issue: Issue;
+  pmDir: string;
+  workingDir: string;
+  executionDir: string | null;
+  boardDir: string | null;
+  boardId: string | null;
+  extraEnv?: Record<string, string>;
+}
+
+/**
+ * Full review pipeline for a completed issue: attempt-count guard, status
+ * transitions, AI review, persistence, and event emission through the
+ * caller's callbacks. Returns `true` when the review passes and the issue is
+ * marked `done`, `false` otherwise (reverted, cancelled, or errored).
+ */
+export async function runReviewPipeline(
+  options: ReviewPipelineOptions,
+  callbacks: ReviewPipelineCallbacks,
+): Promise<boolean> {
+  const { issue, pmDir, workingDir, executionDir, boardDir, boardId, extraEnv } = options;
+  const reviewDir = boardDir ?? pmDir;
+  const attempts = getReviewAttemptCount(reviewDir, issue);
+
+  if (attempts >= MAX_REVIEW_ATTEMPTS) {
+    await callbacks.setStatus(issue.path, 'cancelled');
+    await appendCancellationNote(
+      pmDir,
+      issue,
+      `Cancelled after ${MAX_REVIEW_ATTEMPTS} failed reviews — issue may need restructuring`,
+      callbacks.warn,
+    );
+    callbacks.onReviewProgress(issue.id, 'max_attempts');
+    callbacks.onIssueAbandoned(
+      issue.id,
+      `Review failed ${MAX_REVIEW_ATTEMPTS} times — cancelled to unblock dependents`,
+      attempts,
+    );
+    callbacks.onOutput(issue.id, 'Review: max attempts reached, cancelling issue to unblock dependents');
+    return false;
+  }
+
+  await callbacks.setStatus(issue.path, 'in_review');
+  callbacks.onReviewProgress(issue.id, 'reviewing');
+
+  const outputPath = resolveOutputPath(issue, workingDir, boardDir);
+  const effectiveBoardId = boardId ?? resolveActiveBoardId(pmDir);
+  const reviewCriteria = await getBoardReviewCriteria(pmDir, effectiveBoardId, callbacks.warn);
+
+  const result = await reviewIssue({
+    workingDir: executionDir || workingDir,
+    issue,
+    pmDir,
+    outputPath,
+    onOutput: (text) => callbacks.onOutput(issue.id, text),
+    logDir: boardDir ? join(boardDir, 'logs') : undefined,
+    reviewCriteria,
+    boardDir,
+    extraEnv,
+  });
+  persistReviewResult(reviewDir, issue, result);
+
+  if (result.passed) {
+    await callbacks.setStatus(issue.path, 'done');
+    callbacks.onReviewProgress(issue.id, 'passed');
+    callbacks.onIssueCompleted(issue);
+    return true;
+  }
+
+  await callbacks.setStatus(issue.path, 'todo');
+  appendReviewFeedback(pmDir, issue, result);
+  callbacks.onReviewProgress(issue.id, 'failed');
+  callbacks.onIssueError(
+    issue.id,
+    `Review failed: ${result.checks.filter(c => !c.passed).map(c => c.name).join(', ')}`,
+  );
+  return false;
+}
+

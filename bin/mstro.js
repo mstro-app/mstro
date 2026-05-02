@@ -1,0 +1,682 @@
+#!/usr/bin/env node
+// Copyright (c) 2025-present Mstro, Inc. All rights reserved.
+
+/**
+ * Mstro CLI
+ *
+ * Main entry point for the Mstro AI assistant.
+ *
+ * Usage:
+ *   mstro                     # Start Mstro (logs in automatically if needed)
+ *   mstro login               # Re-authenticate this device
+ *   mstro logout              # Sign out
+ *   mstro whoami              # Show current user
+ *   mstro status              # Show connection status
+ *   mstro -p 4105             # Start on specific port (overrides auto port)
+ *   mstro --help              # Show help
+ */
+
+import { spawn } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { createInterface } from 'node:readline';
+import { fileURLToPath } from 'node:url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const CLIENT_ROOT = resolve(__dirname, '..');
+
+const pkg = JSON.parse(readFileSync(join(CLIENT_ROOT, 'package.json'), 'utf-8'));
+
+// Self-update: cache file for registry check results
+const UPDATE_CHECK_FILE = join(homedir(), '.mstro', 'update-check.json');
+const UPDATE_CHECK_INTERVAL = 1000 * 60 * 60; // Re-check hourly
+
+// Capture the user's original working directory before any cwd changes
+const USER_CWD = process.cwd();
+
+// First-run detection paths
+const MSTRO_CONFIG_DIR = join(homedir(), '.mstro');
+const PTY_SETUP_DISMISSED_FLAG = join(MSTRO_CONFIG_DIR, '.pty-setup-dismissed');
+
+/**
+ * Set the terminal tab title
+ * Format: "mstro: directory_name"
+ * Uses ANSI escape sequence: ESC ] 0 ; title BEL
+ */
+function setTerminalTitle(directory) {
+  const dirName = directory.split('/').pop() || directory;
+  const title = `mstro: ${dirName}`;
+  // ESC ] 0 ; title BEL - sets both window title and tab title
+  process.stdout.write(`\x1b]0;${title}\x07`);
+}
+
+// Set terminal title on startup
+setTerminalTitle(process.cwd());
+
+// ANSI colors
+const colors = {
+  reset: '\x1b[0m',
+  bold: '\x1b[1m',
+  green: '\x1b[32m',
+  yellow: '\x1b[33m',
+  blue: '\x1b[34m',
+  red: '\x1b[31m',
+  dim: '\x1b[2m',
+  cyan: '\x1b[36m',
+};
+
+function log(msg, color = '') {
+  console.log(`${color}${msg}${colors.reset}`);
+}
+
+function prompt(question) {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => {
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(answer.trim().toLowerCase());
+    });
+  });
+}
+
+/**
+ * Check if node-pty native module is loadable
+ */
+async function isNodePtyAvailable() {
+  try {
+    await import('node-pty');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Check if user has dismissed the pty setup prompt
+ */
+function hasUserDismissedPtySetup() {
+  return existsSync(PTY_SETUP_DISMISSED_FLAG);
+}
+
+/**
+ * Mark pty setup prompt as dismissed
+ */
+function markPtySetupDismissed() {
+  if (!existsSync(MSTRO_CONFIG_DIR)) {
+    mkdirSync(MSTRO_CONFIG_DIR, { recursive: true, mode: 0o700 });
+  }
+  writeFileSync(PTY_SETUP_DISMISSED_FLAG, new Date().toISOString());
+}
+
+/**
+ * Show a one-line warning that node-pty is not available
+ */
+function showPtyWarning() {
+  log('  Terminal support not available. Run: mstro setup-terminal', colors.dim);
+}
+
+/**
+ * Get platform-specific build tool instructions
+ */
+function getPtyBuildInstructions() {
+  const os = process.platform;
+  if (os === 'darwin') {
+    return '    Install Xcode Command Line Tools: xcode-select --install';
+  }
+  if (os === 'win32') {
+    return '    Install Windows Build Tools: npm install -g windows-build-tools';
+  }
+  return '    Debian/Ubuntu: sudo apt install build-essential python3\n' +
+         '    Fedora/RHEL:   sudo dnf install gcc-c++ make python3\n' +
+         '    Arch:          sudo pacman -S base-devel python';
+}
+
+/**
+ * Attempt to rebuild/install node-pty from CLIENT_ROOT
+ * Returns true if npm command succeeded, false otherwise
+ */
+function attemptPtyRebuild() {
+  return new Promise((resolve) => {
+    const nodePtyDir = join(CLIENT_ROOT, 'node_modules', 'node-pty');
+    const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+    const command = existsSync(nodePtyDir) ? 'rebuild' : 'install';
+    const args = command === 'rebuild'
+      ? ['rebuild', 'node-pty']
+      : ['install', 'node-pty', '--no-save'];
+
+    log(`\n  ${command === 'rebuild' ? 'Rebuilding' : 'Installing'} node-pty...`, colors.dim);
+
+    const child = spawn(npmCmd, args, {
+      cwd: CLIENT_ROOT,
+      stdio: 'inherit',
+    });
+
+    child.on('error', (err) => {
+      log(`  Error: ${err.message}`, colors.red);
+      resolve(false);
+    });
+
+    child.on('exit', (code) => {
+      resolve(code === 0);
+    });
+  });
+}
+
+/**
+ * Prompt user to set up node-pty for terminal support
+ * Returns: 'configure' | 'skip' | 'never'
+ */
+async function promptPtySetup() {
+  log('\n  Terminal Support\n', colors.bold + colors.cyan);
+  log('  Mstro includes a web terminal that lets you open a shell', colors.dim);
+  log('  directly in your browser. This requires compiling a native module (node-pty).\n', colors.dim);
+
+  const isInteractive = process.stdin.isTTY;
+
+  if (!isInteractive) {
+    log('  Non-interactive mode: skipping terminal setup.', colors.yellow);
+    log('  Run "mstro setup-terminal" to enable terminal support.\n', colors.dim);
+    return 'skip';
+  }
+
+  log('  Set up terminal support now?', colors.bold);
+  log('    [Y] Yes, compile now (requires build tools)', colors.dim);
+  log('    [n] Not now (ask again next time)', colors.dim);
+  log('    [d] Don\'t show this again\n', colors.dim);
+
+  const answer = await prompt('  Your choice [Y/n/d]: ');
+  const choice = answer.toLowerCase();
+
+  if (choice === '' || choice === 'y' || choice === 'yes') {
+    return 'configure';
+  }
+  if (choice === 'd' || choice === 'dont' || choice === "don't") {
+    log('\n  Got it! You can set up later with: mstro setup-terminal\n', colors.dim);
+    markPtySetupDismissed();
+    return 'never';
+  }
+  log('\n  Skipping for now. Will ask again next time.', colors.yellow);
+  log('  You can also set up with: mstro setup-terminal\n', colors.dim);
+  return 'skip';
+}
+
+/**
+ * Run the pty rebuild and show results
+ */
+async function runPtySetup() {
+  const success = await attemptPtyRebuild();
+
+  if (success) {
+    const available = await isNodePtyAvailable();
+    if (available) {
+      log('\n  Terminal support enabled successfully!\n', colors.bold + colors.green);
+      return true;
+    }
+    log('\n  node-pty installed but failed to load.', colors.red);
+  }
+
+  log('\n  Could not compile node-pty automatically.\n', colors.yellow);
+  log('  You may need to install build tools first:\n', colors.bold);
+  log(getPtyBuildInstructions(), colors.dim);
+  log('');
+  log('  After installing build tools, run: mstro setup-terminal\n', colors.dim);
+  return false;
+}
+
+/**
+ * Read alive mstro instances and session token for server communication.
+ * Returns null if no running servers can be reached.
+ */
+function getAliveInstances() {
+  const mstroDir = join(homedir(), '.mstro');
+  const instancesPath = join(mstroDir, 'instances.json');
+  const tokenPath = join(mstroDir, 'session-token');
+
+  if (!existsSync(instancesPath) || !existsSync(tokenPath)) return null;
+
+  try {
+    const instances = JSON.parse(readFileSync(instancesPath, 'utf-8'));
+    const token = readFileSync(tokenPath, 'utf-8').trim();
+    if (!Array.isArray(instances) || !token) return null;
+
+    const now = Date.now();
+    const alive = instances.filter(i => now - i.lastHeartbeat < 2 * 60 * 1000);
+    return alive.length > 0 ? { alive, token } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Notify running mstro servers to reload node-pty.
+ * Reads instances from ~/.mstro/instances.json and POSTs to /api/reload-pty.
+ */
+async function notifyRunningServers() {
+  const result = getAliveInstances();
+  if (!result) {
+    log('  Restart mstro to enable terminal support.\n', colors.dim);
+    return;
+  }
+
+  let reloaded = 0;
+  for (const instance of result.alive) {
+    try {
+      const res = await fetch(`http://localhost:${instance.port}/api/reload-pty`, {
+        method: 'POST',
+        headers: { 'x-session-token': result.token },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) reloaded++;
+      }
+    } catch {
+      // Server not reachable — stale instance
+    }
+  }
+
+  if (reloaded > 0) {
+    log(`  Notified ${reloaded} running mstro server${reloaded > 1 ? 's' : ''} — terminal is ready!\n`, colors.green);
+  } else {
+    log('  Restart mstro to enable terminal support.\n', colors.dim);
+  }
+}
+
+function showHelp() {
+  log('\n  Mstro - Run Claude Code from any browser\n', colors.bold + colors.cyan);
+  log('  Streams live Claude Code sessions from your machine to mstro.app.\n', colors.dim);
+  log('  Usage:', colors.bold);
+  log('    mstro                       Start Mstro (logs in automatically if needed)', colors.dim);
+  log('    mstro login                 Re-authenticate this device with mstro.app', colors.dim);
+  log('    mstro logout                Sign out of mstro.app', colors.dim);
+  log('    mstro whoami                Show current user and device info', colors.dim);
+  log('    mstro status                Show connection and auth status', colors.dim);
+  log('    mstro telemetry [on|off]    Enable/disable anonymous telemetry', colors.dim);
+  log('    mstro -p 4105               Start on specific port (overrides auto port)', colors.dim);
+  log('    mstro setup-terminal        Enable web terminal (compiles native module)', colors.dim);
+  log('    mstro --version             Show version number', colors.dim);
+  log('    mstro --help                Show this help message', colors.dim);
+  log('');
+  log('  Options:', colors.bold);
+  log('    --port, -p <port>           Override automatic port selection', colors.dim);
+  log('    --working-dir, -w <dir>     Set working directory', colors.dim);
+  log('    --staging                   Connect to the staging server', colors.dim);
+  log('    --verbose, -v               Enable verbose output', colors.dim);
+  log('');
+  log('  Authentication:', colors.bold);
+  log('    Running "mstro" will prompt you to log in automatically if needed.', colors.dim);
+  log('    Once logged in, machines sync automatically with your web dashboard.', colors.dim);
+  log('');
+}
+
+function runNpmScript(script, args = [], envOverrides = {}) {
+  const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  const child = spawn(npmCmd, ['run', '--silent', script, ...args], {
+    cwd: CLIENT_ROOT,
+    stdio: 'inherit',
+    env: { ...process.env, MSTRO_WORKING_DIR: USER_CWD, ...envOverrides },
+  });
+
+  let isShuttingDown = false;
+
+  // Handle Ctrl+C: kill child process and wait for it to exit
+  process.on('SIGINT', () => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    child.kill('SIGTERM');
+    // Don't exit here - let the child's 'exit' event handle process.exit()
+  });
+
+  // Change the parent process's working directory back to where the user ran mstro.
+  // This ensures that when the terminal opens a new tab based on the active process's
+  // cwd, it opens in the user's original directory instead of the npm-linked mstro dir.
+  try {
+    process.chdir(USER_CWD);
+  } catch (_e) {
+    // Ignore if directory no longer exists
+  }
+
+  child.on('error', (err) => {
+    log(`Error: ${err.message}`, colors.red);
+    process.exit(1);
+  });
+
+  child.on('exit', (code) => {
+    // Print a newline to ensure clean prompt after shutdown messages
+    if (isShuttingDown) {
+      process.stdout.write('\n');
+    }
+    process.exit(code || 0);
+  });
+}
+
+// Parse arguments
+const args = process.argv.slice(2);
+
+// Extract --port / -p value
+function parsePort(args) {
+  const portIndex = args.findIndex(a => a === '--port' || a === '-p');
+  if (portIndex !== -1 && args[portIndex + 1]) {
+    const port = parseInt(args[portIndex + 1], 10);
+    if (!Number.isNaN(port) && port > 0 && port < 65536) {
+      return port;
+    }
+    log(`Invalid port: ${args[portIndex + 1]}`, colors.red);
+    process.exit(1);
+  }
+  return null;
+}
+
+// Extract --server / -s value (platform server URL, for local dev/testing)
+// --dev is a shorthand for --server http://localhost:4102
+// --staging is a shorthand for --server https://api.staging.mstro.app
+function parseServerUrl(args) {
+  const serverIndex = args.findIndex(a => a === '--server' || a === '-s');
+  if (serverIndex !== -1 && args[serverIndex + 1]) {
+    return args[serverIndex + 1];
+  }
+  if (args.includes('--dev')) {
+    return 'http://localhost:4102';
+  }
+  if (args.includes('--staging')) {
+    return 'https://api.staging.mstro.app';
+  }
+  return null;
+}
+
+/**
+ * Compare two semver strings (x.y.z). Returns 1 if a > b, -1 if a < b, 0 if equal.
+ */
+function compareVersions(a, b) {
+  const pa = a.split('.').map(Number);
+  const pb = b.split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] || 0) > (pb[i] || 0)) return 1;
+    if ((pa[i] || 0) < (pb[i] || 0)) return -1;
+  }
+  return 0;
+}
+
+/**
+ * Read cached update check result from ~/.mstro/update-check.json
+ */
+function readUpdateCache() {
+  try {
+    if (!existsSync(UPDATE_CHECK_FILE)) return null;
+    return JSON.parse(readFileSync(UPDATE_CHECK_FILE, 'utf-8'));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Write the update check cache.
+ */
+function writeUpdateCache(latest) {
+  try {
+    const dir = dirname(UPDATE_CHECK_FILE);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(UPDATE_CHECK_FILE, JSON.stringify({ latest, checkedAt: Date.now() }));
+  } catch {
+    // Non-fatal
+  }
+}
+
+/**
+ * Fetch the latest published version from the npm registry inline.
+ * Returns the version string, or null on failure/timeout.
+ */
+async function fetchLatestVersion(timeoutMs = 3000) {
+  try {
+    const res = await fetch(`https://registry.npmjs.org/${pkg.name}/latest`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) return null;
+    const { version } = await res.json();
+    if (version) writeUpdateCache(version);
+    return version || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Determine the update type label from two semver strings.
+ */
+function updateType(current, latest) {
+  const c = current.split('.').map(Number);
+  const l = latest.split('.').map(Number);
+  if (l[0] > c[0]) return 'major';
+  if (l[1] > c[1]) return 'minor';
+  return 'patch';
+}
+
+/**
+ * Resolve the latest available version, using cache when fresh.
+ */
+async function resolveLatestVersion() {
+  const cache = readUpdateCache();
+
+  if (cache?.latest && (Date.now() - cache.checkedAt) < UPDATE_CHECK_INTERVAL) {
+    return cache.latest;
+  }
+
+  // Cache is stale or missing — check the registry inline
+  const fetched = await fetchLatestVersion(3000);
+  if (fetched) return fetched;
+
+  // Network failed — fall back to stale cache
+  return cache?.latest || null;
+}
+
+/**
+ * Install a specific version globally via npm.
+ * Returns { ok, stderr }.
+ */
+function installGlobalVersion(version) {
+  const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  return new Promise((resolve) => {
+    const child = spawn(npmCmd, ['install', '-g', `${pkg.name}@${version}`], {
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.on('error', () => resolve({ ok: false, stderr: '' }));
+    child.on('exit', (code) => resolve({ ok: code === 0, stderr }));
+  });
+}
+
+/**
+ * Auto-update if a new version is available.
+ * Uses a local cache (refreshed hourly) so most startups add zero latency.
+ * When the cache is stale or missing, does an inline registry fetch (≤3 s).
+ * If a newer version exists, installs it globally and re-execs.
+ * Returns true if the process was re-spawned (caller should return).
+ */
+async function autoUpdate() {
+  try {
+    const latest = await resolveLatestVersion();
+
+    if (!latest || compareVersions(latest, pkg.version) <= 0) {
+      return false;
+    }
+
+    const current = pkg.version;
+    const type = updateType(current, latest);
+    log(`\n  Updating mstro: ${colors.dim}${current}${colors.reset} → ${colors.green}${latest}${colors.reset} ${colors.dim}(${type})${colors.reset}`);
+
+    const installResult = await installGlobalVersion(latest);
+
+    if (!installResult.ok) {
+      log(`  Update failed — continuing with v${current}`, colors.yellow);
+      if (installResult.stderr) {
+        const reason = installResult.stderr.split('\n').find(l => l.trim()) || '';
+        if (reason) log(`  ${colors.dim}${reason.trim()}${colors.reset}`);
+      }
+      log(`  Run manually: ${colors.cyan}curl -fsSL install.mstro.app | sh${colors.reset}\n`);
+      return false;
+    }
+
+    log(`  Updated to v${latest}. Restarting...\n`, colors.green);
+
+    // Re-exec with the newly installed version
+    const child = spawn(process.argv[0], process.argv.slice(1), {
+      stdio: 'inherit',
+      env: { ...process.env, MSTRO_SKIP_UPDATE_CHECK: '1' },
+    });
+
+    process.on('SIGINT', () => {});
+    process.on('SIGTERM', () => child.kill('SIGTERM'));
+
+    child.on('exit', (code, signal) => {
+      process.exit(signal ? 1 : (code || 0));
+    });
+    child.on('error', () => process.exit(1));
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Check if user is logged in
+ */
+function isLoggedIn() {
+  const env = process.env.MSTRO_ENV || 'production';
+  const suffix = env === 'staging' ? '-staging' : env === 'dev' ? '-dev' : '';
+  const credentialsFile = join(MSTRO_CONFIG_DIR, `credentials${suffix}.json`);
+  if (!existsSync(credentialsFile)) {
+    return false;
+  }
+  try {
+    const creds = JSON.parse(readFileSync(credentialsFile, 'utf-8'));
+    return !!(creds.token && creds.userId && creds.email);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Auto-login if not authenticated. Exits on failure.
+ */
+async function ensureLoggedIn() {
+  if (isLoggedIn()) return;
+  log('\n  Not logged in — starting authentication...\n', colors.bold + colors.cyan);
+  try {
+    const { login } = await import('./commands/login.js');
+    await login(args, { inline: true });
+  } catch (err) {
+    log(`\n  Login failed: ${err.message}`, colors.red);
+    log('  Run "mstro login" to try again.\n', colors.dim);
+    process.exit(1);
+  }
+}
+
+/**
+ * Prompt for node-pty setup if not available
+ */
+async function ensurePtySetup() {
+  const ptyAvailable = await isNodePtyAvailable();
+  if (ptyAvailable) return;
+  if (hasUserDismissedPtySetup()) {
+    showPtyWarning();
+    return;
+  }
+  const choice = await promptPtySetup();
+  if (choice === 'configure') {
+    await runPtySetup();
+  }
+}
+
+async function startServer(envOverrides) {
+  await ensureLoggedIn();
+
+  await ensurePtySetup();
+
+  runNpmScript('start', [], envOverrides);
+}
+
+async function main() {
+  // Auto-update before doing anything else
+  if (process.env.MSTRO_SKIP_UPDATE_CHECK) {
+    delete process.env.MSTRO_SKIP_UPDATE_CHECK;
+  } else {
+    const updated = await autoUpdate();
+    if (updated) return; // Re-spawned child takes over
+  }
+
+  const requestedPort = parsePort(args);
+  const serverUrl = parseServerUrl(args);
+  const mstroEnv = args.includes('--staging') ? 'staging' : args.includes('--dev') ? 'dev' : 'production';
+  process.env.MSTRO_ENV = mstroEnv;
+  const envOverrides = {
+    ...(requestedPort ? { PORT: String(requestedPort) } : {}),
+    ...(serverUrl ? { PLATFORM_URL: serverUrl } : {}),
+    MSTRO_ENV: mstroEnv,
+  };
+
+  const subcommand = args.find(arg => !arg.startsWith('-') && !arg.startsWith('--'));
+
+  // Command dispatch table
+  const commands = new Map([
+    ['login', async () => {
+      const { login } = await import('./commands/login.js');
+      await login(args.slice(args.indexOf('login') + 1));
+    }],
+    ['logout', async () => {
+      const { logout } = await import('./commands/logout.js');
+      await logout(args.slice(args.indexOf('logout') + 1));
+    }],
+    ['whoami', async () => {
+      const { whoami } = await import('./commands/whoami.js');
+      await whoami(args.slice(args.indexOf('whoami') + 1));
+    }],
+    ['status', async () => {
+      const { status } = await import('./commands/status.js');
+      await status();
+    }],
+    ['telemetry', async () => {
+      const { telemetry } = await import('./commands/config.js');
+      await telemetry(args.slice(args.indexOf('telemetry') + 1));
+    }],
+    ['setup-terminal', async () => {
+      log('\n  Mstro Terminal Setup\n', colors.bold + colors.cyan);
+      const alreadyAvailable = await isNodePtyAvailable();
+      if (alreadyAvailable) {
+        log('  node-pty is already available. Terminal support is enabled!\n', colors.green);
+        await notifyRunningServers();
+        return;
+      }
+      const success = await runPtySetup();
+      if (success) {
+        await notifyRunningServers();
+      }
+      process.exit(success ? 0 : 1);
+    }],
+  ]);
+
+  // Flag-based commands
+  if (args.includes('--version') || args.includes('-V')) {
+    log(`mstro v${pkg.version}`);
+    return;
+  }
+
+  if (args.includes('--help') || args.includes('-h')) {
+    showHelp();
+    return;
+  }
+
+  // Subcommand dispatch
+  const handler = subcommand ? commands.get(subcommand) : undefined;
+  if (handler) {
+    await handler();
+    return;
+  }
+
+  // Default: start server
+  await startServer(envOverrides);
+}
+
+main();

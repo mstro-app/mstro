@@ -1,0 +1,77 @@
+// Copyright (c) 2025-present Mstro, Inc. All rights reserved.
+
+/**
+ * Front Matter Utilities — Read/write YAML front matter fields.
+ *
+ * All replacements are scoped to the --- delimiters to prevent
+ * markdown body corruption. Used across executor, plan-handlers,
+ * and state-reconciler.
+ */
+
+import { readFileSync, writeFileSync } from 'node:fs';
+import { readFile, writeFile } from 'node:fs/promises';
+
+/**
+ * Replace a field value in a raw YAML string (no --- delimiters).
+ * If the field does not exist, it is appended.
+ */
+export function replaceYamlField(yaml: string, field: string, value: string): string {
+  const regex = new RegExp(`^(${field}:\\s*).+$`, 'm');
+  if (regex.test(yaml)) {
+    return yaml.replace(regex, `$1${value}`);
+  }
+  return `${yaml}\n${field}: ${value}`;
+}
+
+/**
+ * Replace a YAML front matter field in a full markdown content string.
+ * Only modifies content between the first pair of --- delimiters.
+ * If the field does not exist in front matter, it is appended.
+ * Returns content unchanged if no front matter block is found.
+ */
+export function replaceFrontMatterField(content: string, field: string, value: string): string {
+  const fmMatch = content.match(/^(---\n)([\s\S]*?)(\n---)/);
+  if (!fmMatch) return content;
+
+  const yaml = replaceYamlField(fmMatch[2], field, value);
+  return `${fmMatch[1]}${yaml}${fmMatch[3]}${content.slice(fmMatch[0].length)}`;
+}
+
+/**
+ * Read a file, update a front matter field, and write it back.
+ * Convenience wrapper for single-field updates.
+ */
+export function setFrontMatterField(filePath: string, field: string, value: string): void {
+  const content = readFileSync(filePath, 'utf-8');
+  const updated = replaceFrontMatterField(content, field, value);
+  writeFileSync(filePath, updated, 'utf-8');
+}
+
+export async function setFrontMatterFieldAsync(filePath: string, field: string, value: string): Promise<void> {
+  const content = await readFile(filePath, 'utf-8');
+  const updated = replaceFrontMatterField(content, field, value);
+  await writeFile(filePath, updated, 'utf-8');
+}
+
+/**
+ * Check off all unchecked acceptance criteria checkboxes in a markdown string.
+ * Only modifies checkboxes within the "## Acceptance Criteria" section.
+ */
+export function checkAllAcceptanceCriteria(content: string): string {
+  const sectionStart = content.indexOf('## Acceptance Criteria');
+  if (sectionStart === -1) return content;
+
+  const afterHeader = content.indexOf('\n', sectionStart);
+  if (afterHeader === -1) return content;
+
+  const nextSection = content.slice(afterHeader).search(/\n## /);
+  const sectionEnd = nextSection !== -1 ? afterHeader + nextSection : content.length;
+
+  const before = content.slice(0, afterHeader);
+  const section = content.slice(afterHeader, sectionEnd);
+  const after = content.slice(sectionEnd);
+
+  const updatedSection = section.replace(/^([-*]\s+)\[ \]/gm, '$1[x]');
+
+  return before + updatedSection + after;
+}

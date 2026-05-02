@@ -1,0 +1,470 @@
+// Copyright (c) 2025-present Mstro, Inc. All rights reserved.
+
+/**
+ * WebSocket Improvise Types
+ *
+ * Type definitions for WebSocket improvisation sessions.
+ */
+
+/**
+ * Runtime-agnostic WebSocket context interface
+ * Works with both Bun's ServerWebSocket and Node.js ws library
+ */
+export interface WSContext {
+  send(data: string | Buffer): void
+  close(): void
+  readyState: number
+  // Internal properties for tracking
+  _workingDir?: string
+  _ws?: unknown
+}
+
+const CoreMessages = ['execute', 'cancel', 'getHistory', 'getSessions', 'getSessionsCount', 'deleteSession', 'getSessionById', 'clearHistory', 'searchHistory', 'new', 'autocomplete', 'readFile', 'ping', 'initTab', 'resumeSession', 'approve', 'reject', 'recordSelection', 'requestNotificationSummary'] as const;
+
+const TerminalMessages = ['terminalInit', 'terminalReconnect', 'terminalList', 'terminalInput', 'terminalResize', 'terminalClose'] as const;
+
+const FileExplorerMessages = ['listDirectory', 'writeFile', 'createFile', 'createDirectory', 'deleteFile', 'renameFile', 'notifyFileOpened', 'searchFileContents', 'cancelSearch', 'findDefinition'] as const;
+
+const GitMessages = ['gitStatus', 'gitStage', 'gitUnstage', 'gitCommit', 'gitCommitWithAI', 'gitPush', 'gitPull', 'gitLog', 'gitDiscoverRepos', 'gitSetDirectory', 'gitGetRemoteInfo', 'gitCreatePR', 'gitGeneratePRDescription'] as const;
+
+const GitBranchMessages = ['gitListBranches', 'gitCheckout', 'gitCreateBranch', 'gitDeleteBranch'] as const;
+
+const GitDiffMessages = ['gitDiff', 'gitShowCommit', 'gitCommitDiff'] as const;
+
+const GitTagMessages = ['gitListTags', 'gitCreateTag', 'gitPushTag'] as const;
+
+const GitWorktreeMessages = ['gitWorktreeList', 'gitWorktreeCreate', 'gitWorktreeCreateAndAssign', 'gitWorktreeRemove', 'tabWorktreeSwitch', 'gitWorktreePush', 'gitWorktreeCreatePR'] as const;
+
+const GitMergeMessages = ['gitMergePreview', 'gitWorktreeMerge', 'gitMergeAbort', 'gitMergeComplete', 'gitMergeStashPop', 'gitMergeDiscardBlockers'] as const;
+
+const SessionSyncMessages = ['getActiveTabs', 'createTab', 'reorderTabs', 'syncTabMeta', 'removeTab', 'markTabViewed'] as const;
+
+const SettingsMessages = ['getSettings', 'updateSettings'] as const;
+
+const QualityMessages = ['qualityDetectTools', 'qualityScan', 'qualityInstallTools', 'qualityCodeReview', 'qualityLoadState', 'qualitySaveDirectories'] as const;
+
+const FileUploadMessages = ['fileUploadStart', 'fileUploadChunk', 'fileUploadComplete', 'fileUploadCancel'] as const;
+
+const FileDownloadMessages = ['fileDownloadStart', 'fileDownloadCancel'] as const;
+
+const PlanMessages = ['planInit', 'planGetState', 'planListIssues', 'planGetIssue', 'planGetSprint', 'planGetMilestone', 'planCreateIssue', 'planUpdateIssue', 'planDeleteIssue', 'planScaffold', 'planPrompt', 'planExecute', 'planExecuteEpic', 'planPause', 'planStop', 'planResume'] as const;
+
+const PlanBoardMessages = ['planCreateBoard', 'planUpdateBoard', 'planArchiveBoard', 'planRestoreBoard', 'planGetBoard', 'planGetBoardState', 'planReorderBoards', 'planSetActiveBoard', 'planGetBoardArtifacts'] as const;
+
+const PlanSprintMessages = ['planCreateSprint', 'planActivateSprint', 'planCompleteSprint', 'planGetSprintArtifacts'] as const;
+
+const SkillMessages = ['listSkills', 'chatToBoard'] as const;
+
+type WebSocketMessageType =
+  | typeof CoreMessages[number]
+  | typeof TerminalMessages[number]
+  | typeof FileExplorerMessages[number]
+  | typeof GitMessages[number]
+  | typeof GitBranchMessages[number]
+  | typeof GitDiffMessages[number]
+  | typeof GitTagMessages[number]
+  | typeof GitWorktreeMessages[number]
+  | typeof GitMergeMessages[number]
+  | typeof SessionSyncMessages[number]
+  | typeof SettingsMessages[number]
+  | typeof QualityMessages[number]
+  | typeof FileUploadMessages[number]
+  | typeof FileDownloadMessages[number]
+  | typeof PlanMessages[number]
+  | typeof PlanBoardMessages[number]
+  | typeof PlanSprintMessages[number]
+  | typeof SkillMessages[number];
+
+export interface WebSocketMessage {
+  type: WebSocketMessageType;
+  tabId?: string;
+  terminalId?: string;
+  // biome-ignore lint/suspicious/noExplicitAny: message envelope carries heterogeneous payloads — typed per-handler via destructuring
+  data?: any;
+  /** Injected by server relay for view-only shared users */
+  _permission?: 'view';
+}
+
+const CoreResponseMessages = ['output', 'thinking', 'movementStart', 'movementComplete', 'movementError', 'sessionUpdate', 'history', 'sessions', 'sessionsCount', 'sessionDeleted', 'sessionData', 'historyCleared', 'searchResults', 'newSession', 'autocomplete', 'fileContent', 'error', 'pong', 'tabInitialized', 'approvalRequired', 'toolUse', 'streamingTokens', 'notificationSummary', 'executeAck', 'clientOffline', 'clientAuthExpired'] as const;
+
+const TerminalResponseMessages = ['terminalOutput', 'terminalReady', 'terminalExit', 'terminalError', 'terminalList', 'terminalScrollback', 'terminalCreated', 'terminalClosed'] as const;
+
+const FileExplorerResponseMessages = ['directoryListing', 'fileWritten', 'fileCreated', 'directoryCreated', 'fileDeleted', 'fileRenamed', 'fileOpened', 'fileContentChanged', 'contentSearchResults', 'contentSearchComplete', 'contentSearchError', 'definitionResult', 'fileError'] as const;
+
+const GitResponseMessages = ['gitStatus', 'gitStaged', 'gitUnstaged', 'gitCommitted', 'gitCommitMessage', 'gitPushed', 'gitPulled', 'gitLog', 'gitError', 'gitReposDiscovered', 'gitDirectorySet', 'gitRemoteInfo', 'gitPRCreated', 'gitPRDescription'] as const;
+
+const GitBranchResponseMessages = ['gitBranchList', 'gitCheckedOut', 'gitBranchCreated', 'gitBranchDeleted'] as const;
+
+const GitDiffResponseMessages = ['gitDiffResult', 'gitCommitDetail', 'gitCommitDiffResult'] as const;
+
+const GitTagResponseMessages = ['gitTagList', 'gitTagCreated', 'gitTagPushed'] as const;
+
+const GitWorktreeResponseMessages = ['gitWorktreeListResult', 'gitWorktreeCreated', 'gitWorktreeCreatedAndAssigned', 'gitWorktreeRemoved', 'tabWorktreeSwitched', 'gitBranchChanged', 'gitWorktreePushed', 'gitWorktreePRCreated'] as const;
+
+const GitMergeResponseMessages = ['gitMergePreviewResult', 'gitWorktreeMergeResult', 'gitMergeAborted', 'gitMergeCompleted', 'gitMergeStashPopped', 'gitMergeBlockersDiscarded'] as const;
+
+const SessionSyncResponseMessages = ['activeTabs', 'tabCreated', 'tabRemoved', 'tabRenamed', 'tabsReordered', 'tabViewed', 'tabStateChanged'] as const;
+
+const SettingsResponseMessages = ['settings', 'settingsUpdated'] as const;
+
+const QualityResponseMessages = ['qualityToolsDetected', 'qualityScanProgress', 'qualityScanResults', 'qualityInstallProgress', 'qualityInstallComplete', 'qualityCodeReview', 'qualityCodeReviewProgress', 'qualityPostSession', 'qualityError', 'qualityStateLoaded', 'qualityDirectoriesUpdated'] as const;
+
+const FileUploadResponseMessages = ['fileUploadAck', 'fileUploadReady', 'fileUploadError'] as const;
+
+const FileDownloadResponseMessages = ['fileDownloadReady', 'fileDownloadChunk', 'fileDownloadComplete', 'fileDownloadError'] as const;
+
+const PlanResponseMessages = ['planState', 'planIssueList', 'planIssue', 'planSprint', 'planMilestone', 'planNotFound', 'planStateUpdated', 'planIssueUpdated', 'planIssueCreated', 'planIssueDeleted', 'planScaffolded', 'planPromptStreaming', 'planPromptProgress', 'planPromptResponse', 'planExecutionStarted', 'planExecutionProgress', 'planExecutionOutput', 'planExecutionMetrics', 'planExecutionComplete', 'planExecutionError', 'planError'] as const;
+
+const PlanBoardResponseMessages = ['planBoardCreated', 'planBoardUpdated', 'planBoardArchived', 'planBoardState', 'planBoardArtifacts', 'planWorkspaceUpdated'] as const;
+
+const PlanSprintResponseMessages = ['planSprintCreated', 'planSprintUpdated', 'planSprintCompleted', 'planSprintArtifacts', 'planReviewProgress'] as const;
+
+const SkillResponseMessages = ['skillsList', 'chatToBoardCreated'] as const;
+
+type WebSocketResponseType =
+  | typeof CoreResponseMessages[number]
+  | typeof TerminalResponseMessages[number]
+  | typeof FileExplorerResponseMessages[number]
+  | typeof GitResponseMessages[number]
+  | typeof GitBranchResponseMessages[number]
+  | typeof GitDiffResponseMessages[number]
+  | typeof GitTagResponseMessages[number]
+  | typeof GitWorktreeResponseMessages[number]
+  | typeof GitMergeResponseMessages[number]
+  | typeof SessionSyncResponseMessages[number]
+  | typeof SettingsResponseMessages[number]
+  | typeof QualityResponseMessages[number]
+  | typeof FileUploadResponseMessages[number]
+  | typeof FileDownloadResponseMessages[number]
+  | typeof PlanResponseMessages[number]
+  | typeof PlanBoardResponseMessages[number]
+  | typeof PlanSprintResponseMessages[number]
+  | typeof SkillResponseMessages[number];
+
+export interface WebSocketResponse {
+  type: WebSocketResponseType;
+  tabId?: string;
+  terminalId?: string;
+  // biome-ignore lint/suspicious/noExplicitAny: message envelope carries heterogeneous payloads — typed per-handler via destructuring
+  data?: any;
+  /**
+   * Monotonic per-tab sequence number assigned by `tab-event-buffer.ts`.
+   * Stamped on tab-scoped streaming broadcasts so webs can ask for replay
+   * starting after their highest-seen seq on a reconnect (`initTab` /
+   * `resumeSession` with `lastSeenSeq` in the payload).
+   */
+  seq?: number;
+}
+
+export interface ConnectionData {
+  tabId: string;
+  workingDir: string;
+}
+
+export interface SkillEntry {
+  name: string;
+  displayName: string;
+  description: string;
+  source: 'project' | 'user' | 'system' | 'builtin' | 'platform';
+}
+
+// Extended autocomplete option with metadata
+export interface AutocompleteResult {
+  value: string;
+  label: string;
+  isDirectory: boolean;
+  isRecent: boolean;
+  fileType: string;
+  matchedIndices: Array<[number, number]>;
+}
+
+// Frecency data structure - tracks completion usage
+export interface FrecencyEntry {
+  count: number;        // Total number of times selected
+  lastUsed: number;     // Timestamp of last use
+}
+
+export interface FrecencyData {
+  [filePath: string]: FrecencyEntry;
+}
+
+// Directory cache for performance
+export interface CacheEntry {
+  files: Array<{ relativePath: string; isDirectory: boolean; fileName: string; depth: number }>;
+  timestamp: number;
+}
+
+export interface FileMetadata {
+  relativePath: string;
+  isDirectory: boolean;
+  fileName: string;
+  depth: number;
+}
+
+export interface FileReadResult {
+  filePath: string;
+  fileName: string;
+  content: string;
+  isImage?: boolean;
+  mimeType?: string;
+  error?: string;
+}
+
+// ============================================================================
+// File Explorer Types
+// ============================================================================
+
+/**
+ * Directory entry for file explorer listing
+ */
+export interface DirectoryEntry {
+  name: string;
+  path: string;
+  type: 'file' | 'directory';
+  size?: number;
+  modifiedAt?: string;
+}
+
+/**
+ * Message data for listDirectory request
+ */
+export interface ListDirectoryData {
+  dirPath: string;
+  showHidden?: boolean;
+}
+
+/**
+ * Message data for writeFile request
+ */
+export interface WriteFileData {
+  filePath: string;
+  content: string;
+}
+
+/**
+ * Message data for createFile request
+ */
+export interface CreateFileData {
+  filePath: string;
+}
+
+/**
+ * Message data for createDirectory request
+ */
+export interface CreateDirectoryData {
+  dirPath: string;
+}
+
+/**
+ * Message data for deleteFile request
+ */
+export interface DeleteFileData {
+  filePath: string;
+}
+
+/**
+ * Message data for renameFile request
+ */
+export interface RenameFileData {
+  oldPath: string;
+  newPath: string;
+}
+
+/**
+ * Response data for directoryListing
+ */
+export interface DirectoryListingResponse {
+  success: boolean;
+  entries?: DirectoryEntry[];
+  error?: string;
+}
+
+/**
+ * Response data for file operations (write, create, delete, rename)
+ */
+export interface FileOperationResponse {
+  success: boolean;
+  path?: string;
+  error?: string;
+}
+
+// ============================================================================
+// Git Types
+// ============================================================================
+
+/**
+ * Git file status entry
+ */
+export interface GitFileStatus {
+  /** File path relative to working directory */
+  path: string;
+  /** Status code (M=modified, A=added, D=deleted, ?=untracked, R=renamed) */
+  status: 'M' | 'A' | 'D' | '?' | 'R' | 'C' | 'U';
+  /** Whether the file is staged */
+  staged: boolean;
+  /** Original path (for renamed files) */
+  originalPath?: string;
+}
+
+/**
+ * Git status response
+ */
+export interface GitStatusResponse {
+  /** Current branch name */
+  branch: string;
+  /** Whether the repository has uncommitted changes */
+  isDirty: boolean;
+  /** Staged files */
+  staged: GitFileStatus[];
+  /** Unstaged/modified files */
+  unstaged: GitFileStatus[];
+  /** Untracked files */
+  untracked: GitFileStatus[];
+  /** Number of commits ahead of remote */
+  ahead: number;
+  /** Number of commits behind remote */
+  behind: number;
+  /** Whether the branch has an upstream tracking branch */
+  hasUpstream: boolean;
+}
+
+/**
+ * Git commit log entry
+ */
+export interface GitLogEntry {
+  /** Commit hash */
+  hash: string;
+  /** Short hash */
+  shortHash: string;
+  /** Commit message subject */
+  subject: string;
+  /** Author name */
+  author: string;
+  /** Commit date (ISO string) */
+  date: string;
+}
+
+/**
+ * File changed in a commit
+ */
+export interface GitCommitFile {
+  path: string;
+  status: string;
+  additions: number;
+  deletions: number;
+  oldPath?: string;
+}
+
+/**
+ * Discovered git repository info
+ */
+export interface GitRepoInfo {
+  /** Path to the git repository (directory containing .git) */
+  path: string;
+  /** Repository name (directory name) */
+  name: string;
+  /** Current branch if available */
+  branch?: string;
+}
+
+/**
+ * Git repos discovered response
+ */
+export interface GitReposDiscoveredResponse {
+  /** List of discovered git repositories */
+  repos: GitRepoInfo[];
+  /** Whether the root working directory is a git repo */
+  rootIsGitRepo: boolean;
+  /** Currently selected git directory (if any) */
+  selectedDirectory: string | null;
+}
+
+/**
+ * Git directory set response
+ */
+export interface GitDirectorySetResponse {
+  /** The directory that was set */
+  directory: string;
+  /** Whether the directory is valid (contains .git) */
+  isValid: boolean;
+}
+
+// ============================================================================
+// Branch Types
+// ============================================================================
+
+export interface GitBranchEntry {
+  /** Branch name, e.g. "feat/auth" or "origin/main" */
+  name: string;
+  /** Short commit hash */
+  shortHash: string;
+  /** Whether this is a remote branch */
+  isRemote: boolean;
+  /** Whether this is the currently checked out branch */
+  isCurrent: boolean;
+  /** Tracking branch, e.g. "origin/feat/auth" */
+  upstream?: string;
+}
+
+// ============================================================================
+// Tag Types
+// ============================================================================
+
+export interface GitTagEntry {
+  /** Tag name */
+  name: string;
+  /** Short commit hash */
+  shortHash: string;
+  /** Creation date (ISO string) */
+  date: string;
+  /** Tag message (empty for lightweight tags) */
+  message: string;
+}
+
+// ============================================================================
+// Worktree Types
+// ============================================================================
+
+export interface WorktreeInfo {
+  /** Absolute path to the worktree directory */
+  path: string;
+  /** Branch checked out in this worktree */
+  branch: string;
+  /** HEAD commit hash */
+  head: string;
+  /** Whether this is the main working tree */
+  isMain: boolean;
+  /** Whether this is a bare repository */
+  isBare: boolean;
+  /** Whether this worktree can be pruned */
+  prunable?: boolean;
+}
+
+// ============================================================================
+// Merge Types
+// ============================================================================
+
+export interface MergePreviewResult {
+  /** Whether the merge can be done cleanly */
+  clean: boolean;
+  /** List of conflicting file paths */
+  conflicts: string[];
+  /** Diff stat summary */
+  stat: string;
+  /** List of commits to be merged */
+  commits: { hash: string; message: string }[];
+  /** Number of commits ahead */
+  ahead: number;
+}
+
+export interface WorktreeMergeResult {
+  /** Whether the merge succeeded */
+  success: boolean;
+  /** Merge commit hash (if successful) */
+  mergeCommit?: string;
+  /** Error message (if failed) */
+  error?: string;
+  /** List of conflicting files (if conflicts) */
+  conflictFiles?: string[];
+}
+

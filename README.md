@@ -1,8 +1,34 @@
-# mstro-app
+<div align="center">
 
-Browser-based IDE + AI agent orchestration CLI. Run Claude Code in parallel across git worktrees, auto-approve safe tools with the Security Bouncer, and control long-running AI work from any device at [mstro.app](https://mstro.app).
+<img src="https://mstro.app/mstro-icon.svg" alt="Mstro" width="96" height="96" />
+
+# Mstro
+
+*Browser-based IDE and AI agent orchestration for Claude Code.*
+
+[![npm version](https://img.shields.io/npm/v/mstro-app?style=flat-square&color=000)](https://www.npmjs.com/package/mstro-app)
+[![npm downloads](https://img.shields.io/npm/dm/mstro-app?style=flat-square&color=000)](https://www.npmjs.com/package/mstro-app)
+[![Node version](https://img.shields.io/node/v/mstro-app?style=flat-square)](https://nodejs.org/)
+[![License](https://img.shields.io/badge/license-PolyForm--NC-blue?style=flat-square)](./LICENSE)
+[![Built for Claude Code](https://img.shields.io/badge/built%20for-Claude%20Code-orange?style=flat-square)](https://docs.anthropic.com/en/docs/claude-code)
+
+[Website](https://mstro.app) · [Blog](https://mstro.app/blog) · [Compare](https://mstro.app/compare) · [Security](./SECURITY.md)
+
+</div>
+
+<div align="center">
+  <img src="https://mstro.app/screenshots/chat-desktop.png" alt="Mstro chat and IDE running in the browser" width="900" />
+</div>
+
+---
+
+Run Claude Code in parallel across git worktrees, auto-approve safe tools with the Security Bouncer, and control long-running AI work from any device at [mstro.app](https://mstro.app). Your code never leaves your computer.
 
 > **Free for the first 1,000 users.** No credit card. Bring your own Anthropic API key.
+
+---
+
+## Quick Start
 
 > **Start in 30 seconds:**
 >
@@ -11,26 +37,6 @@ Browser-based IDE + AI agent orchestration CLI. Run Claude Code in parallel acro
 > ```
 >
 > Then run `mstro` in any project directory. Open [mstro.app](https://mstro.app). Start building.
-
-## What Mstro Does
-
-### 1. Browser-based IDE for remote machines
-
-Open [mstro.app](https://mstro.app) and connect to Claude Code running on your laptop, cloud VMs, or servers. Chat, edit files, use git, run terminals. All from any browser, on any device. Your code stays on your hardware.
-
-### 2. Long-running AI tasks without babysitting
-
-Start a complex task and walk away. The Security Bouncer handles every permission decision automatically. A three-layer watchdog detects stalls, kills frozen processes, and recovers. Come back to finished work.
-
-### 3. One prompt to a full kanban board of parallel AI agents
-
-Describe what you want. The PM board breaks it into a kanban board of tasks, then AI agent teams execute them in parallel on separate git worktrees. Track progress in real time. What takes a solo developer a week ships in hours.
-
-### 4. One prompt to an autonomous business
-
-The long-term direction: self-managing AI-powered businesses that optimize for profit. Today Mstro ships the agent orchestration layer that makes it possible.
-
-## Quick Start
 
 **Prerequisites:**
 
@@ -61,13 +67,19 @@ Run `mstro` on multiple machines. Each one appears as a separate workspace.
 
 Stop with `Ctrl+C`.
 
-## How It Works
+---
 
-```
-Browser (mstro.app) <--WS--> Platform Server (relay) <--WS--> mstro CLI (your machine) --> Claude Code
-```
+## What Mstro Does
 
-Your code never leaves your computer. The browser is a window into what's happening on your machines.
+**1. Browser-based IDE for remote machines.** Open [mstro.app](https://mstro.app) and connect to Claude Code running on your laptop, cloud VMs, or servers. Chat, edit files, use git, run terminals. All from any browser, on any device. Your code stays on your hardware.
+
+**2. Long-running AI tasks without babysitting.** Start a complex task and walk away. The Security Bouncer handles every permission decision automatically. A three-layer watchdog detects stalls, kills frozen processes, and recovers. Come back to finished work.
+
+**3. One prompt to a full kanban board of parallel AI agents.** Describe what you want. The PM board breaks it into a kanban board of tasks, then AI agent teams execute them in parallel on separate git worktrees. Track progress in real time. What takes a solo developer a week ships in hours.
+
+**4. One prompt to an autonomous business.** The long-term direction: self-managing AI-powered businesses that optimize for profit. Today Mstro ships the agent orchestration layer that makes it possible.
+
+---
 
 ## Features
 
@@ -80,6 +92,16 @@ Your code never leaves your computer. The browser is a window into what's happen
 | **Git** | Stage, commit, push, and create PRs — AI writes commit messages |
 | **Terminal** | Full PTY shell access to any machine from your browser |
 | **Shared Apps** | Invite others with view-only, project control, or full machine access |
+
+## How It Works
+
+```
+Browser (mstro.app) <--WS--> Platform Server (relay) <--WS--> mstro CLI (your machine) --> Claude Code
+```
+
+Your code never leaves your computer. The browser is a window into what's happening on your machines.
+
+---
 
 ## Security
 
@@ -102,6 +124,8 @@ Three safety layers run continuously during AI sessions:
 - **Stall Assessor**: heuristic + AI analysis detects stuck processes
 - **Tool Watchdog**: per-tool adaptive timeouts using RFC 6298 EMA, with custom profiles for long-running operations (WebFetch 3m, Bash 5m, Task 15m)
 
+---
+
 ## PM Board
 
 The PM board turns a single prompt into a managed project:
@@ -114,7 +138,8 @@ The PM board turns a single prompt into a managed project:
 
 Configurable parallel execution (max concurrent agents), custom review criteria per board, and board-scoped artifacts (progress logs, output files, review results).
 
-### Custom Review Agents
+<details>
+<summary><strong>Custom Review Agents</strong> — override review prompts per board</summary>
 
 When a task moves to "In Review", an AI review agent checks the work. There are three built-in agents:
 
@@ -162,7 +187,8 @@ Output EXACTLY one JSON object on its own line (no markdown fencing):
 {"passed": true, "checks": [{"name": "criteria_met", "passed": true, "details": "..."}]}
 ```
 
-Variables you can use:
+<details>
+<summary>Available template variables</summary>
 
 | Variable | Available in | Description |
 |----------|-------------|-------------|
@@ -176,7 +202,11 @@ Variables you can use:
 | `review_criteria` | review-custom | Board-level review criteria text |
 | `read_instruction` | review-custom | Read instruction (changes based on task type) |
 
+</details>
+
 Resolution order: board agent file > system default > hardcoded fallback. If there's no board override, the built-in agents run.
+
+</details>
 
 ## Quality
 
@@ -187,6 +217,8 @@ Quality analysis runs across your codebase:
 - **AI code review**: Claude reviews code for architecture violations, SOLID principles, security, and performance
 - **Severity scoring**: findings tagged with severity, category, file paths, and line numbers
 - **Automated fixes**: AI can fix identified issues with progress tracking
+
+---
 
 ## CLI Reference
 
@@ -230,7 +262,12 @@ Stored in `~/.mstro/`:
 | `settings.json` | Model selection, preferences |
 | `session-registry.json` | Tab-to-session mapping |
 
+---
+
 ## Architecture
+
+<details>
+<summary><strong>Source layout</strong> — full file tree of subsystems</summary>
 
 ```
 server/
@@ -259,6 +296,8 @@ bin/
   commands/                         # login, logout, status, whoami, config
 ```
 
+</details>
+
 ### Key Subsystems
 
 - **Headless Runner**: spawns Claude Code processes with MCP bouncer integration, manages lifecycle
@@ -267,6 +306,8 @@ bin/
 - **PM Board Executor**: parallel board execution with wave-based scheduling and quality gates
 - **PTY Manager**: terminal session management with tmux support and subscriber model
 - **Session Registry**: tab-to-session persistence across WebSocket disconnects
+
+---
 
 ## Optional Setup
 
@@ -321,6 +362,8 @@ npm uninstall -g mstro-app
 rm -rf ~/.mstro
 ```
 
+---
+
 ## Links
 
 - **Web App**: [mstro.app](https://mstro.app)
@@ -334,4 +377,4 @@ PolyForm Noncommercial License 1.0.0. See [LICENSE](./LICENSE).
 
 You can view, modify, and distribute the source code for any **noncommercial** purpose — personal study, hobby projects, research, evaluation, and use by charitable, educational, public-research, public-safety, environmental, or government organizations. Any commercial use, including offering a commercial product or service derived from this code, requires a separate commercial license from Mstro.
 
-For commercial licensing inquiries, contact hey@mstro.app.
+For commercial licensing inquiries, contact bravo@mstro.app.

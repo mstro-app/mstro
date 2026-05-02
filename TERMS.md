@@ -36,7 +36,7 @@ To use any payment feature of the Service -- including subscriptions -- you must
 
 ### 3.3 COPPA
 
-The Service is not directed to children under 13. If we become aware that a child under 13 has provided personal information, we will delete it promptly. If you believe a child under 13 has created an account, contact us at legal@mstro.app.
+The Service is not directed to children under 13. If we become aware that a child under 13 has provided personal information, we will delete it promptly. If you believe a child under 13 has created an account, contact us at bravo@mstro.app.
 
 ---
 
@@ -48,7 +48,7 @@ To use certain features of the Service, you must create an account at mstro.app.
 - Keep your account information current
 - Maintain the security of your account credentials and any device authentication tokens
 - Accept responsibility for all activities that occur under your account
-- Notify us immediately at legal@mstro.app of any unauthorized access or security breach
+- Notify us immediately at bravo@mstro.app of any unauthorized access or security breach
 
 You may not create accounts using automated means or under false pretenses.
 
@@ -206,11 +206,11 @@ Our designated DMCA agent for receiving notices of claimed infringement is:
 
 **DMCA Agent**
 Mstro, Inc.
-Email: legal@mstro.app
+Email: bravo@mstro.app
 
 ### 12.2 Filing a Takedown Notice
 
-If you believe content accessible through the Service infringes your copyright, send a written notice to legal@mstro.app that includes:
+If you believe content accessible through the Service infringes your copyright, send a written notice to bravo@mstro.app that includes:
 
 1. Your physical or electronic signature
 2. Identification of the copyrighted work(s) claimed to be infringed
@@ -221,7 +221,7 @@ If you believe content accessible through the Service infringes your copyright, 
 
 ### 12.3 Counter-Notice
 
-If you believe content was removed in error, you may send a counter-notice to legal@mstro.app with the information required by 17 U.S.C. Section 512(g)(3).
+If you believe content was removed in error, you may send a counter-notice to bravo@mstro.app with the information required by 17 U.S.C. Section 512(g)(3).
 
 ### 12.4 Repeat Infringers
 
@@ -274,7 +274,7 @@ TO THE FULLEST EXTENT PERMITTED BY APPLICABLE LAW:
 
 ### 16.1 Informal Resolution First
 
-Before initiating formal proceedings, you agree to contact us at legal@mstro.app and give us 30 days to attempt to resolve the dispute informally.
+Before initiating formal proceedings, you agree to contact us at bravo@mstro.app and give us 30 days to attempt to resolve the dispute informally.
 
 ### 16.2 Binding Arbitration
 
@@ -296,7 +296,7 @@ Either party may bring an individual claim in small claims court. Either party m
 
 ### 16.6 Opt-Out
 
-You may opt out of arbitration by sending written notice to legal@mstro.app within 30 days of first accepting these Terms. Your notice must include your name, account email, and a clear statement that you are opting out of arbitration. If you opt out, disputes will be resolved in the courts specified in Section 17.
+You may opt out of arbitration by sending written notice to bravo@mstro.app within 30 days of first accepting these Terms. Your notice must include your name, account email, and a clear statement that you are opting out of arbitration. If you opt out, disputes will be resolved in the courts specified in Section 17.
 
 ---
 
@@ -322,7 +322,7 @@ Your continued use of the Service after the effective date of updated Terms cons
 
 ### 19.1 By You
 
-You may stop using the Service at any time. To delete your account, visit https://mstro.app/settings or contact legal@mstro.app.
+You may stop using the Service at any time. To delete your account, visit https://mstro.app/settings or contact bravo@mstro.app.
 
 ### 19.2 By Mstro
 
@@ -366,7 +366,7 @@ Nothing in these Terms creates a partnership, joint venture, employment, or agen
 
 For questions about these Terms, to report violations, or to reach our DMCA agent:
 
-- **Email:** legal@mstro.app
+- **Email:** bravo@mstro.app
 - **Website:** https://mstro.app
 
 ---

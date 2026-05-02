@@ -220,7 +220,7 @@ We ensure that such transfers are subject to appropriate safeguards as required 
 - **Standard Contractual Clauses (SCCs):** We rely on the European Commission-approved Standard Contractual Clauses (including, where applicable, the UK International Data Transfer Addendum) as the transfer mechanism for personal data transferred from the EU/EEA/UK to the United States.
 - **Processor agreements:** All third-party processors who receive personal data from EU/EEA/UK users are required to maintain SCCs or another valid transfer mechanism.
 
-You may request a copy of the applicable transfer safeguards by contacting us at privacy@mstro.app.
+You may request a copy of the applicable transfer safeguards by contacting us at bravo@mstro.app.
 
 ---
 
@@ -260,9 +260,9 @@ If you are located in the European Union, United Kingdom, or EEA, you have the f
 
 **Response timeframe:** We will respond to all valid data subject requests within **30 days** of receipt. Where requests are complex or numerous, we may extend this period by a further two months, in which case we will notify you within the initial 30-day period.
 
-**How to exercise your rights:** Submit a request by email to privacy@mstro.app. We may need to verify your identity before processing your request.
+**How to exercise your rights:** Submit a request by email to bravo@mstro.app. We may need to verify your identity before processing your request.
 
-**Residents of other jurisdictions:** If you are a California resident, you may have additional rights under the CCPA/CPRA, including the right to know, delete, correct, and opt out of sale (we do not sell data). Contact us at privacy@mstro.app for jurisdiction-specific requests.
+**Residents of other jurisdictions:** If you are a California resident, you may have additional rights under the CCPA/CPRA, including the right to know, delete, correct, and opt out of sale (we do not sell data). Contact us at bravo@mstro.app for jurisdiction-specific requests.
 
 ---
 
@@ -273,7 +273,7 @@ If you believe we have not handled your personal data in accordance with applica
 - **EU:** Contact the data protection authority in your EU member state. A list of EU supervisory authorities is available at: https://edpb.europa.eu/about-edpb/about-edpb/members_en
 - **UK:** Contact the Information Commissioner's Office (ICO) at https://ico.org.uk
 
-We ask that you contact us first at privacy@mstro.app so that we have the opportunity to address your concern before you escalate to a supervisory authority.
+We ask that you contact us first at bravo@mstro.app so that we have the opportunity to address your concern before you escalate to a supervisory authority.
 
 ---
 
@@ -281,7 +281,7 @@ We ask that you contact us first at privacy@mstro.app so that we have the opport
 
 At Mstro's current scale and given the nature of our processing activities, we are not required to appoint a Data Protection Officer (DPO) under Article 37 of the GDPR. We nonetheless take privacy obligations seriously and have designated a privacy contact to handle data protection matters.
 
-**Privacy contact:** privacy@mstro.app
+**Privacy contact:** bravo@mstro.app
 
 If our processing activities change in a way that triggers the DPO requirement, we will appoint a DPO and update this policy accordingly.
 
@@ -317,7 +317,7 @@ Breach notifications to affected users will be sent to the email address associa
 
 ## 14. Children's Privacy
 
-**General use:** The Service is not directed to children under the age of **13**. We do not knowingly collect personal data from children under 13. If you believe a child under 13 has provided us with personal data, please contact us at privacy@mstro.app and we will promptly delete that information.
+**General use:** The Service is not directed to children under the age of **13**. We do not knowingly collect personal data from children under 13. If you believe a child under 13 has provided us with personal data, please contact us at bravo@mstro.app and we will promptly delete that information.
 
 **Payment features:** Access to paid features and any functionality involving financial transactions requires users to be at least **18 years of age** (or the age of majority in their jurisdiction, if higher). We do not knowingly permit minors to engage in payment-related activities on the platform.
 
@@ -351,7 +351,7 @@ Your continued use of the Service after the effective date of a revised policy c
 
 For privacy-related questions, data subject requests, or concerns about this policy:
 
-**Email:** privacy@mstro.app
+**Email:** bravo@mstro.app
 **Website:** https://mstro.app
 **GitHub Issues:** https://github.com/mstro-app/mstro/issues
 

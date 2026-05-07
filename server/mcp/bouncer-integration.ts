@@ -32,7 +32,9 @@
 
 import { AnalyticsEvents, trackEvent } from '../services/analytics.js';
 import { captureException } from '../services/sentry.js';
-import { analyzeWithHaiku, HAIKU_TIMEOUT_MS } from './bouncer-haiku.js';
+import type { BouncerClassifier } from './classifier/BouncerClassifier.js';
+import { HAIKU_TIMEOUT_MS } from './classifier/ClaudeBouncerClassifier.js';
+import { createBouncerClassifier } from './classifier/factory.js';
 import {
   CRITICAL_THREATS,
   matchesPattern,
@@ -173,7 +175,28 @@ function handleHaikuError(
   return fin({ decision: 'deny', confidence: 0, reasoning: `Security analysis failed: ${errorMessage}. Denying for safety.`, threatLevel: 'critical' }, 'ai-error', { skipCache: true, skipAnalytics: true, error: errorMessage });
 }
 
-// ── Layer 2: Haiku AI Analysis ────────────────────────────────
+// ── Layer 2: Classifier AI Analysis ───────────────────────────
+
+/**
+ * Default classifier instance — lazily constructed so env vars are read on
+ * first use (and so tests can override it via `setBouncerClassifier`).
+ */
+let defaultClassifier: BouncerClassifier | null = null;
+
+function getDefaultClassifier(): BouncerClassifier {
+  if (!defaultClassifier) {
+    defaultClassifier = createBouncerClassifier();
+  }
+  return defaultClassifier;
+}
+
+/**
+ * Override the Layer 2 classifier. Exposed for tests and future alternate
+ * implementations (e.g., cheaper/faster classifiers behind the same interface).
+ */
+export function setBouncerClassifier(classifier: BouncerClassifier | null): void {
+  defaultClassifier = classifier;
+}
 
 async function runHaikuAnalysis(
   request: BouncerReviewRequest,
@@ -190,13 +213,12 @@ async function runHaikuAnalysis(
   console.error('[Bouncer] 🤖 Invoking Haiku for AI analysis...');
   trackEvent(AnalyticsEvents.BOUNCER_HAIKU_REVIEW, { operation_length: operation.length });
 
-  const claudeCommand = process.env.CLAUDE_COMMAND || 'claude';
-  const workingDir = request.context?.workingDirectory || process.cwd();
+  const classifier = getDefaultClassifier();
 
   const MAX_ATTEMPTS = 2;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      const decision = await analyzeWithHaiku(request, claudeCommand, workingDir);
+      const decision = await classifier.classify(request.operation, request.context);
       console.error(`[Bouncer] ✓ Haiku decision: ${decision.decision} (${decision.confidence}% confidence) [${Math.round(performance.now() - startTime)}ms]`);
       console.error(`[Bouncer] Reasoning: ${decision.reasoning}`);
       return fin(decision, 'haiku-ai');
@@ -274,6 +296,86 @@ export async function reviewOperation(request: BouncerReviewRequest): Promise<Bo
  * Export risk classification utility
  */
 export { classifyRisk as classifyOperationRisk } from './security-patterns.js';
+
+// ── Engine Permission Review ──────────────────────────────────
+
+/**
+ * Shape of a permission request coming from any coding-agent engine
+ * (Claude Code MCP path, OpenCode SSE path, etc.). Callers provide the
+ * tool name and its input arguments; `reviewEnginePermission` builds the
+ * canonical operation string and delegates to `reviewOperation`.
+ *
+ * This helper is the single entry point engines use to obtain a Bouncer
+ * decision on a tool invocation — both the Claude MCP server and the
+ * OpenCode engine go through it so security decisions stay unified.
+ */
+export interface EnginePermissionReviewRequest {
+  /** Engine-reported tool name (e.g. "Bash", "bash", "Write", "edit"). */
+  toolName: string;
+  /** Tool input parameters as the engine parsed them. */
+  input: Record<string, unknown>;
+  /** Optional extra context merged into the review request. */
+  context?: BouncerReviewRequest['context'];
+}
+
+/**
+ * Format a tool invocation as the canonical operation string used by the
+ * Bouncer's pattern matchers (e.g. "Bash: rm -rf /" or "Write: /etc/passwd").
+ * Patterns are case-insensitive, so tool-name capitalization differences
+ * between engines do not affect matching.
+ */
+export function formatOperationForReview(
+  toolName: string,
+  input: Record<string, unknown>,
+): string {
+  const getFilePath = (inp: Record<string, unknown>): unknown =>
+    inp.file_path ?? inp.filePath ?? inp.path;
+
+  const lowered = toolName.toLowerCase();
+
+  if (lowered === 'bash' && typeof input.command === 'string' && input.command) {
+    return `${toolName}: ${input.command}`;
+  }
+  if (['write', 'edit', 'read'].includes(lowered)) {
+    const filePath = getFilePath(input);
+    return typeof filePath === 'string' && filePath
+      ? `${toolName}: ${filePath}`
+      : `${toolName}: ${JSON.stringify(input)}`;
+  }
+  return `${toolName}: ${JSON.stringify(input)}`;
+}
+
+/**
+ * Review a tool invocation originating from a coding-agent engine. Builds
+ * the operation string via {@link formatOperationForReview} and delegates
+ * to {@link reviewOperation} — so every engine shares the same Bouncer
+ * pipeline (pattern fast-path + Haiku AI review).
+ */
+export async function reviewEnginePermission(
+  request: EnginePermissionReviewRequest,
+): Promise<BouncerDecision> {
+  const operation = formatOperationForReview(request.toolName, request.input);
+  return reviewOperation({
+    operation,
+    context: {
+      ...request.context,
+      toolName: request.toolName,
+      toolInput: request.input,
+    },
+  });
+}
+
+/**
+ * Format the user-visible denial message emitted when the Bouncer rejects
+ * a tool invocation. Matches the string the Claude Code MCP path returns
+ * (see `cli/server/mcp/server.ts`) so both engines surface denials with
+ * identical wording.
+ */
+export function formatDenialMessage(decision: BouncerDecision): string {
+  return `🚫 ${decision.reasoning}${
+    decision.alternative ? `\n\nAlternative: ${decision.alternative}` : ''
+  }`;
+}
 
 /**
  * Legacy compatibility — redirects to reviewOperation.

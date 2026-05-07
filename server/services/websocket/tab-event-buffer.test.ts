@@ -76,6 +76,110 @@ describe('TabEventBuffer', () => {
     // the caller treats any seq <= minSurviving as "nothing to replay here".
     expect(buf.getSince(1).map((e) => e.seq)).toEqual([2, 3]);
   });
+
+  describe('replay-gap telemetry', () => {
+    it('starts with evictedThroughSeq = 0 (nothing evicted yet)', () => {
+      const buf = new TabEventBuffer();
+      buf.record('output', { text: 'a' });
+      buf.record('output', { text: 'b' });
+      expect(buf.getEvictedThroughSeq()).toBe(0);
+    });
+
+    it('advances evictedThroughSeq when size eviction fires', () => {
+      const buf = new TabEventBuffer(/* maxEvents */ 2);
+      buf.record('output', { text: 'a' }); // 1
+      buf.record('output', { text: 'b' }); // 2
+      buf.record('output', { text: 'c' }); // 3 — evicts seq 1
+      expect(buf.getEvictedThroughSeq()).toBe(1);
+      buf.record('output', { text: 'd' }); // 4 — evicts seq 2
+      expect(buf.getEvictedThroughSeq()).toBe(2);
+    });
+
+    it('advances evictedThroughSeq when age eviction fires', () => {
+      let now = 1_000_000;
+      const buf = new TabEventBuffer(100, /* maxAgeMs */ 1000, () => now);
+
+      buf.record('output', { text: 'stale-1' }); // seq 1
+      buf.record('output', { text: 'stale-2' }); // seq 2
+      now += 1500; // both fall outside the age window
+      buf.record('output', { text: 'recent' }); // seq 3 — triggers age eviction of 1 and 2
+      expect(buf.getEvictedThroughSeq()).toBe(2);
+    });
+
+    it("hasGapSince(afterSeq) returns false when afterSeq >= evictedThroughSeq (replay is complete)", () => {
+      const buf = new TabEventBuffer(/* maxEvents */ 2);
+      buf.record('output', { text: 'a' });
+      buf.record('output', { text: 'b' });
+      buf.record('output', { text: 'c' }); // evicts 1; web saw 1 → no gap
+
+      // Web's lastSeen = 1. Buffer evicted up to 1. The next event the web
+      // expects (seq 2) is still in the buffer → no gap.
+      expect(buf.hasGapSince(1)).toBe(false);
+      expect(buf.hasGapSince(2)).toBe(false); // caught up
+      expect(buf.hasGapSince(99)).toBe(false); // future seq, also fine
+    });
+
+    it("hasGapSince(afterSeq) returns true when afterSeq < evictedThroughSeq (replay is partial)", () => {
+      const buf = new TabEventBuffer(/* maxEvents */ 2);
+      buf.record('output', { text: 'a' }); // 1
+      buf.record('output', { text: 'b' }); // 2
+      buf.record('output', { text: 'c' }); // 3 — evicts 1
+      buf.record('output', { text: 'd' }); // 4 — evicts 2
+
+      // Web's lastSeen = 1. Next expected seq is 2, but 2 has been evicted.
+      // Replay would silently skip it.
+      expect(buf.hasGapSince(1)).toBe(true);
+      // Web that saw nothing (seq 0) is also missing seq 1 and 2 — gap.
+      expect(buf.hasGapSince(0)).toBe(true);
+      // Web that saw seq 2 is fine — 2 is on the eviction frontier itself.
+      expect(buf.hasGapSince(2)).toBe(false);
+    });
+  });
+
+  describe('byte-cap eviction (safety belt against pathological events)', () => {
+    it("starts with byteSize=0 and grows as events are recorded", () => {
+      const buf = new TabEventBuffer();
+      expect(buf.byteSize()).toBe(0);
+      buf.record('output', { text: 'hello' });
+      // `JSON.stringify({text: "hello"})` = `{"text":"hello"}` → 16 bytes
+      expect(buf.byteSize()).toBeGreaterThan(0);
+      expect(buf.byteSize()).toBe(16);
+    });
+
+    it("evicts oldest events when totalBytes exceeds maxTotalBytes", () => {
+      const big = 'x'.repeat(1000); // ~1003 bytes serialized
+      // maxEvents=100, maxAge huge, maxBytes=2500 → roughly 2 events fit.
+      const buf = new TabEventBuffer(100, 60_000, () => 1_000_000, 2500);
+      buf.record('output', { text: big });
+      buf.record('output', { text: big });
+      expect(buf.size()).toBe(2);
+      buf.record('output', { text: big });
+      // Third record pushes total bytes past 2500 → oldest evicted.
+      expect(buf.size()).toBe(2);
+      // evictedThroughSeq advances on byte-eviction just like count/age.
+      expect(buf.getEvictedThroughSeq()).toBe(1);
+    });
+
+    it("byteSize tracks net of additions and evictions", () => {
+      const buf = new TabEventBuffer(2);
+      buf.record('output', { text: 'aaaaa' });
+      const sizeAfterTwo = (() => {
+        buf.record('output', { text: 'bbbbb' });
+        return buf.byteSize();
+      })();
+      buf.record('output', { text: 'ccccc' }); // count-eviction of seq 1
+      // Net byte size should be the two surviving events.
+      expect(buf.byteSize()).toBeLessThan(sizeAfterTwo + 100);
+      expect(buf.size()).toBe(2);
+    });
+
+    it("ignores the byte cap when maxTotalBytes is comfortably above usage (no spurious eviction)", () => {
+      const buf = new TabEventBuffer(100, 60_000, () => 1_000_000, 1_000_000);
+      for (let i = 0; i < 50; i++) buf.record('output', { text: `event-${i}` });
+      expect(buf.size()).toBe(50);
+      expect(buf.getEvictedThroughSeq()).toBe(0);
+    });
+  });
 });
 
 describe('TabEventBufferRegistry', () => {

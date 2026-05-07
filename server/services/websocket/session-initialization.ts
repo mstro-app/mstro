@@ -1,11 +1,12 @@
 // Copyright (c) 2025-present Mstro, Inc. All rights reserved.
 
+import type { EtaProfile } from '../../cli/eta-estimator.js';
 import { ImprovisationSessionManager } from '../../cli/improvisation-session-manager.js';
 import { getEffortLevel, getModel } from '../settings.js';
 import type { HandlerContext } from './handler-context.js';
-import { buildOutputHistory, setupSessionListeners } from './session-handlers.js';
-import type { SessionRegistry } from './session-registry.js';
-import { replayTabEventsSince } from './tab-event-replay.js';
+import { buildOutputHistory, resolveEngineForSession, setupSessionListeners } from './session-handlers.js';
+import type { SessionRegistry, TabEngineOverride } from './session-registry.js';
+import { type ReplayResult, replayTabEventsSince } from './tab-event-replay.js';
 import type { WSContext } from './types.js';
 
 /**
@@ -20,6 +21,138 @@ function extractLastSeenSeq(data: unknown): number | undefined {
   if (!data || typeof data !== 'object') return undefined;
   const candidate = (data as { lastSeenSeq?: unknown }).lastSeenSeq;
   return typeof candidate === 'number' && Number.isFinite(candidate) ? candidate : undefined;
+}
+
+/**
+ * When the session is mid-execution, expose the cached eta profile so the
+ * web's ComposingIndicator can render an ETA immediately on reconnect
+ * instead of waiting for the next movementStart (which won't fire until
+ * the user submits a fresh prompt).
+ */
+function inflightEtaPayload(session: ImprovisationSessionManager): { etaProfile?: EtaProfile } {
+  if (session.isExecuting && session.etaProfile) return { etaProfile: session.etaProfile };
+  return {};
+}
+
+/**
+ * Build the full-snapshot data payload for a `tabInitialized` message.
+ *
+ * Used in three situations:
+ *   1. Cold init (no `lastSeenSeq`) — web has no prior state to merge with.
+ *   2. Cold reattach (existing session, no prior seq) — same shape.
+ *   3. Replay-gap recovery — `replayTabEventsSince` returned `hadGap`, so
+ *      the web's incremental state is provably stale; we replace it.
+ *
+ * `replayGap` flags the recovery case so the web can branch: drop any
+ * already-rendered tab output and rebuild from `outputHistory` +
+ * `executionEvents` instead of merging on top of stale incremental state.
+ * Old web clients that don't know the flag still get the full snapshot and
+ * render correctly — `replayGap` is purely additive telemetry.
+ */
+function buildFullSnapshotData(
+  session: ImprovisationSessionManager,
+  options: {
+    worktreePath?: string;
+    worktreeBranch?: string;
+    engineOverride?: TabEngineOverride;
+    replayGap?: boolean;
+    extra?: Record<string, unknown>;
+  } = {},
+): Record<string, unknown> {
+  const isExecuting = session.isExecuting;
+  return {
+    ...session.getSessionInfo(),
+    engine: resolveEngineForSession(session),
+    outputHistory: buildOutputHistory(session),
+    isExecuting,
+    ...(isExecuting ? { executionEvents: session.getExecutionEventLog() } : {}),
+    ...(isExecuting && session.executionStartTimestamp
+      ? { executionStartTimestamp: session.executionStartTimestamp }
+      : {}),
+    ...inflightEtaPayload(session),
+    ...(options.worktreePath
+      ? { worktreePath: options.worktreePath, worktreeBranch: options.worktreeBranch }
+      : {}),
+    ...(options.engineOverride ? { engineOverride: options.engineOverride } : {}),
+    ...(options.replayGap ? { replayGap: true } : {}),
+    ...(options.extra ?? {}),
+  };
+}
+
+/**
+ * Snapshot vs incremental decision based on the replay outcome.
+ *
+ * - `incremental`: the web should keep its current state and append the
+ *   replayed events that already arrived (handled by `replayTabEventsSince`
+ *   itself when there's no gap). We send `tabInitialized` with
+ *   `resumedFromSeq: true`.
+ * - `snapshot`: the web should discard tab output and rebuild from a full
+ *   snapshot. Triggered either by `lastSeenSeq === undefined` (cold start)
+ *   or by `result.hadGap` (replay would silently skip events).
+ */
+function decideRecoveryMode(
+  result: ReplayResult,
+  lastSeenSeq: number | undefined,
+): 'incremental' | 'snapshot' {
+  if (lastSeenSeq === undefined) return 'snapshot';
+  if (result.hadGap) return 'snapshot';
+  return 'incremental';
+}
+
+/**
+ * Send `tabInitialized` for a resume path (`tryResumeFromDisk` /
+ * `resumeHistoricalSession`). Picks the snapshot or incremental envelope
+ * shape based on `mode` and threads any extra fields the caller needs to
+ * carry (e.g. `resumeFailed`, worktree state, engine override).
+ *
+ * Extracted to keep the resume call sites flat — without this helper, each
+ * caller pushes the function over the project's cognitive-complexity gate.
+ */
+function sendResumedTabInitialized(
+  ctx: HandlerContext,
+  ws: WSContext,
+  tabId: string,
+  session: ImprovisationSessionManager,
+  mode: 'incremental' | 'snapshot',
+  replay: ReplayResult,
+  options: {
+    worktreePath?: string;
+    worktreeBranch?: string;
+    engineOverride?: TabEngineOverride;
+    extra?: Record<string, unknown>;
+  } = {},
+): void {
+  const engine = resolveEngineForSession(session);
+  if (mode === 'snapshot') {
+    ctx.send(ws, {
+      type: 'tabInitialized',
+      tabId,
+      engine,
+      data: buildFullSnapshotData(session, {
+        worktreePath: options.worktreePath,
+        worktreeBranch: options.worktreeBranch,
+        engineOverride: options.engineOverride,
+        replayGap: replay.hadGap,
+        extra: options.extra,
+      }),
+    });
+    return;
+  }
+  ctx.send(ws, {
+    type: 'tabInitialized',
+    tabId,
+    engine,
+    data: {
+      ...session.getSessionInfo(),
+      engine,
+      resumedFromSeq: true,
+      ...(options.worktreePath
+        ? { worktreePath: options.worktreePath, worktreeBranch: options.worktreeBranch }
+        : {}),
+      ...(options.engineOverride ? { engineOverride: options.engineOverride } : {}),
+      ...(options.extra ?? {}),
+    },
+  });
 }
 
 function tryResumeFromDisk(
@@ -54,16 +187,17 @@ function tryResumeFromDisk(
     // BEFORE tabInitialized so they arrive in the right order. Web-side
     // handlers append; `tabInitialized` does NOT reset when `resumedFromSeq`
     // is set, preserving the replayed additions.
-    replayTabEventsSince(ctx, ws, tabId, lastSeenSeq);
+    //
+    // If `replayTabEventsSince` reports `hadGap`, no events were emitted and
+    // we fall back to a full-snapshot `tabInitialized` so the web replaces
+    // its (now-known-stale) incremental state instead of merging on top.
+    const replay = replayTabEventsSince(ctx, ws, tabId, lastSeenSeq);
+    const mode = decideRecoveryMode(replay, lastSeenSeq);
 
-    ctx.send(ws, {
-      type: 'tabInitialized',
-      tabId,
-      data: {
-        ...diskSession.getSessionInfo(),
-        ...(lastSeenSeq === undefined ? { outputHistory: buildOutputHistory(diskSession) } : { resumedFromSeq: true }),
-        ...(worktreePath ? { worktreePath, worktreeBranch } : {}),
-      }
+    sendResumedTabInitialized(ctx, ws, tabId, diskSession, mode, replay, {
+      worktreePath,
+      worktreeBranch,
+      engineOverride: regTab?.engineOverride,
     });
     return true;
   } catch {
@@ -121,21 +255,32 @@ export async function initializeTab(ctx: HandlerContext, ws: WSContext, tabId: s
 
   registry.registerTab(tabId, sessionId, tabName || existingTab?.tabName);
   const registeredTab = registry.getTab(tabId);
-  ctx.broadcastToAll({
+  const engine = resolveEngineForSession(session);
+  // Mirror terminal-handlers.ts: broadcastToOthers, not broadcastToAll. The
+  // requesting client already drove this initTab and will receive
+  // `tabInitialized` below — echoing `tabCreated` back risks racing the
+  // discovery handler during a flicker and producing a phantom tab.
+  ctx.broadcastToOthers(ws, {
     type: 'tabCreated',
-    data: { tabId, tabName: registeredTab?.tabName || 'Chat', createdAt: registeredTab?.createdAt, order: registeredTab?.order, sessionInfo: session.getSessionInfo() }
+    engine,
+    data: { tabId, tabName: registeredTab?.tabName || 'Chat', createdAt: registeredTab?.createdAt, order: registeredTab?.order, engine, sessionInfo: session.getSessionInfo() }
   });
 
   // Fresh session (no disk/memory predecessor) has nothing to replay,
   // but we still pass lastSeenSeq through so the web flag is consistent.
-  replayTabEventsSince(ctx, ws, tabId, lastSeenSeq);
+  // hadGap is impossible here (buffer is empty for a brand-new tab), but
+  // route through `decideRecoveryMode` for uniformity with the resume paths.
+  const replay = replayTabEventsSince(ctx, ws, tabId, lastSeenSeq);
+  const mode = decideRecoveryMode(replay, lastSeenSeq);
 
   ctx.send(ws, {
     type: 'tabInitialized',
     tabId,
+    engine,
     data: {
       ...session.getSessionInfo(),
-      ...(lastSeenSeq !== undefined ? { resumedFromSeq: true } : {}),
+      ...(mode === 'incremental' ? { resumedFromSeq: true } : {}),
+      ...(replay.hadGap ? { replayGap: true } : {}),
     }
   });
 }
@@ -192,17 +337,14 @@ export async function resumeHistoricalSession(
 
   registry.registerTab(tabId, sessionId);
 
-  replayTabEventsSince(ctx, ws, tabId, lastSeenSeq);
+  const replay = replayTabEventsSince(ctx, ws, tabId, lastSeenSeq);
+  const mode = decideRecoveryMode(replay, lastSeenSeq);
 
-  ctx.send(ws, {
-    type: 'tabInitialized',
-    tabId,
-    data: {
-      ...session.getSessionInfo(),
-      ...(lastSeenSeq === undefined ? { outputHistory: buildOutputHistory(session) } : { resumedFromSeq: true }),
+  sendResumedTabInitialized(ctx, ws, tabId, session, mode, replay, {
+    extra: {
       resumeFailed: isNewSession,
-      originalSessionId: isNewSession ? historicalSessionId : undefined
-    }
+      originalSessionId: isNewSession ? historicalSessionId : undefined,
+    },
   });
 }
 
@@ -231,11 +373,14 @@ function reattachSession(
   const worktreePath = ctx.gitDirectories.get(tabId);
   const worktreeBranch = ctx.gitBranches.get(tabId);
 
-  // Fast path: the web already has local state (via Zustand), so just replay
-  // anything newer than `lastSeenSeq` and tell the client to skip the
-  // destructive reset in its tabInitialized handler.
-  if (lastSeenSeq !== undefined) {
-    replayTabEventsSince(ctx, ws, tabId, lastSeenSeq);
+  const inflightEta = inflightEtaPayload(session);
+  const replay = replayTabEventsSince(ctx, ws, tabId, lastSeenSeq);
+  const mode = decideRecoveryMode(replay, lastSeenSeq);
+
+  // Fast path: the web already has local state (via Zustand) AND the replay
+  // covered the gap cleanly — just replay the buffered events and tell the
+  // client to skip the destructive reset in its tabInitialized handler.
+  if (mode === 'incremental') {
     ctx.send(ws, {
       type: 'tabInitialized',
       tabId,
@@ -244,29 +389,27 @@ function reattachSession(
         resumedFromSeq: true,
         isExecuting: session.isExecuting,
         ...(session.isExecuting && session.executionStartTimestamp ? { executionStartTimestamp: session.executionStartTimestamp } : {}),
+        ...inflightEta,
         ...(worktreePath ? { worktreePath, worktreeBranch } : {}),
       }
     });
     return;
   }
 
-  // Cold-start reattach (no prior seq): send the full snapshot so the web
-  // can rebuild from scratch.
-  const outputHistory = buildOutputHistory(session);
-  const executionEvents = session.isExecuting
-    ? session.getExecutionEventLog()
-    : undefined;
-
+  // Snapshot path: either cold-start reattach (no prior seq) or replay-gap
+  // recovery (`hadGap=true`, no events sent). Both want a full snapshot so
+  // the web rebuilds from `outputHistory` + `executionEvents`. The
+  // `replayGap` flag distinguishes the two for telemetry — the wire
+  // payload shape is otherwise identical.
   ctx.send(ws, {
     type: 'tabInitialized',
     tabId,
-    data: {
-      ...session.getSessionInfo(),
-      outputHistory,
-      isExecuting: session.isExecuting,
-      executionEvents,
-      ...(session.isExecuting && session.executionStartTimestamp ? { executionStartTimestamp: session.executionStartTimestamp } : {}),
-      ...(worktreePath ? { worktreePath, worktreeBranch } : {}),
-    }
+    engine: resolveEngineForSession(session),
+    data: buildFullSnapshotData(session, {
+      worktreePath,
+      worktreeBranch,
+      engineOverride: regTab?.engineOverride,
+      replayGap: replay.hadGap,
+    }),
   });
 }

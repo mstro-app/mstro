@@ -7,7 +7,42 @@ import { runQualityScan } from './quality-service.js';
 import type { SessionRegistry } from './session-registry.js';
 import { resolveSkillPrompt } from './skill-handlers.js';
 import { broadcastTabEvent } from './tab-broadcast.js';
-import type { WebSocketMessage, WSContext } from './types.js';
+import { type EngineId, normalizeEngineId, type WebSocketMessage, type WSContext } from './types.js';
+
+/**
+ * Apply per-prompt engine/model/effortLevel overrides from the `execute`
+ * WebSocket payload onto the session. `session.options` is mutated in place
+ * so the next `executePrompt` call (which reads options.model / effortLevel
+ * inside the retry loop) picks up the new values without needing a new
+ * session. Pass-through for undefined fields — global defaults already live
+ * on the session from initialization.
+ */
+function applyExecuteOverrides(
+  session: ImprovisationSessionManager,
+  data: { engine?: unknown; model?: unknown; effortLevel?: unknown },
+): void {
+  const options = (session as unknown as { options: { model?: string; effortLevel?: string } }).options;
+  if (typeof data.model === 'string' && data.model.length > 0) {
+    options.model = data.model;
+  }
+  if (typeof data.effortLevel === 'string' && data.effortLevel.length > 0) {
+    options.effortLevel = data.effortLevel;
+  }
+  if (data.engine === 'claude-code' || data.engine === 'opencode') {
+    // Record the engine on the session history so `resolveEngineForSession`
+    // returns the user-chosen value on subsequent movementStart /
+    // movementComplete broadcasts. The actual engine factory swap happens
+    // at session-start (later-epic work); per-prompt engine flips flow
+    // through here so model/effort stay in sync.
+    const history = (session as unknown as { history: { engine: string } }).history;
+    history.engine = data.engine;
+  }
+}
+
+/** Resolve the engine for a session, defaulting to 'claude-code' for pre-engine sessions. */
+export function resolveEngineForSession(session: ImprovisationSessionManager | undefined): EngineId {
+  return normalizeEngineId(session?.engine);
+}
 
 // Re-export from extracted modules for backward compatibility
 export { handleHistoryMessage } from './session-history.js';
@@ -213,6 +248,7 @@ export function buildOutputHistory(session: ImprovisationSessionManager): Array<
  */
 export function setupSessionListeners(ctx: HandlerContext, session: ImprovisationSessionManager, _ws: WSContext, tabId: string): void {
   session.removeAllListeners();
+  const engine = resolveEngineForSession(session);
 
   session.on('onHistoryPersisted', () => {
     const registry = ctx.getRegistry('');
@@ -227,19 +263,19 @@ export function setupSessionListeners(ctx: HandlerContext, session: Improvisatio
     broadcastTabEvent(ctx, tabId, 'thinking', { text });
   });
 
-  session.on('onMovementStart', (sequenceNumber: number, prompt: string, isAutoContinue?: boolean) => {
-    broadcastTabEvent(ctx, tabId, 'movementStart', { sequenceNumber, prompt, timestamp: Date.now(), executionStartTimestamp: session.executionStartTimestamp, isAutoContinue });
-    ctx.broadcastToAll({ type: 'tabStateChanged', data: { tabId, isExecuting: true, executionStartTimestamp: session.executionStartTimestamp } });
+  session.on('onMovementStart', (sequenceNumber: number, prompt: string, isAutoContinue?: boolean, etaProfile?: import('../../cli/eta-estimator.js').EtaProfile | null) => {
+    broadcastTabEvent(ctx, tabId, 'movementStart', { sequenceNumber, prompt, timestamp: Date.now(), executionStartTimestamp: session.executionStartTimestamp, isAutoContinue, etaProfile: etaProfile ?? undefined }, engine);
+    ctx.broadcastToAll({ type: 'tabStateChanged', engine, data: { tabId, isExecuting: true, executionStartTimestamp: session.executionStartTimestamp } });
   });
 
   session.on('onMovementComplete', (movement: Record<string, unknown>) => {
-    broadcastTabEvent(ctx, tabId, 'movementComplete', movement);
+    broadcastTabEvent(ctx, tabId, 'movementComplete', movement, engine);
 
     const registry = ctx.getRegistry('');
     // Use a try/catch since getRegistry may not have been initialized with the right workingDir
     try { registry.markTabUnviewed(tabId); } catch { /* ignore */ }
 
-    ctx.broadcastToAll({ type: 'tabStateChanged', data: { tabId, isExecuting: false, hasUnviewedCompletion: true } });
+    ctx.broadcastToAll({ type: 'tabStateChanged', engine, data: { tabId, isExecuting: false, hasUnviewedCompletion: true } });
 
     if (ctx.usageReporter && movement.tokensUsed) {
       ctx.usageReporter({
@@ -257,12 +293,12 @@ export function setupSessionListeners(ctx: HandlerContext, session: Improvisatio
   });
 
   session.on('onMovementError', (error: Error) => {
-    broadcastTabEvent(ctx, tabId, 'movementError', { message: error.message });
-    ctx.broadcastToAll({ type: 'tabStateChanged', data: { tabId, isExecuting: false } });
+    broadcastTabEvent(ctx, tabId, 'movementError', { message: error.message }, engine);
+    ctx.broadcastToAll({ type: 'tabStateChanged', engine, data: { tabId, isExecuting: false } });
   });
 
   session.on('onSessionUpdate', (history: Record<string, unknown>) => {
-    broadcastTabEvent(ctx, tabId, 'sessionUpdate', history);
+    broadcastTabEvent(ctx, tabId, 'sessionUpdate', history, engine);
   });
 
   session.on('onPlanNeedsConfirmation', (plan: Record<string, unknown>) => {
@@ -336,6 +372,13 @@ function handleExecuteMessage(ctx: HandlerContext, ws: WSContext, msg: WebSocket
     console.log(`[session] execute accepted msgId=${msgId} tabId=${tabId} sessionId=${sessionId}`);
   }
 
+  // Apply per-prompt engine/model/effort overrides from the payload. The
+  // web client populates these from the tab's effective EnginePicker state
+  // (override > global). Missing fields fall through to whatever the session
+  // already has — typically the machine-level defaults from `settings.json`
+  // applied at session init.
+  applyExecuteOverrides(session, msg.data);
+
   const worktreeDir = ctx.gitDirectories.get(tabId);
   const attachments = mergePreUploadedAttachments(ctx, tabId, msg.data.attachments);
 
@@ -345,6 +388,17 @@ function handleExecuteMessage(ctx: HandlerContext, ws: WSContext, msg: WebSocket
   const rawPrompt = msg.data.prompt as string;
   const effectiveDir = worktreeDir || session.getSessionInfo().workingDir;
   const resolved = resolveSkillPrompt(rawPrompt, effectiveDir);
+
+  // Authoritative prompt-input clear for all connected devices. The submitter
+  // already cleared locally; this guarantees other devices clear even if the
+  // submitter's debounced syncPromptText never fires (e.g. mobile tab
+  // suspended after Send). Clients suppress this via locallyEditingTabs if
+  // the user is actively typing a new prompt.
+  ctx.broadcastToAll({
+    type: 'promptTextSync',
+    tabId,
+    data: { tabId, text: '' },
+  });
 
   session.executePrompt(
     resolved ? resolved.prompt : rawPrompt,
@@ -372,7 +426,7 @@ function handleNewSessionMessage(ctx: HandlerContext, ws: WSContext, tabId: stri
   if (tabMap) tabMap.set(tabId, newSessionId);
   const registry = ctx.getRegistry('');
   try { registry.updateTabSession(tabId, newSessionId); } catch { /* ignore */ }
-  ctx.send(ws, { type: 'newSession', tabId, data: newSession.getSessionInfo() });
+  ctx.send(ws, { type: 'newSession', tabId, engine: resolveEngineForSession(newSession), data: newSession.getSessionInfo() });
 }
 
 export function handleSessionMessage(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, permission?: 'view'): void {

@@ -54,7 +54,7 @@ const app = new Hono()
 const authService = new AuthService()
 const instanceRegistry = new InstanceRegistry()
 const fileService = new FileService(WORKING_DIR)
-const wsHandler = new WebSocketImproviseHandler()
+const wsHandler = new WebSocketImproviseHandler(instanceRegistry)
 let _currentInstance: MstroInstance | undefined
 
 // Read version from package.json once at startup

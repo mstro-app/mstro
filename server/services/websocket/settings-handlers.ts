@@ -3,22 +3,59 @@
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { getSettings, setEffortLevel, setModel } from '../settings.js';
+import {
+  getSettings,
+  isEngineSwapEnabled,
+  setBouncerClassifier,
+  setEffortLevel,
+  setModel,
+} from '../settings.js';
 import type { HandlerContext } from './handler-context.js';
 import type { WebSocketMessage, WSContext } from './types.js';
 
-export function handleGetSettings(ctx: HandlerContext, ws: WSContext): void {
-  ctx.send(ws, { type: 'settings', data: getSettings() });
+/**
+ * Return the stored settings with the resolved `engineSwap` boolean patched
+ * in, so web clients always see the effective flag value (env-var override,
+ * NODE_ENV default, etc.) rather than the raw — possibly `undefined` —
+ * stored field.
+ */
+function getSettingsWithResolvedFlags() {
+  return { ...getSettings(), engineSwap: isEngineSwapEnabled() };
 }
 
-export function handleUpdateSettings(ctx: HandlerContext, _ws: WSContext, msg: WebSocketMessage): void {
+export function handleGetSettings(ctx: HandlerContext, ws: WSContext): void {
+  ctx.send(ws, { type: 'settings', data: getSettingsWithResolvedFlags() });
+}
+
+export function handleUpdateSettings(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage): void {
   if (msg.data?.model !== undefined) {
     setModel(msg.data.model);
   }
   if (msg.data?.effortLevel !== undefined) {
     setEffortLevel(msg.data.effortLevel);
   }
-  ctx.broadcastToAll({ type: 'settingsUpdated', data: getSettings() });
+  if (msg.data?.bouncerClassifier !== undefined) {
+    try {
+      setBouncerClassifier(msg.data.bouncerClassifier);
+    } catch (err) {
+      // Reject crafted payloads (non-eligible model, bad engine) — surface
+      // the reason to the requester and skip the broadcast so other clients
+      // keep showing the previous valid config.
+      const message = err instanceof Error ? err.message : String(err);
+      ctx.send(ws, {
+        type: 'error',
+        data: {
+          scope: 'bouncerClassifier',
+          message,
+        },
+      });
+      // Still echo the current settings back to the requester so the UI can
+      // revert its optimistic update.
+      ctx.send(ws, { type: 'settings', data: getSettingsWithResolvedFlags() });
+      return;
+    }
+  }
+  ctx.broadcastToAll({ type: 'settingsUpdated', data: getSettingsWithResolvedFlags() });
 }
 
 export async function generateNotificationSummary(

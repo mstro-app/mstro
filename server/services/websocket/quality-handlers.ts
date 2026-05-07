@@ -13,15 +13,16 @@
 import { join, resolve } from 'node:path';
 import { validatePathWithinWorkingDir } from '../pathUtils.js';
 import type { HandlerContext } from './handler-context.js';
+import { estimateCodebaseSize, estimateScanMs } from './quality-eta.js';
+import { operationRegistry } from './quality-operations.js';
 import { QualityPersistence } from './quality-persistence.js';
 import { handleCodeReview } from './quality-review-agent.js';
-import { detectTools, installTools, runQualityScan } from './quality-service.js';
+import { detectTools, installTools, QualityScanAbortedError, runQualityScan } from './quality-service.js';
 import type { WebSocketMessage, WSContext } from './types.js';
 
 // ── Shared state ──────────────────────────────────────────────
 
 const persistenceCache = new Map<string, QualityPersistence>();
-const activeReviews = new Set<string>();
 
 function getPersistence(workingDir: string): QualityPersistence {
   let persistence = persistenceCache.get(workingDir);
@@ -86,10 +87,32 @@ export function handleQualityMessage(
       if (error) { sendPathError(msg.data?.path || '.', error); return; }
       const reportPath = msg.data?.path || '.';
       const persistence = getPersistence(workingDir);
+      let controller: AbortController;
+      try {
+        controller = operationRegistry.start(workingDir, reportPath, 'reviewing');
+      } catch {
+        // Look up what's actually running so the user sees the right message
+        // — clicking "Run checks" during an in-flight AI review used to surface
+        // "A scan is already running" because the error was hardcoded to the
+        // *new* op kind rather than the existing one.
+        const runningKind = operationRegistry.getKind(workingDir, reportPath);
+        const error = runningKind === 'scanning'
+          ? 'A scan is already running for this directory.'
+          : 'An AI review is already running for this directory.';
+        ctx.send(ws, { type: 'qualityError', data: { path: reportPath, error } });
+        return;
+      }
       persistence.setActiveOperation(reportPath, 'reviewing');
-      handleCodeReview(ctx, ws, reportPath, dirPath, workingDir, activeReviews, getPersistence)
-        .finally(() => persistence.clearActiveOperation(reportPath));
+      // The review agent is responsible for emitting the first progress
+      // message with an ETA; the handler just wires up the controller +
+      // persistence cleanup.
+      handleCodeReview(ctx, ws, reportPath, dirPath, workingDir, getPersistence, controller.signal)
+        .finally(() => {
+          operationRegistry.finish(workingDir, reportPath);
+          persistence.clearActiveOperation(reportPath);
+        });
     },
+    qualityCancel: () => handleCancel(ctx, msg, workingDir),
     qualityLoadState: () => handleLoadState(ctx, ws, workingDir),
     qualityClearPending: () => {
       const persistence = getPersistence(workingDir);
@@ -137,6 +160,27 @@ async function handleLoadState(
       persistence.clearPendingResults();
     }
 
+    // Reconcile orphaned active operations: anything persisted to disk that
+    // has no live `AbortController` in the registry was interrupted by a CLI
+    // restart or crash. Surface as an error so the UI clears the spinner and
+    // remove from disk so the same op doesn't keep haunting future reconnects.
+    const orphans = state.activeOperations.filter(
+      (op) => !operationRegistry.has(workingDir, op.path),
+    );
+    if (orphans.length > 0) {
+      for (const op of orphans) {
+        persistence.clearActiveOperation(op.path);
+        ctx.send(ws, {
+          type: 'qualityError',
+          data: { path: op.path, error: 'Operation interrupted — please run again.' },
+        });
+      }
+      // Reload so the response reflects the cleared ops.
+      const refreshed = persistence.loadState();
+      ctx.send(ws, { type: 'qualityStateLoaded', data: refreshed });
+      return;
+    }
+
     ctx.send(ws, { type: 'qualityStateLoaded', data: state });
   } catch (error) {
     ctx.send(ws, {
@@ -144,6 +188,30 @@ async function handleLoadState(
       data: { path: '.', error: error instanceof Error ? error.message : String(error) },
     });
   }
+}
+
+function handleCancel(
+  ctx: HandlerContext,
+  msg: WebSocketMessage,
+  workingDir: string,
+): void {
+  const reportPath = msg.data?.path || '.';
+  const persistence = getPersistence(workingDir);
+  const wasRunning = operationRegistry.cancel(workingDir, reportPath);
+  // Always clear persistence — cancel for an orphan should still leave the
+  // disk clean so future reconnects don't re-emit the orphan reconciliation
+  // error.
+  persistence.clearActiveOperation(reportPath);
+  // Broadcast so every paired device sees the operation end (multi-device
+  // sync). If nothing was running we still emit so a stale spinner on a
+  // second device gets cleared by the `qualityError` handler.
+  ctx.broadcastToAll({
+    type: 'qualityError',
+    data: {
+      path: reportPath,
+      error: wasRunning ? 'Cancelled by user' : 'Operation already finished',
+    },
+  });
 }
 
 async function handleSaveDirectories(
@@ -230,18 +298,90 @@ async function handleScan(
   const reportPath = msg.data?.path || '.';
   const persistence = getPersistence(workingDir);
 
+  let controller: AbortController;
+  try {
+    controller = operationRegistry.start(workingDir, reportPath, 'scanning');
+  } catch {
+    // Same reasoning as the qualityCodeReview handler above — surface the
+    // *running* op kind, not the requested one.
+    const runningKind = operationRegistry.getKind(workingDir, reportPath);
+    const error = runningKind === 'reviewing'
+      ? 'An AI review is already running for this directory.'
+      : 'A scan is already running for this directory.';
+    ctx.send(ws, { type: 'qualityError', data: { path: reportPath, error } });
+    return;
+  }
+
+  const scanStartedAt = Date.now();
+  // Pre-compute a size + ETA so the very first progress event carries an
+  // estimate. We deliberately do this *before* `setActiveOperation` so a
+  // freshly-clicked scan shows numbers immediately rather than after a
+  // file-collection round-trip.
+  let etaMs: number | undefined;
+  try {
+    const size = await estimateCodebaseSize(dirPath);
+    etaMs = estimateScanMs(size, persistence.loadHistory(), reportPath);
+  } catch {
+    // Falling back to no ETA is fine — the UI will simply hide the remaining-time chip.
+  }
+
   try {
     persistence.setActiveOperation(reportPath, 'scanning');
 
+    // Emit a "Detecting tools" frame *before* the long detect call so the
+    // user sees motion immediately on click — `detectTools` spawns one
+    // child process per ecosystem tool and can sit silent for several
+    // seconds on a cold cache.
+    ctx.send(ws, {
+      type: 'qualityScanProgress',
+      data: {
+        path: reportPath,
+        progress: { step: 'Detecting tools', current: 0, total: 8, etaMs, startedAt: scanStartedAt },
+      },
+    });
     const { tools: detectedTools } = await detectTools(dirPath);
     const installedToolNames = detectedTools.filter((t) => t.installed).map((t) => t.name);
 
-    const results = await runQualityScan(dirPath, (progress) => {
+    // Heartbeat — keeps the progress UI showing elapsed time during long
+    // sub-steps (lint/format/build) where `runQualityScan` doesn't get a
+    // chance to call the progress callback again.
+    let lastProgress: { step: string; current: number; total: number } = {
+      step: 'Detecting tools',
+      current: 0,
+      total: 8,
+    };
+    const heartbeat = setInterval(() => {
+      const elapsedSec = Math.round((Date.now() - scanStartedAt) / 1000);
       ctx.send(ws, {
         type: 'qualityScanProgress',
-        data: { path: reportPath, progress },
+        data: {
+          path: reportPath,
+          progress: { ...lastProgress, etaMs, startedAt: scanStartedAt, detail: `${elapsedSec}s elapsed` },
+        },
       });
-    }, installedToolNames);
+    }, 5_000);
+
+    let results: Awaited<ReturnType<typeof runQualityScan>>;
+    try {
+      results = await runQualityScan(dirPath, (progress) => {
+        lastProgress = progress;
+        ctx.send(ws, {
+          type: 'qualityScanProgress',
+          data: {
+            path: reportPath,
+            progress: { ...progress, etaMs, startedAt: scanStartedAt },
+          },
+        });
+      }, installedToolNames, controller.signal);
+    } finally {
+      clearInterval(heartbeat);
+    }
+
+    // Annotate the report with the wall-clock duration so subsequent scans
+    // of this directory have real history to base their ETA on. Same pattern
+    // applies for the AI review duration written by the review agent.
+    const scanDurationMs = Date.now() - scanStartedAt;
+    results.scanDurationMs = scanDurationMs;
 
     // Persist before sending — results survive if WebSocket drops
     try {
@@ -266,11 +406,17 @@ async function handleScan(
       });
     }
   } catch (error) {
+    if (error instanceof QualityScanAbortedError) {
+      // Cancellation already broadcast a `qualityError` from `handleCancel`.
+      // Don't send a second error message.
+      return;
+    }
     ctx.send(ws, {
       type: 'qualityError',
       data: { path: reportPath, error: error instanceof Error ? error.message : String(error) },
     });
   } finally {
+    operationRegistry.finish(workingDir, reportPath);
     persistence.clearActiveOperation(reportPath);
   }
 }

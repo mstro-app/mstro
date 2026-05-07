@@ -63,38 +63,52 @@ async function redirectToWorktreeIfBranchCheckedOut(
 
 export async function handleGitCheckout(ctx: HandlerContext, ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string, rootWorkingDir: string): Promise<void> {
   try {
-    const { branch, create, startPoint } = msg.data || {};
+    const { branch, create, startPoint, worktreePath } = msg.data || {};
     if (!branch) {
       ctx.send(ws, { type: 'gitError', tabId, data: { error: 'Branch name is required' } });
       return;
     }
 
+    // `worktreePath` lets the caller target a specific working directory
+    // (typically the main repo) regardless of which tab is active. Used by
+    // the "Base branch" dropdown so checkout always lands on main, not on
+    // whichever worktree the user happened to be inspecting.
+    const targetDir = typeof worktreePath === 'string' && worktreePath.length > 0
+      ? worktreePath
+      : workingDir;
+
     // Skip the worktree redirect for `create` — a name collision there is a real user error.
-    if (!create && await redirectToWorktreeIfBranchCheckedOut(ctx, ws, tabId, branch, workingDir, rootWorkingDir)) {
+    if (!create && await redirectToWorktreeIfBranchCheckedOut(ctx, ws, tabId, branch, targetDir, rootWorkingDir)) {
       return;
     }
 
-    const statusResult = await executeGitCommand(['status', '--porcelain'], workingDir);
+    const statusResult = await executeGitCommand(['status', '--porcelain'], targetDir);
     if (statusResult.stdout.trim()) {
       ctx.send(ws, { type: 'gitError', tabId, data: { error: 'Commit or stash changes before switching branches' } });
       return;
     }
 
-    const prevResult = await executeGitCommand(['rev-parse', '--abbrev-ref', 'HEAD'], workingDir);
+    const prevResult = await executeGitCommand(['rev-parse', '--abbrev-ref', 'HEAD'], targetDir);
     const previous = prevResult.stdout.trim();
 
     const args = create
       ? ['checkout', '-b', branch, ...(startPoint ? [startPoint] : [])]
       : ['checkout', branch];
 
-    const result = await executeGitCommand(args, workingDir);
+    const result = await executeGitCommand(args, targetDir);
     if (result.exitCode !== 0) {
       ctx.send(ws, { type: 'gitError', tabId, data: { error: result.stderr || 'Failed to checkout branch' } });
       return;
     }
 
     ctx.send(ws, { type: 'gitCheckedOut', tabId, data: { branch, previous } });
-    // Re-fetch status after checkout - import handleGitStatus at call site
+    // Re-fetch status for the *tab's* dir (`workingDir`), not `targetDir`. When
+    // the caller targets a different directory via `worktreePath` (e.g. the
+    // main repo from a worktree-anchored tab), sending main-repo status keyed
+    // to the tab id would clobber the tab's worktree-scoped status display.
+    // The web side fires a fresh `gitStatus` + `gitWorktreeList` on the
+    // `gitCheckedOut` handler, so the main-repo branch update propagates via
+    // the worktree list refresh.
     const { handleGitStatus } = await import('./git-handlers.js');
     handleGitStatus(ctx, ws, tabId, workingDir);
   } catch (error: unknown) {

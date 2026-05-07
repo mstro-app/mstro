@@ -4,7 +4,27 @@
 // Types
 // ============================================================================
 
-export type Grade = 'A' | 'B' | 'C' | 'D' | 'F' | 'N/A';
+/**
+ * Letter grades produced by the multi-dimensional quality rating.
+ *
+ * Score → grade mapping (per product spec — note: no `D`; F covers 56-69, F-
+ * covers 0-55. `D` is retained ONLY for backward compatibility with reports
+ * persisted by older versions of this module — new code never emits it):
+ *
+ *   A+  97-100   A   93-96    A-  90-92
+ *   B+  87-89    B   83-86    B-  80-82
+ *   C+  77-79    C   73-76    C-  70-72
+ *   F+  65-69    F   56-64    F-  0-55
+ *
+ * `N/A` means the dimension had no tooling available to evaluate it.
+ */
+export type Grade =
+  | 'A+' | 'A' | 'A-'
+  | 'B+' | 'B' | 'B-'
+  | 'C+' | 'C' | 'C-'
+  | 'D' // legacy — only appears on reports persisted before the +/- rollout
+  | 'F+' | 'F' | 'F-'
+  | 'N/A';
 export type DimensionName = 'security' | 'reliability' | 'maintainability';
 
 export interface DimensionScore {
@@ -80,12 +100,31 @@ export interface QualityResults {
   dimensions?: DimensionScore[];
   qualityGate?: QualityGate;
   gradeRationale?: string;
+  /** Wall-clock duration of the CLI scan that produced this report. Used to estimate ETA on subsequent scans of the same directory. */
+  scanDurationMs?: number;
+  /** Wall-clock duration of the AI code-review pass, when one ran. */
+  reviewDurationMs?: number;
 }
 
 export interface ScanProgress {
   step: string;
   current: number;
   total: number;
+  /**
+   * Wall-clock estimate of the total scan duration, in milliseconds. Sent on
+   * the first progress event of a scan and again on subsequent events so
+   * reconnecting clients still get an ETA. The web subtracts elapsed time to
+   * render "≈ X remaining".
+   */
+  etaMs?: number;
+  /**
+   * Server-side timestamp (ms since epoch) of when the scan started — paired
+   * with `etaMs` so the web can compute elapsed time without trusting its
+   * own clock alignment.
+   */
+  startedAt?: number;
+  /** Optional sub-step detail used by long-running steps (e.g. "tsc --noEmit, 18s elapsed") to keep the UI from looking stuck. */
+  detail?: string;
 }
 
 export type Ecosystem = 'node' | 'python' | 'rust' | 'go' | 'swift' | 'kotlin' | 'unknown';
@@ -161,7 +200,7 @@ export const ADDITIONAL_EXCLUDES = new Set([
 
 export const FILE_LENGTH_THRESHOLD = 300;
 export const FUNCTION_LENGTH_THRESHOLD = 50;
-export const TOTAL_STEPS = 7;
+export const TOTAL_STEPS = 8;
 
 export function hasInstalledToolInCategory(
   installedSet: Set<string>,

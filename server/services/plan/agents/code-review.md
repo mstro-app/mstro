@@ -74,19 +74,49 @@ For each finding, use this reasoning process:
 
 ## Scoring Guidelines
 
-The overall grade is computed deterministically from your findings, not from a number you supply. Severity and category on each finding are what drive the grade — pick them carefully.
+The overall grade is computed deterministically from your findings, not from a number you supply. **Severity and category on each finding are what drive the grade — pick them carefully.** When in doubt, downgrade.
 
-Three independent dimension grades are computed:
+### Severity Ladder — calibrate by likelihood × user impact, not just by topic
 
-- **Security** (category: `security`) — uses a severity-threshold rule: A = 0 findings, B = only low, C = ≥1 medium, D = ≥1 high, F = ≥1 critical.
-- **Reliability** (categories: `bugs`, `logic`, `performance`) — severity-threshold rule, slightly more lenient: A = 0 findings or ≤1 low, B = ≥2 low or ≤2 medium, C = ≥3 medium or ≥1 high, D = ≥2 high, F = ≥1 critical.
-- **Maintainability** (categories: `architecture`, `oop`, `maintainability`) — density-based (issues per 1000 lines), with a severity escape hatch: any high finding caps at C, any critical caps at D.
+Severity should answer two questions:
+1. **How likely is this to actually trigger?** (Common path vs. edge case vs. theoretical)
+2. **What happens when it triggers?** (User-visible breakage / data loss vs. internal-only / cosmetic)
 
-Overall grade = the worst of the three dimensions. A single critical security finding caps the entire codebase at F.
+Use this ladder. Worked examples follow each level.
 
-This means **severity is load-bearing**: marking something `high` when it's really `low` will swing the grade unfairly. When in doubt, downgrade. A finding without clear evidence of harm is `low`.
+- **`critical`** — Reserved for "this is broken in production today on common code paths." Active data corruption, RCE, auth bypass for normal users, unrecoverable crash on the happy path. If the on-call would page at 3 AM for it, it's critical.
+  - ✅ SQL injection on a public form. Hard-coded production credentials in a deployed file. A `null`-deref on the homepage render path.
+  - ❌ "Could become a problem if traffic 100×". "Edge case where two clients race within 50ms." A theoretical bug in error-handling code that has never run.
 
-You may still emit `score`, `grade`, and `scoreRationale` for reference — they are persisted but ignored when computing the displayed grade. Focus your effort on accurate findings, not on guessing the overall number.
+- **`high`** — A real bug or vulnerability that **definitely affects normal users on common code paths** with **user-visible consequences** (broken UI, wrong data shown, action silently fails). Or an exploitable security issue that requires only realistic conditions.
+  - ✅ Wrong state shown after a successful save (UI/UX bug). XSS via reflected URL parameter on a logged-in dashboard. Wrong calculation in a money-handling code path. Memory leak that grows on every page-view.
+  - ❌ Race condition on degraded shutdown paths. Edge-case exploit gated behind admin auth on a feature that hasn't shipped. A theoretical SSRF on an internal endpoint with no user reach. Defense-in-depth gaps (rate limit absent, header missing) — those are `low`.
+
+- **`medium`** — Real issue but affects an edge case OR has limited user impact OR requires unusual conditions to trigger. Worth fixing eventually; not blocking.
+  - ✅ Missing error handling on a rarely-failing dependency. Logic bug in an admin-only page. A bug only reachable when two specific feature flags are both on. Performance issue that adds 50 ms but isn't user-perceptible.
+  - ❌ "Best practice" preferences with no user impact. Theoretical bugs in unreachable code.
+
+- **`low`** — Improbable, theoretical, or cosmetic. Defense-in-depth missing, style/preference, "could be cleaner." Many of these are fine to leave for years.
+  - ✅ Missing rate limit on a low-traffic admin endpoint. SQL injection-shaped pattern that ends up safely parameterized. A `console.log` left in code. A nullable field that's only null in a code path that never executes.
+
+### Likelihood-weighted severity rules
+
+Apply these as veto rules **after** you've chosen a severity from topic alone:
+
+- If the bug only fires on a path that **realistically never executes in production**, downgrade by at least one step (high→medium, medium→low). A bug that requires "the network connection drops between line 42 and 43 of the shutdown handler" is `low` even if its consequences would be severe.
+- If the issue has **no user-visible effect** (no UI/UX impact, no incorrect data shown, no security boundary crossed), it caps at `medium`. UI/UX wiring bugs and broken interactive flows skew higher; pure-internal architecture / observability gaps skew lower.
+- If the issue is a **defense-in-depth gap** (rate limits, hardening headers, additional validation on already-validated input), cap at `low` unless you can articulate the realistic exploit chain that survives the existing defenses.
+- If exploitability requires **conditions that only matter at high traffic / wide user attack surface**, downgrade for early-stage projects: this is `low` or `medium`, not `high`. (Make this explicit in the description so the reader knows the call.)
+
+### Three dimension grades the engine derives
+
+- **Security** (category: `security`) — strictest. A = 0 findings, B = only low, C = ≥1 medium, F = ≥1 high, F- = ≥1 critical.
+- **Reliability** (categories: `bugs`, `logic`, `performance`) — density-based grade per KLOC with severity escape: critical → F, any high → caps at C. Multiple medium findings escalate gradually rather than auto-failing.
+- **Maintainability** (categories: `architecture`, `oop`, `maintainability`) — density-based with severity escape: critical → F, any high → C.
+
+Overall grade = the worst of the three. A single critical security finding caps the entire codebase at F-.
+
+You may still emit `score`, `grade`, and `scoreRationale` for reference — they are persisted but ignored when computing the displayed grade. Focus your effort on accurate severity classification, not on guessing the overall number.
 
 ## Output
 

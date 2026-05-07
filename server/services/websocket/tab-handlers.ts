@@ -3,11 +3,12 @@
 import { ImprovisationSessionManager } from '../../cli/improvisation-session-manager.js';
 import { getEffortLevel, getModel } from '../settings.js';
 import type { HandlerContext } from './handler-context.js';
-import { buildOutputHistory, setupSessionListeners } from './session-handlers.js';
-import type { WebSocketMessage, WSContext } from './types.js';
+import { buildOutputHistory, resolveEngineForSession, setupSessionListeners } from './session-handlers.js';
+import type { TabEngineOverride } from './session-registry.js';
+import { DEFAULT_ENGINE_ID, type EngineId, type WebSocketMessage, type WSContext } from './types.js';
 
 function buildActiveTabData(
-  regTab: { tabName: string; createdAt: string; order: number; hasUnviewedCompletion?: boolean; sessionId: string },
+  regTab: { tabName: string; createdAt: string; order: number; hasUnviewedCompletion?: boolean; sessionId: string; engineOverride?: TabEngineOverride },
   session: ImprovisationSessionManager,
   worktreePath: string | undefined,
   worktreeBranch: string | undefined,
@@ -17,17 +18,19 @@ function buildActiveTabData(
     createdAt: regTab.createdAt,
     order: regTab.order,
     hasUnviewedCompletion: regTab.hasUnviewedCompletion,
+    engine: resolveEngineForSession(session),
     sessionInfo: session.getSessionInfo(),
     isExecuting: session.isExecuting,
     outputHistory: buildOutputHistory(session),
     executionEvents: session.isExecuting ? session.getExecutionEventLog() : undefined,
     ...(session.isExecuting && session.executionStartTimestamp ? { executionStartTimestamp: session.executionStartTimestamp } : {}),
     ...(worktreePath ? { worktreePath, worktreeBranch } : {}),
+    ...(regTab.engineOverride ? { engineOverride: regTab.engineOverride } : {}),
   };
 }
 
 function buildInactiveTabData(
-  regTab: { tabName: string; createdAt: string; order: number; hasUnviewedCompletion?: boolean; sessionId: string },
+  regTab: { tabName: string; createdAt: string; order: number; hasUnviewedCompletion?: boolean; sessionId: string; engineOverride?: TabEngineOverride },
   worktreePath: string | undefined,
   worktreeBranch: string | undefined,
 ): Record<string, unknown> {
@@ -36,10 +39,12 @@ function buildInactiveTabData(
     createdAt: regTab.createdAt,
     order: regTab.order,
     hasUnviewedCompletion: regTab.hasUnviewedCompletion,
+    engine: DEFAULT_ENGINE_ID,
     sessionId: regTab.sessionId,
     isExecuting: false,
     outputHistory: [],
     ...(worktreePath ? { worktreePath, worktreeBranch } : {}),
+    ...(regTab.engineOverride ? { engineOverride: regTab.engineOverride } : {}),
   };
 }
 
@@ -101,6 +106,41 @@ export function handleMarkTabViewed(ctx: HandlerContext, _ws: WSContext, tabId: 
   });
 }
 
+/**
+ * Persist a per-tab engine override. `msg.data.override` is either a full
+ * `{ engine, model, effortLevel }` payload or `null` to clear the override.
+ * Persisted via the session registry so the override survives WebSocket
+ * disconnects — the core guarantee of IS-019. Broadcasts the change to all
+ * connected clients so multi-device sessions stay in sync.
+ */
+export function handleSetTabEngine(ctx: HandlerContext, _ws: WSContext, msg: WebSocketMessage, tabId: string, workingDir: string): void {
+  const raw = msg.data?.override;
+  let override: TabEngineOverride | null;
+  if (raw === null || raw === undefined) {
+    override = null;
+  } else if (
+    typeof raw === 'object' &&
+    (raw.engine === 'claude-code' || raw.engine === 'opencode') &&
+    typeof raw.model === 'string' && raw.model.length > 0 &&
+    typeof raw.effortLevel === 'string' && raw.effortLevel.length > 0
+  ) {
+    override = { engine: raw.engine, model: raw.model, effortLevel: raw.effortLevel };
+  } else {
+    // Malformed payload — ignore rather than crash. The client will re-emit
+    // from the canonical server-side value on the next reconnect.
+    return;
+  }
+
+  const registry = ctx.getRegistry(workingDir);
+  registry.updateTabEngineOverride(tabId, override);
+
+  ctx.broadcastToAll({
+    type: 'tabEngineOverride',
+    tabId,
+    data: { tabId, override },
+  });
+}
+
 export async function handleCreateTab(ctx: HandlerContext, ws: WSContext, workingDir: string, tabName?: string, optimisticTabId?: string): Promise<void> {
   const registry = ctx.getRegistry(workingDir);
 
@@ -109,14 +149,18 @@ export async function handleCreateTab(ctx: HandlerContext, ws: WSContext, workin
   const existingSession = registry.getTabSession(tabId);
   if (existingSession) {
     const regTab = registry.getTab(tabId);
+    const existingSessionObj = ctx.sessions.get(existingSession);
+    const engine: EngineId = resolveEngineForSession(existingSessionObj);
     ctx.broadcastToAll({
       type: 'tabCreated',
+      engine,
       data: {
         tabId,
         tabName: regTab?.tabName || 'Chat',
         createdAt: regTab?.createdAt,
         order: regTab?.order,
-        sessionInfo: ctx.sessions.get(existingSession)?.getSessionInfo(),
+        engine,
+        sessionInfo: existingSessionObj?.getSessionInfo(),
       }
     });
     return;
@@ -133,14 +177,17 @@ export async function handleCreateTab(ctx: HandlerContext, ws: WSContext, workin
 
   registry.registerTab(tabId, sessionId, tabName);
   const registeredTab = registry.getTab(tabId);
+  const engine: EngineId = resolveEngineForSession(session);
 
   ctx.broadcastToAll({
     type: 'tabCreated',
+    engine,
     data: {
       tabId,
       tabName: registeredTab?.tabName || 'Chat',
       createdAt: registeredTab?.createdAt,
       order: registeredTab?.order,
+      engine,
       sessionInfo: session.getSessionInfo(),
     }
   });
@@ -148,6 +195,7 @@ export async function handleCreateTab(ctx: HandlerContext, ws: WSContext, workin
   ctx.send(ws, {
     type: 'tabInitialized',
     tabId,
+    engine,
     data: session.getSessionInfo()
   });
 }

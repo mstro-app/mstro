@@ -12,6 +12,7 @@ import { ResilientRunner } from '../../cli/headless/resilient-runner.js';
 import type { ToolUseEvent } from '../../cli/headless/types.js';
 import { loadSkillPrompt } from '../plan/agent-loader.js';
 import type { HandlerContext } from './handler-context.js';
+import { estimateCodebaseSize, estimateReviewMs } from './quality-eta.js';
 import type { QualityPersistence } from './quality-persistence.js';
 import { recomputeWithAiReview } from './quality-service.js';
 import type { WSContext } from './types.js';
@@ -368,10 +369,37 @@ function createCodeReviewProgressTracker() {
 
 type ProgressSender = (message: string) => void;
 
-function makeProgressSender(ctx: HandlerContext, ws: WSContext, reportPath: string): ProgressSender {
+interface ProgressMeta {
+  /** Total estimated wall-clock duration for the review, in ms. */
+  etaMs?: number;
+  /** Server-side timestamp of when the review started, ms since epoch. */
+  startedAt?: number;
+}
+
+/**
+ * Build a progress sender that reads its meta lazily — `etaMs` lands a few
+ * hundred ms after the review starts (we do file collection in parallel),
+ * and we want the first "Starting AI code review..." event to fire
+ * immediately rather than waiting on it. So progress events fire with
+ * whatever meta is set at *send* time, not at *closure* time.
+ */
+function makeProgressSender(
+  ctx: HandlerContext,
+  ws: WSContext,
+  reportPath: string,
+  metaRef: { current: ProgressMeta },
+): ProgressSender {
   return (message: string) => {
     try {
-      ctx.send(ws, { type: 'qualityCodeReviewProgress', data: { path: reportPath, message } });
+      ctx.send(ws, {
+        type: 'qualityCodeReviewProgress',
+        data: {
+          path: reportPath,
+          message,
+          etaMs: metaRef.current.etaMs,
+          startedAt: metaRef.current.startedAt,
+        },
+      });
     } catch {
       // WebSocket closed — progress lost but operation continues
     }
@@ -416,6 +444,7 @@ async function runVerificationPass(
   dirPath: string,
   findings: CodeReviewFinding[],
   send: ProgressSender,
+  signal?: AbortSignal,
 ): Promise<CodeReviewFinding[]> {
   send(`Verifying ${findings.length} findings against actual code...`);
   const stopHeartbeat = startHeartbeat(send, 'Verification');
@@ -430,9 +459,11 @@ async function runVerificationPass(
       stallHardCapMs: 3_600_000,
       toolUseCallback: makeToolCallback(send, 'Verifying: '),
       logLabel: 'code-review-verify',
+      abortSignal: signal,
     });
 
     const verifyResult = await verificationRunner.run();
+    if (signal?.aborted) return findings;
     const verdicts = parseVerificationResponse(verifyResult.assistantResponse || '');
 
     if (verdicts.length === 0) return findings;
@@ -452,6 +483,7 @@ function persistReviewResults(
   reportPath: string,
   getPersistence: (dir: string) => QualityPersistence,
   workingDir: string,
+  reviewDurationMs: number,
 ): import('./quality-service.js').QualityResults | null {
   const persistence = getPersistence(workingDir);
   const existingReport = persistence.loadReport(reportPath);
@@ -465,7 +497,7 @@ function persistReviewResults(
 
   let updatedResults: import('./quality-service.js').QualityResults;
   updatedResults = recomputeWithAiReview(existingReport, reviewResult.findings);
-  updatedResults = { ...updatedResults, codeReview: findings };
+  updatedResults = { ...updatedResults, codeReview: findings, reviewDurationMs };
 
   persistence.saveReport(reportPath, updatedResults);
   persistence.appendHistory(updatedResults, reportPath);
@@ -475,29 +507,14 @@ function persistReviewResults(
 
 // ── Handler ───────────────────────────────────────────────────
 
-export async function handleCodeReview(
-  ctx: HandlerContext,
-  ws: WSContext,
-  reportPath: string,
+async function runInitialReview(
   dirPath: string,
-  workingDir: string,
-  activeReviews: Set<string>,
-  getPersistence: (dir: string) => QualityPersistence,
-): Promise<void> {
-  if (activeReviews.has(dirPath)) {
-    ctx.send(ws, { type: 'qualityError', data: { path: reportPath, error: 'A code review is already running for this directory.' } });
-    return;
-  }
-
-  activeReviews.add(dirPath);
-  const send = makeProgressSender(ctx, ws, reportPath);
-
+  cliFindings: ReturnType<typeof loadCliFindings>,
+  send: ProgressSender,
+  signal: AbortSignal,
+): Promise<CodeReviewResult> {
+  const stopReviewHeartbeat = startHeartbeat(send, 'AI code review');
   try {
-    send('Starting AI code review...');
-    const cliFindings = loadCliFindings(getPersistence, workingDir, reportPath);
-
-    // ── Pass 1: Initial AI code review ──────────────────────
-    const stopReviewHeartbeat = startHeartbeat(send, 'AI code review');
     const runner = new ResilientRunner({
       workingDir: dirPath,
       prompt: buildCodeReviewPrompt(dirPath, cliFindings),
@@ -507,61 +524,134 @@ export async function handleCodeReview(
       stallHardCapMs: 7_200_000,
       toolUseCallback: makeToolCallback(send),
       logLabel: 'code-review',
+      abortSignal: signal,
     });
-
     send('Claude is analyzing your codebase...');
     const result = await runner.run();
+    return parseCodeReviewResponse(result.assistantResponse || '');
+  } finally {
     stopReviewHeartbeat();
-    const reviewResult = parseCodeReviewResponse(result.assistantResponse || '');
+  }
+}
 
-    // ── Phase 3: Deterministic post-validation ──────────────
-    send(`Validating ${reviewResult.findings.length} findings against codebase...`);
-    const validation = validateFindings(reviewResult.findings, dirPath);
-    if (validation.stats.failed > 0) {
-      send(`Filtered ${validation.stats.failed} finding(s) with invalid references`);
+async function refineFindings(
+  reviewResult: CodeReviewResult,
+  dirPath: string,
+  send: ProgressSender,
+  signal: AbortSignal,
+): Promise<CodeReviewFinding[]> {
+  send(`Validating ${reviewResult.findings.length} findings against codebase...`);
+  const validation = validateFindings(reviewResult.findings, dirPath);
+  if (validation.stats.failed > 0) {
+    send(`Filtered ${validation.stats.failed} finding(s) with invalid references`);
+  }
+
+  let finalFindings = validation.validated;
+  if (finalFindings.length > 0 && !signal.aborted) {
+    try {
+      finalFindings = await runVerificationPass(dirPath, finalFindings, send, signal);
+    } catch {
+      send('Verification pass skipped (timeout or error)');
     }
+  }
+  return finalFindings;
+}
 
-    // ── Phase 2: LLM verification pass ──────────────────────
-    let finalFindings = validation.validated;
-    if (finalFindings.length > 0) {
-      try {
-        finalFindings = await runVerificationPass(dirPath, finalFindings, send);
-      } catch {
-        send('Verification pass skipped (timeout or error)');
-      }
-    }
+function emitReviewResult(
+  ctx: HandlerContext,
+  ws: WSContext,
+  reportPath: string,
+  workingDir: string,
+  verifiedReviewResult: CodeReviewResult,
+  getPersistence: (dir: string) => QualityPersistence,
+  reviewDurationMs: number,
+): void {
+  let updatedResults: import('./quality-service.js').QualityResults | null = null;
+  try {
+    updatedResults = persistReviewResults(verifiedReviewResult, reportPath, getPersistence, workingDir, reviewDurationMs);
+  } catch {
+    // Persistence failure should not break the review flow
+  }
 
-    // ── Persist and send results ─────────────────────────────
+  const resultData = { path: reportPath, findings: verifiedReviewResult.findings, summary: verifiedReviewResult.summary, results: updatedResults };
+  try {
+    ctx.send(ws, { type: 'qualityCodeReview', data: resultData });
+  } catch {
+    // WebSocket closed — save as pending for delivery on reconnect
+    getPersistence(workingDir).addPendingResult({
+      type: 'codeReview',
+      path: reportPath,
+      data: resultData as unknown as Record<string, unknown>,
+      completedAt: new Date().toISOString(),
+    });
+  }
+}
+
+async function computeReviewEta(
+  dirPath: string,
+  getPersistence: (dir: string) => QualityPersistence,
+  workingDir: string,
+  reportPath: string,
+): Promise<number | undefined> {
+  try {
+    const size = await estimateCodebaseSize(dirPath);
+    return estimateReviewMs(size, getPersistence(workingDir).loadHistory(), reportPath);
+  } catch {
+    return undefined;
+  }
+}
+
+export async function handleCodeReview(
+  ctx: HandlerContext,
+  ws: WSContext,
+  reportPath: string,
+  dirPath: string,
+  workingDir: string,
+  getPersistence: (dir: string) => QualityPersistence,
+  signal: AbortSignal,
+): Promise<void> {
+  const startedAt = Date.now();
+  // Mutable meta so progress messages can fire immediately, even before the
+  // ETA is computed in the background. This is what makes "AI is reviewing"
+  // appear instantly when scan completes — we don't want to wait on a
+  // file-collection round-trip before the first progress event lands.
+  const metaRef: { current: ProgressMeta } = { current: { startedAt } };
+  const send = makeProgressSender(ctx, ws, reportPath, metaRef);
+
+  // Kick the ETA computation off in parallel — it'll patch metaRef when it
+  // finishes, and any later progress event will pick up the value.
+  computeReviewEta(dirPath, getPersistence, workingDir, reportPath)
+    .then((etaMs) => { if (etaMs !== undefined) metaRef.current = { ...metaRef.current, etaMs }; })
+    .catch(() => { /* leave etaMs unset — UI just hides the chip */ });
+
+  try {
+    send('Starting AI code review...');
+    const cliFindings = loadCliFindings(getPersistence, workingDir, reportPath);
+
+    const reviewResult = await runInitialReview(dirPath, cliFindings, send, signal);
+    if (signal.aborted) return;
+
+    const finalFindings = await refineFindings(reviewResult, dirPath, send, signal);
+    if (signal.aborted) return;
+
     send('Generating review report...');
-    const verifiedReviewResult: CodeReviewResult = { ...reviewResult, findings: finalFindings };
-
-    let updatedResults: import('./quality-service.js').QualityResults | null = null;
-    try {
-      updatedResults = persistReviewResults(verifiedReviewResult, reportPath, getPersistence, workingDir);
-    } catch {
-      // Persistence failure should not break the review flow
-    }
-
-    const resultData = { path: reportPath, findings: verifiedReviewResult.findings, summary: verifiedReviewResult.summary, results: updatedResults };
-    try {
-      ctx.send(ws, { type: 'qualityCodeReview', data: resultData });
-    } catch {
-      // WebSocket closed — save as pending for delivery on reconnect
-      const persistence = getPersistence(workingDir);
-      persistence.addPendingResult({
-        type: 'codeReview',
-        path: reportPath,
-        data: resultData as unknown as Record<string, unknown>,
-        completedAt: new Date().toISOString(),
-      });
-    }
+    emitReviewResult(
+      ctx,
+      ws,
+      reportPath,
+      workingDir,
+      { ...reviewResult, findings: finalFindings },
+      getPersistence,
+      Date.now() - startedAt,
+    );
   } catch (error) {
+    // Suppress error emission for cancellations — `handleCancel` already
+    // broadcast a `qualityError` with the user-facing reason.
+    if (signal.aborted) return;
     try {
       ctx.send(ws, { type: 'qualityError', data: { path: reportPath, error: error instanceof Error ? error.message : String(error) } });
     } catch {
       // WebSocket closed — error lost but operation tracked via activeOps
     }
-  } finally {
-    activeReviews.delete(dirPath);
   }
 }

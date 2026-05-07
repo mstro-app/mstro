@@ -1,8 +1,8 @@
-.DS_Store
-.idea/
 .mstro/
 .mstro-deps/
 .claude
+.idea/
+.DS_Store
 
 # Logs
 logs

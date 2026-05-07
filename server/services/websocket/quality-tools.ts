@@ -260,6 +260,57 @@ export function filesByExt(files: SourceFile[], exts: string[]): string[] {
   return out;
 }
 
+/** Folders that signal "this whole tree is test code" by convention. */
+const TEST_FOLDER_SEGMENTS = ['__tests__', '__mocks__', 'tests', 'test', 'e2e', 'spec'];
+
+/** Filename regexes that mark a single file as a test, regardless of folder. */
+const TEST_FILE_PATTERNS: RegExp[] = [
+  /\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$/, // JS/TS .test/.spec
+  /_test\.(go|py)$/,                                  // Go / Python *_test
+  /^test_.+\.py$/,                                    // Python test_*.py
+];
+
+function pathHasTestFolder(path: string): boolean {
+  for (const segment of TEST_FOLDER_SEGMENTS) {
+    if (path.includes(`/${segment}/`) || path.startsWith(`${segment}/`)) return true;
+  }
+  return false;
+}
+
+function fileNameLooksLikeTest(name: string): boolean {
+  for (const pattern of TEST_FILE_PATTERNS) {
+    if (pattern.test(name)) return true;
+  }
+  return false;
+}
+
+/**
+ * Identify a path as a test/spec file. Test files are exempt from
+ * structural-length checks (long-file, long-function) because:
+ *
+ *   - A 600-line test file with 50 small `it()` blocks is easy to read,
+ *     each block is independent, and "split it" yields zero maintenance
+ *     benefit while harming discoverability.
+ *   - A 200-line test function (long Arrange-Act-Assert with helpers
+ *     inlined) is normal for feature coverage and not a complexity smell.
+ *
+ * Linters and security/bug findings still apply to test files — only the
+ * structural-length heuristics defer. Pattern-matches the conventions used
+ * by Code Climate's default-exclude set:
+ *
+ *   - JS/TS:  *.test.ts, *.test.tsx, *.spec.js, *.spec.jsx, *.test.mts, ...
+ *   - Folder: __tests__/, /tests/, /test/, e2e/, spec/, __mocks__/
+ *   - Python: test_*.py, *_test.py
+ *   - Go:     *_test.go
+ *   - Rust:   files inside `tests/` are integration tests by convention
+ */
+export function isTestFile(relativePath: string): boolean {
+  const path = relativePath.replace(/\\/g, '/').toLowerCase();
+  if (pathHasTestFolder(path)) return true;
+  const name = path.split('/').pop() ?? path;
+  return fileNameLooksLikeTest(name);
+}
+
 /**
  * Split a file list into chunks so a single command invocation doesn't
  * blow past ARG_MAX. macOS ARG_MAX is ~256KB; 400 paths at ~200 chars each

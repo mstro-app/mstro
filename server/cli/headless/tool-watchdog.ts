@@ -13,6 +13,7 @@
  * 3. Haiku tiebreaker: optional AI assessment before killing ambiguous cases
  */
 
+import type { EngineEvent } from '../../engines/EngineEvent.js';
 import { hlog } from './headless-logger.js';
 import type {
   ExecutionCheckpoint,
@@ -347,6 +348,26 @@ export class ToolWatchdog {
       // handleToolTimeout() calls clearAll() after building the checkpoint.
       onTimeout();
     }, extensionMs);
+  }
+
+  /**
+   * Drive the watchdog from an engine-agnostic `EngineEvent` stream.
+   * Routes `tool.start` to `startWatch`, and `tool.end` to `clearWatch` +
+   * `recordCompletion` — so any CodingAgentEngine (Claude Code, OpenCode)
+   * can feed this watchdog without leaking engine-specific shapes.
+   * Non-tool events are ignored.
+   */
+  onEngineEvent(event: EngineEvent, onTimeout: (toolId: string) => void): void {
+    if (event.kind === 'tool.start') {
+      this.startWatch(event.toolCallId, event.toolName, event.input, () => onTimeout(event.toolCallId));
+      return;
+    }
+    if (event.kind === 'tool.end') {
+      this.clearWatch(event.toolCallId);
+      if (typeof event.durationMs === 'number' && event.durationMs >= 0) {
+        this.recordCompletion(event.toolName, event.durationMs);
+      }
+    }
   }
 
   /** Stop watching a tool (it completed normally) */

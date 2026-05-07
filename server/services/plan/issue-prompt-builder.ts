@@ -8,6 +8,7 @@
  */
 
 import { join } from 'node:path';
+import { type ResolvedAgent, resolveAgentHints } from './agent-resolver.js';
 import { resolveIsCodeTask } from './issue-classification.js';
 import type { Issue } from './types.js';
 
@@ -19,6 +20,41 @@ export interface IssuePromptOptions {
   boardDir: string | null;
   existingDocs: string[];
   outputPath: string;
+}
+
+/**
+ * Render the Agents section of an issue prompt. Splits resolved hints from
+ * unresolved ones so Claude knows which names are real subagents to delegate to
+ * via the Task tool, vs. role hints for which the user has no installed match.
+ */
+function renderAgentsSection(resolved: ResolvedAgent[]): string {
+  if (resolved.length === 0) return '';
+
+  const matched = resolved.filter(r => r.resolvedName);
+  const unmatched = resolved.filter(r => !r.resolvedName);
+
+  const lines: string[] = ['', '## Suggested Agents'];
+
+  if (matched.length > 0) {
+    lines.push('Delegate the relevant portions of this work to these subagents using the Task tool (subagent_type = the agent name). Use them as primary executors when the work matches their expertise:');
+    for (const r of matched) {
+      const desc = r.info?.description ? ` — ${r.info.description}` : '';
+      const labelHint = r.hint.toLowerCase() !== (r.resolvedName ?? '').toLowerCase()
+        ? ` (matched from "${r.hint}")`
+        : '';
+      lines.push(`- \`${r.resolvedName}\`${labelHint}${desc}`);
+    }
+  }
+
+  if (unmatched.length > 0) {
+    lines.push('');
+    lines.push('Role hints with no installed subagent match — use the general-purpose agent (or your best judgment) for work in these areas:');
+    for (const r of unmatched) {
+      lines.push(`- ${r.hint}`);
+    }
+  }
+
+  return `\n${lines.join('\n')}`;
 }
 
 /**
@@ -45,6 +81,8 @@ export function buildIssuePrompt(options: IssuePromptOptions): string {
     ? `\n## Predecessor Outputs\nRead these before starting — they contain context from upstream issues:\n${predecessorDocs.map(d => `- ${d}`).join('\n')}`
     : '';
 
+  const agentSection = renderAgentsSection(resolveAgentHints(issue.agents, workingDir));
+
   const outDir = boardDir ? join(boardDir, 'out') : pmDir ? join(pmDir, 'out') : join(workingDir, '.mstro', 'pm', 'out');
 
   return `You are executing issue ${issue.id}: ${issue.title}.
@@ -67,7 +105,7 @@ ${criteria || 'No specific criteria defined.'}
 
 ### Technical Notes
 ${issue.technicalNotes || 'None'}
-${files}${predecessorSection}
+${files}${predecessorSection}${agentSection}
 
 ## Your Task
 

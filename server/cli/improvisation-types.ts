@@ -66,6 +66,8 @@ export interface SessionHistory {
   totalTokens: number;
   movements: MovementRecord[];
   claudeSessionId?: string;
+  /** AI engine that produced this session (e.g. 'claude-code', 'opencode'). Older histories default to 'claude-code' on read. */
+  engine: string;
 }
 
 /** Entry in the retry log for debugging recovery paths */

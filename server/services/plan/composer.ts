@@ -10,6 +10,7 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { getEtaProfileCached } from '../../cli/eta-estimator.js';
 import type { ToolUseEvent } from '../../cli/headless/index.js';
 import { ResilientRunner } from '../../cli/headless/resilient-runner.js';
 import { cleanupAttachments, preparePromptAndAttachments } from '../../cli/improvisation-attachments.js';
@@ -27,6 +28,21 @@ const PROMPT_TOOL_MESSAGES: Record<string, string> = {
   Edit: 'Updating project files...',
   Bash: 'Running commands...',
 };
+
+/**
+ * Resolve the ETA quantile profile used by the planning indicator. Reads
+ * .mstro/history (chat improv movements) since planning-prompt durations
+ * cluster in the same range. Failures degrade silently to undefined — the
+ * indicator falls back to elapsed-only display.
+ */
+async function resolvePromptEtaProfile(workingDir: string): Promise<NonNullable<Awaited<ReturnType<typeof getEtaProfileCached>>> | undefined> {
+  try {
+    const profile = await getEtaProfileCached(join(workingDir, '.mstro', 'history'));
+    return profile ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 function getPromptToolCompleteMessage(event: ToolUseEvent): string | null {
   const input = event.completeInput;
@@ -229,6 +245,7 @@ blocks: []                 # Use backlog-relative paths: backlog/IS-NNN.md
 review_gate: auto
 output_type: auto          # code = modify source files, document = produce written artifact, auto = infer
 output_file: null
+agents: []                 # Agent hints — see "agents field rules" below
 ---
 
 # IS-NNN: Title
@@ -268,6 +285,21 @@ Implementation guidance.
 - When output_type is \`document\`, "Files to Modify" entries are treated as references, not files to edit. The AI produces a document artifact and is reviewed on document quality.
 - When output_type is \`code\`, "Files to Modify" lists actual source files the AI must edit. The review gate verifies source files were changed.
 
+## agents field rules
+
+The \`agents\` field is a list of agent hints for the executing Claude Code session. The executor uses Claude Code's Task tool to delegate work to matching subagents in the user's \`.claude/agents/\` directory (project / global / bundled), with a fallback to the general-purpose agent when no match is found.
+
+- ALWAYS populate \`agents\` with the most relevant 1–4 agents for the work the issue describes. Empty arrays mean "no hints" — only use \`[]\` when no agent type plausibly applies (rare).
+- Entries can be specific agent file names (e.g. \`backend-architect\`, \`frontend-developer\`, \`code-reviewer\`, \`security-auditor\`) OR general role pointers the user's system can match (e.g. \`backend engineer\`, \`product designer\`, \`marketing\`). Prefer specific names — they resolve more reliably.
+- Match agents to the actual work, not the issue's surface topic. A "fix login button" issue is frontend work (\`frontend-developer\`); a "design login flow" issue is product/design (\`product-designer\`, \`ux-writer\`).
+- Common pairings:
+  - Code implementation: pick from \`frontend-developer\`, \`backend-architect\`, \`typescript-pro\`, \`python-pro\`, \`golang-pro\`, etc., based on stack
+  - UI/design work: \`ui-designer\`, \`product-designer\`, \`design-system-architect\`, \`ux-writer\`
+  - Data/DB: \`database-architect\`, \`database-optimizer\`, \`data-engineer\`, \`sql-pro\`
+  - Quality: pair an implementation agent with \`code-reviewer\`, \`test-automator\`, or \`security-auditor\` for sensitive issues
+  - Product/strategy: \`product-manager\`, \`product-marketing\`, \`business-analyst\`
+- YAML format: inline \`agents: [backend-architect, code-reviewer]\` or block list with \`-\` items both work.
+
 ## Epic creation rules
 
 - Create an EP-*.md file in ${cc.backlogPath} with type: epic and a children: [] field in front matter
@@ -287,11 +319,27 @@ User request: ${userPrompt}`;
     prepareAttachmentPrompt(ctx, enrichedPrompt, attachments, workingDir, cc.effectiveBoardId);
 
   const streamBoardId = cc.effectiveBoardId ?? null;
+  const etaProfile = await resolvePromptEtaProfile(workingDir);
+
+  // Tracks whether `planPromptResponse` has been broadcast. The web side
+  // treats this event as the authoritative completion signal — without it,
+  // the composer todo list stays stuck on a spinner. The finally block
+  // guarantees a completion broadcast even if the runner throws or exits
+  // through an unexpected path.
+  let responseSent = false;
+  const sendResponse = (response: string, success: boolean, error: string | null) => {
+    if (responseSent) return;
+    responseSent = true;
+    ctx.broadcastToAll({
+      type: 'planPromptResponse',
+      data: { response, success, error, boardId: streamBoardId },
+    });
+  };
 
   try {
     ctx.broadcastToAll({
       type: 'planPromptProgress',
-      data: { message: 'Starting project planning...', boardId: streamBoardId },
+      data: { message: 'Starting project planning...', boardId: streamBoardId, etaProfile },
     });
 
     const runner = new ResilientRunner({
@@ -339,15 +387,11 @@ User request: ${userPrompt}`;
       data: { message: 'Finalizing project plan...', boardId: streamBoardId },
     });
 
-    ctx.broadcastToAll({
-      type: 'planPromptResponse',
-      data: {
-        response: result.completed ? 'Prompt executed successfully.' : (result.error || 'Unknown error'),
-        success: result.completed,
-        error: result.error || null,
-        boardId: streamBoardId,
-      },
-    });
+    sendResponse(
+      result.completed ? 'Prompt executed successfully.' : (result.error || 'Unknown error'),
+      result.completed,
+      result.error || null,
+    );
 
     // Re-parse and broadcast updated state
     const updatedState = parsePlanDirectory(workingDir);
@@ -355,11 +399,19 @@ User request: ${userPrompt}`;
       ctx.broadcastToAll({ type: 'planStateUpdated', data: updatedState });
     }
   } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
     ctx.broadcastToAll({
       type: 'planError',
-      data: { error: error instanceof Error ? error.message : String(error), boardId: streamBoardId },
+      data: { error: errorMsg, boardId: streamBoardId },
     });
+    // Send a completion signal too — `planError` clears streaming on the web
+    // but doesn't set the response banner. Without this, the user sees a
+    // half-finished UI (no spinner, no message).
+    sendResponse(errorMsg, false, errorMsg);
   } finally {
     cleanupAttachments(workingDir, attachmentSessionId);
+    // Defense in depth: guarantee a completion broadcast for any control
+    // flow not covered above (process abort, unexpected throw types, etc.).
+    sendResponse('Prompt execution ended unexpectedly.', false, 'No completion signal');
   }
 }

@@ -16,7 +16,10 @@
 import { EventEmitter } from 'node:events';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createEngine } from '../engines/factory.js';
+import type { EngineId } from '../engines/types.js';
 import { AnalyticsEvents, trackEvent } from '../services/analytics.js';
+import { type EtaProfile, getEtaProfileCached } from './eta-estimator.js';
 import { herror } from './headless/headless-logger.js';
 import { cleanupAttachments, preparePromptAndAttachments } from './improvisation-attachments.js';
 import {
@@ -55,6 +58,12 @@ export class ImprovisationSessionManager extends EventEmitter {
   private history: SessionHistory;
   private currentRunner: import('./headless/index.js').HeadlessRunner | null = null;
   private options: ImprovisationOptions;
+  /**
+   * Coding-agent backend identifier. Routed through `createEngine` from
+   * `engines/factory.ts` so Epic 3 can swap in OpenCodeEngine by changing
+   * this value — the retry loop and headless runner remain unchanged.
+   */
+  private engineId: EngineId = 'claude-code';
   private pendingApproval?: {
     plan: unknown;
     resolve: (approved: boolean) => void;
@@ -73,6 +82,13 @@ export class ImprovisationSessionManager extends EventEmitter {
   private _currentUserPrompt: string = '';
   private _currentSequenceNumber: number = 0;
   private _hasPersistedToDisk: boolean = false;
+  /**
+   * Cached duration-quantile profile used by the web "Composing" indicator
+   * to render an ETA. Built lazily on first executePrompt and refreshed by
+   * the eta-estimator's TTL cache. Null means "not enough history yet" — the
+   * web falls back to elapsed-only display.
+   */
+  private _etaProfile: EtaProfile | null = null;
 
   static resumeFromHistory(workingDir: string, historicalSessionId: string, overrides?: Partial<ImprovisationOptions>): ImprovisationSessionManager {
     const historyDir = join(workingDir, '.mstro', 'history');
@@ -84,6 +100,7 @@ export class ImprovisationSessionManager extends EventEmitter {
     }
 
     const historyData = JSON.parse(readFileSync(historyPath, 'utf-8')) as SessionHistory;
+    if (!historyData.engine) historyData.engine = 'claude-code';
     const manager = new ImprovisationSessionManager({
       workingDir,
       sessionId: historyData.sessionId,
@@ -126,6 +143,11 @@ export class ImprovisationSessionManager extends EventEmitter {
     this.historyPath = paths.historyPath;
     ensureHistoryDir(this.improviseDir);
 
+    // Validate the engine is available via the factory. Epic 3 will extend
+    // `createEngine` to also return OpenCodeEngine; today this asserts that
+    // a known engine id was requested and surfaces config errors early.
+    createEngine(this.engineId);
+
     this.history = loadHistory(this.historyPath, this.sessionId);
     // History is persisted lazily on the first `persistHistory` call (see
     // `executePrompt`). Deferring the initial write keeps the Chat History
@@ -165,7 +187,8 @@ export class ImprovisationSessionManager extends EventEmitter {
     const sequenceNumber = this.history.movements.length + 1;
     this._currentUserPrompt = displayPrompt;
     this._currentSequenceNumber = sequenceNumber;
-    this.emit('onMovementStart', sequenceNumber, displayPrompt, isAutoContinue);
+    await this.refreshEtaProfile();
+    this.emit('onMovementStart', sequenceNumber, displayPrompt, isAutoContinue, this._etaProfile);
     trackEvent(AnalyticsEvents.IMPROVISE_PROMPT_RECEIVED, {
       prompt_length: userPrompt.length,
       has_attachments: !!(attachments && attachments.length > 0),
@@ -499,6 +522,22 @@ export class ImprovisationSessionManager extends EventEmitter {
     });
   }
 
+  // ========== ETA profile ==========
+
+  /**
+   * Resolve the duration-quantile profile before announcing the movement
+   * so the web indicator can render an ETA from t=0. The cache amortizes
+   * I/O across prompts; only the very first prompt of a project pays the
+   * ~50–100ms scan cost. Failures degrade silently to "no ETA".
+   */
+  private async refreshEtaProfile(): Promise<void> {
+    try {
+      this._etaProfile = await getEtaProfileCached(this.improviseDir);
+    } catch {
+      this._etaProfile = null;
+    }
+  }
+
   // ========== History I/O ==========
 
   private persistHistory(): void {
@@ -588,8 +627,22 @@ export class ImprovisationSessionManager extends EventEmitter {
     return this._isExecuting;
   }
 
+  /**
+   * AI engine that produced this session. Read from SessionHistory (populated
+   * on load/creation). Defaults to 'claude-code' if the history record is
+   * missing the field (older sessions).
+   */
+  get engine(): string {
+    return this.history.engine || 'claude-code';
+  }
+
   get executionStartTimestamp(): number | undefined {
     return this._executionStartTimestamp;
+  }
+
+  /** Most recently resolved ETA quantile profile, or null if none yet built. */
+  get etaProfile(): EtaProfile | null {
+    return this._etaProfile;
   }
 
   getExecutionEventLog(): Array<{ type: string; data: unknown; timestamp: number }> {

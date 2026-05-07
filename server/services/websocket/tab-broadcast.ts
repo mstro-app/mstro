@@ -16,22 +16,30 @@
  */
 
 import type { HandlerContext } from './handler-context.js'
-import type { WebSocketResponse } from './types.js'
+import type { EngineId, WebSocketResponse } from './types.js'
 
 type TabScopedEventType = WebSocketResponse['type']
 
 /**
  * Record + broadcast a tab-scoped event in one call. Returns the assigned
  * sequence number purely for logging/tests — callers rarely need it.
+ *
+ * `engine` is optional: when supplied (typically by session-driven movement
+ * events), it rides on the wire envelope so the web client can render
+ * engine-specific affordances. Buffer replay preserves it because the engine
+ * is part of the envelope produced for each broadcast.
  */
 export function broadcastTabEvent(
   ctx: HandlerContext,
   tabId: string,
   type: TabScopedEventType,
   data: unknown,
+  engine?: EngineId,
 ): number {
   const buffer = ctx.tabEventBuffers.getOrCreate(tabId)
   const seq = buffer.record(type, data)
-  ctx.broadcastToAll({ type, tabId, data, seq })
+  const envelope: WebSocketResponse = { type, tabId, data, seq }
+  if (engine) envelope.engine = engine
+  ctx.broadcastToAll(envelope)
   return seq
 }

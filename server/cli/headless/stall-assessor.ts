@@ -10,6 +10,7 @@
  * best result, error classification) live in haiku-assessments.ts.
  */
 
+import type { EngineEvent } from '../../engines/EngineEvent.js';
 import { loadSkillPrompt } from '../../services/plan/agent-loader.js';
 import { spawnHaikuRaw } from './haiku-assessments.js';
 import { hlog } from './headless-logger.js';
@@ -34,6 +35,98 @@ export interface StallVerdict {
   action: 'extend' | 'kill';
   extensionMs: number;
   reason: string;
+}
+
+/**
+ * Mutable tool-activity accumulator fed by an engine-agnostic `EngineEvent`
+ * stream. Consumed by {@link buildStallContext} to produce the tool-related
+ * fields of a {@link StallContext} without coupling to any specific engine's
+ * internal shapes.
+ */
+export interface ToolActivityState {
+  /** Tool calls observed by `tool.start` but not yet ended. */
+  pendingToolIds: Set<string>;
+  /** Names of tools still pending (used by the stall heuristic). */
+  pendingToolNames: Set<string>;
+  /** Map of toolId -> toolName so `tool.end` can drop names when the last id goes. */
+  pendingToolNameById: Map<string, string>;
+  /** Last tool name seen via `tool.start`. */
+  lastToolName?: string;
+  /** Short summary of the last tool input (url/query/command/prompt). */
+  lastToolInputSummary?: string;
+  /** Total number of `tool.start` events observed this session. */
+  totalToolCalls: number;
+}
+
+/** Allocate a fresh, empty tool-activity state. */
+export function createToolActivityState(): ToolActivityState {
+  return {
+    pendingToolIds: new Set(),
+    pendingToolNames: new Set(),
+    pendingToolNameById: new Map(),
+    totalToolCalls: 0,
+  };
+}
+
+/**
+ * Update a {@link ToolActivityState} from a single engine event. Non-tool
+ * events are ignored. This lets the stall assessor operate on any
+ * CodingAgentEngine's event stream without knowing the engine's internals.
+ */
+export function applyEngineEventToActivity(state: ToolActivityState, event: EngineEvent): void {
+  if (event.kind === 'tool.start') {
+    state.pendingToolIds.add(event.toolCallId);
+    state.pendingToolNames.add(event.toolName);
+    state.pendingToolNameById.set(event.toolCallId, event.toolName);
+    state.lastToolName = event.toolName;
+    state.lastToolInputSummary = summarizeToolInput(event.input);
+    state.totalToolCalls++;
+    return;
+  }
+  if (event.kind === 'tool.end') {
+    state.pendingToolIds.delete(event.toolCallId);
+    state.pendingToolNameById.delete(event.toolCallId);
+    // Only drop the name from pendingToolNames if no other pending call uses it.
+    const stillPending = Array.from(state.pendingToolNameById.values()).includes(event.toolName);
+    if (!stillPending) state.pendingToolNames.delete(event.toolName);
+  }
+}
+
+/**
+ * Build a {@link StallContext} from an engine-agnostic activity state plus
+ * the caller-owned timing fields. The stall heuristics and Haiku assessment
+ * in this module already operate on {@link StallContext}, so they are now
+ * fully drivable by any CodingAgentEngine's event stream.
+ */
+export function buildStallContext(
+  activity: ToolActivityState,
+  timing: {
+    originalPrompt: string;
+    silenceMs: number;
+    elapsedTotalMs: number;
+    tokenSilenceMs?: number;
+  },
+): StallContext {
+  return {
+    originalPrompt: timing.originalPrompt,
+    silenceMs: timing.silenceMs,
+    elapsedTotalMs: timing.elapsedTotalMs,
+    tokenSilenceMs: timing.tokenSilenceMs,
+    lastToolName: activity.lastToolName,
+    lastToolInputSummary: activity.lastToolInputSummary,
+    pendingToolCount: activity.pendingToolIds.size,
+    pendingToolNames: new Set(activity.pendingToolNames),
+    totalToolCalls: activity.totalToolCalls,
+  };
+}
+
+function summarizeToolInput(input: Record<string, unknown>): string | undefined {
+  if (input.url) return `URL: ${String(input.url).slice(0, 200)}`;
+  if (input.query) return `Query: ${String(input.query).slice(0, 200)}`;
+  if (input.command) return `Command: ${String(input.command).slice(0, 200)}`;
+  if (input.prompt) return `Prompt: ${String(input.prompt).slice(0, 200)}`;
+  const serialized = JSON.stringify(input);
+  return serialized ? serialized.slice(0, 200) : undefined;
 }
 
 // ========== Fast Heuristic ==========

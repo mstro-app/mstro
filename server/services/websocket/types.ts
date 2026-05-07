@@ -37,11 +37,11 @@ const GitWorktreeMessages = ['gitWorktreeList', 'gitWorktreeCreate', 'gitWorktre
 
 const GitMergeMessages = ['gitMergePreview', 'gitWorktreeMerge', 'gitMergeAbort', 'gitMergeComplete', 'gitMergeStashPop', 'gitMergeDiscardBlockers'] as const;
 
-const SessionSyncMessages = ['getActiveTabs', 'createTab', 'reorderTabs', 'syncTabMeta', 'removeTab', 'markTabViewed'] as const;
+const SessionSyncMessages = ['getActiveTabs', 'createTab', 'reorderTabs', 'syncTabMeta', 'removeTab', 'markTabViewed', 'setTabEngine'] as const;
 
 const SettingsMessages = ['getSettings', 'updateSettings'] as const;
 
-const QualityMessages = ['qualityDetectTools', 'qualityScan', 'qualityInstallTools', 'qualityCodeReview', 'qualityLoadState', 'qualitySaveDirectories'] as const;
+const QualityMessages = ['qualityDetectTools', 'qualityScan', 'qualityInstallTools', 'qualityCodeReview', 'qualityCancel', 'qualityLoadState', 'qualityClearPending', 'qualitySaveDirectories'] as const;
 
 const FileUploadMessages = ['fileUploadStart', 'fileUploadChunk', 'fileUploadComplete', 'fileUploadCancel'] as const;
 
@@ -54,6 +54,8 @@ const PlanBoardMessages = ['planCreateBoard', 'planUpdateBoard', 'planArchiveBoa
 const PlanSprintMessages = ['planCreateSprint', 'planActivateSprint', 'planCompleteSprint', 'planGetSprintArtifacts'] as const;
 
 const SkillMessages = ['listSkills', 'chatToBoard'] as const;
+
+const InstanceMessages = ['shutdownInstance'] as const;
 
 type WebSocketMessageType =
   | typeof CoreMessages[number]
@@ -73,12 +75,33 @@ type WebSocketMessageType =
   | typeof PlanMessages[number]
   | typeof PlanBoardMessages[number]
   | typeof PlanSprintMessages[number]
-  | typeof SkillMessages[number];
+  | typeof SkillMessages[number]
+  | typeof InstanceMessages[number];
+
+/**
+ * AI engine identifier carried on WebSocket envelopes so the web client can
+ * render engine-specific affordances. Server relay forwards the field
+ * unchanged; missing values on inbound messages default to 'claude-code'.
+ */
+export type EngineId = 'claude-code' | 'opencode';
+
+export const DEFAULT_ENGINE_ID: EngineId = 'claude-code';
+
+/** Narrow an unknown engine value to a valid EngineId, defaulting to 'claude-code'. */
+export function normalizeEngineId(value: unknown): EngineId {
+  return value === 'opencode' ? 'opencode' : DEFAULT_ENGINE_ID;
+}
 
 export interface WebSocketMessage {
   type: WebSocketMessageType;
   tabId?: string;
   terminalId?: string;
+  /**
+   * Engine that produced / should handle this message. Optional on the wire —
+   * missing field is treated as 'claude-code' by receivers. Populated on
+   * prompt-send, session-state, and tab-state messages.
+   */
+  engine?: EngineId;
   // biome-ignore lint/suspicious/noExplicitAny: message envelope carries heterogeneous payloads — typed per-handler via destructuring
   data?: any;
   /** Injected by server relay for view-only shared users */
@@ -103,7 +126,7 @@ const GitWorktreeResponseMessages = ['gitWorktreeListResult', 'gitWorktreeCreate
 
 const GitMergeResponseMessages = ['gitMergePreviewResult', 'gitWorktreeMergeResult', 'gitMergeAborted', 'gitMergeCompleted', 'gitMergeStashPopped', 'gitMergeBlockersDiscarded'] as const;
 
-const SessionSyncResponseMessages = ['activeTabs', 'tabCreated', 'tabRemoved', 'tabRenamed', 'tabsReordered', 'tabViewed', 'tabStateChanged'] as const;
+const SessionSyncResponseMessages = ['activeTabs', 'tabCreated', 'tabRemoved', 'tabRenamed', 'tabsReordered', 'promptTextSync', 'tabViewed', 'tabStateChanged', 'tabEngineOverride'] as const;
 
 const SettingsResponseMessages = ['settings', 'settingsUpdated'] as const;
 
@@ -120,6 +143,8 @@ const PlanBoardResponseMessages = ['planBoardCreated', 'planBoardUpdated', 'plan
 const PlanSprintResponseMessages = ['planSprintCreated', 'planSprintUpdated', 'planSprintCompleted', 'planSprintArtifacts', 'planReviewProgress'] as const;
 
 const SkillResponseMessages = ['skillsList', 'chatToBoardCreated'] as const;
+
+const InstanceResponseMessages = ['shuttingDown'] as const;
 
 type WebSocketResponseType =
   | typeof CoreResponseMessages[number]
@@ -139,12 +164,19 @@ type WebSocketResponseType =
   | typeof PlanResponseMessages[number]
   | typeof PlanBoardResponseMessages[number]
   | typeof PlanSprintResponseMessages[number]
-  | typeof SkillResponseMessages[number];
+  | typeof SkillResponseMessages[number]
+  | typeof InstanceResponseMessages[number];
 
 export interface WebSocketResponse {
   type: WebSocketResponseType;
   tabId?: string;
   terminalId?: string;
+  /**
+   * Engine that produced this response. Populated by CLI handlers for
+   * prompt-send, session-state, and tab-state message categories so the web
+   * client can render engine-specific affordances.
+   */
+  engine?: EngineId;
   // biome-ignore lint/suspicious/noExplicitAny: message envelope carries heterogeneous payloads — typed per-handler via destructuring
   data?: any;
   /**

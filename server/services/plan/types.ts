@@ -98,6 +98,10 @@ export interface Issue {
   outputType: 'code' | 'document' | 'auto';
   // Planned output file path (from front matter output_file, relative to working dir)
   outputFile: string | null;
+  // Agent hints for the executing Claude Code session — names or general roles
+  // (e.g. ["backend-architect", "database-architect"], ["product, design"]).
+  // Empty = no agent hints; the executor uses default behavior.
+  agents: string[];
   // Full markdown body
   body: string;
   // File path relative to .mstro/pm/

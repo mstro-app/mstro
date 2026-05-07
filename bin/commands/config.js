@@ -94,7 +94,7 @@ function showStatus() {
   log('    mstro telemetry on     Enable telemetry', colors.dim);
   log('    mstro telemetry off    Disable telemetry', colors.dim);
   log('');
-  log('  Privacy policy: https://github.com/mstro-app/mstro/blob/main/cli/PRIVACY.md', colors.dim);
+  log('  Privacy policy: https://github.com/mstroapp/mstro/blob/main/cli/PRIVACY.md', colors.dim);
   log('');
 }
 

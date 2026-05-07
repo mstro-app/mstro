@@ -12,6 +12,19 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import type { EngineId } from './types.js'
+
+/**
+ * Per-tab engine override persisted alongside the tab record. Survives
+ * WebSocket disconnects + process restarts — the web client re-reads it on
+ * `tabInitialized` / `activeTabs` to restore the picker state after a
+ * reconnect.
+ */
+export interface TabEngineOverride {
+  engine: EngineId
+  model: string
+  effortLevel: string
+}
 
 export interface RegisteredTab {
   sessionId: string
@@ -29,6 +42,12 @@ export interface RegisteredTab {
   hasPersistedHistory?: boolean
   worktreePath?: string
   worktreeBranch?: string
+  /**
+   * Per-tab engine override. Absent when the tab uses the global defaults —
+   * authored from the web via `setTabEngine`, cleared by passing `null` to
+   * {@link SessionRegistry.updateTabEngineOverride}.
+   */
+  engineOverride?: TabEngineOverride
 }
 
 interface RegistryData {
@@ -239,6 +258,24 @@ export class SessionRegistry {
       }
       this.save()
     }
+  }
+
+  /**
+   * Update or clear the per-tab engine override. Pass `null` to remove the
+   * override and route future prompts through the global defaults. Writes
+   * through to disk so the override survives WS disconnects — that's the
+   * core persistence guarantee of IS-019.
+   */
+  updateTabEngineOverride(tabId: string, override: TabEngineOverride | null): void {
+    const tab = this.data.tabs[tabId]
+    if (!tab) return
+    if (override === null) {
+      delete tab.engineOverride
+    } else {
+      tab.engineOverride = { ...override }
+    }
+    tab.lastActivityAt = new Date().toISOString()
+    this.save()
   }
 
   /**

@@ -1,13 +1,13 @@
 {
   "name": "mstro-app",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Browser-based IDE + AI agent orchestration CLI. Run Claude Code in parallel across git worktrees, auto-approve safe tools with the Security Bouncer, and control long-running AI work from any device at app.mstro.app.",
   "type": "module",
   "license": "PolyForm-Noncommercial-1.0.0",
   "author": "Mstro",
   "repository": {
     "type": "git",
-    "url": "https://github.com/mstro-app/mstro.git"
+    "url": "https://github.com/mstroapp/mstro.git"
   },
   "homepage": "https://mstro.app",
   "keywords": [
@@ -67,11 +67,13 @@
     "prepublishOnly": "npm run build && npm test",
     "mstro": "node bin/mstro.js",
     "mstro:dev": "node bin/mstro.js --dev",
-    "check": "tsc -p tsconfig.build.json && vitest run && biome check . && npm audit --omit=dev"
+    "check": "tsc -p tsconfig.build.json && vitest run && biome check . && npm audit --omit=dev",
+    "release": "bin/release.sh"
   },
   "dependencies": {
     "@hono/node-server": "^1.19.6",
     "@modelcontextprotocol/sdk": "^1.21.1",
+    "@opencode-ai/sdk": "^1.14.19",
     "@sentry/node": "^10.38.0",
     "fuse.js": "^7.1.0",
     "hono": "^4.10.6",

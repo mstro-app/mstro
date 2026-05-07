@@ -327,7 +327,7 @@ If you are a parent or guardian and believe your child has used or registered fo
 
 ## 15. Source Available
 
-The Mstro CLI is source-available software, licensed under the **PolyForm Noncommercial License 1.0.0**. The source code is available at https://github.com/mstro-app/mstro.
+The Mstro CLI is source-available software, licensed under the **PolyForm Noncommercial License 1.0.0**. The source code is available at https://github.com/mstroapp/mstro.
 
 Your use of the CLI source code is governed by the PolyForm Noncommercial 1.0.0 terms (see the LICENSE file in the repository). This Privacy Policy applies to your use of the hosted Service (mstro.app platform, relay server) and any personal data processed in connection with your Mstro account, regardless of which client you use.
 
@@ -353,7 +353,7 @@ For privacy-related questions, data subject requests, or concerns about this pol
 
 **Email:** bravo@mstro.app
 **Website:** https://mstro.app
-**GitHub Issues:** https://github.com/mstro-app/mstro/issues
+**GitHub Issues:** https://github.com/mstroapp/mstro/issues
 
 **Mstro, Inc.**
 United States

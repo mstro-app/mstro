@@ -12,6 +12,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { ImprovisationSessionManager } from '../../cli/improvisation-session-manager.js';
+import type { InstanceRegistry } from '../instances.js';
 import { captureException } from '../sentry.js';
 import { getPTYManager } from '../terminal/pty-manager.js';
 import { AutocompleteService } from './autocomplete.js';
@@ -30,7 +31,7 @@ import { generateNotificationSummary, handleGetSettings, handleUpdateSettings } 
 import { handleListSkills } from './skill-handlers.js';
 import { SkillsWatcher } from './skill-watcher.js';
 import { TabEventBufferRegistry } from './tab-event-buffer.js';
-import { handleCreateTab, handleGetActiveTabs, handleMarkTabViewed, handleRemoveTab, handleReorderTabs, handleSyncTabMeta } from './tab-handlers.js';
+import { handleCreateTab, handleGetActiveTabs, handleMarkTabViewed, handleRemoveTab, handleReorderTabs, handleSetTabEngine, handleSyncTabMeta } from './tab-handlers.js';
 import { cleanupTerminalSubscribers, handleTerminalMessage } from './terminal-handlers.js';
 import type { FrecencyData, WebSocketMessage, WebSocketResponse, WSContext } from './types.js';
 
@@ -55,11 +56,14 @@ export class WebSocketImproviseHandler implements HandlerContext {
   skillsWatcher: SkillsWatcher | null = null;
   tabEventBuffers: TabEventBufferRegistry = new TabEventBufferRegistry();
   msgIdTracker: MsgIdTracker = new MsgIdTracker();
+  private instanceRegistry: InstanceRegistry | null;
+  private shutdownInProgress = false;
 
-  constructor() {
+  constructor(instanceRegistry: InstanceRegistry | null = null) {
     this.frecencyPath = join(homedir(), '.mstro', 'autocomplete-frecency.json');
     const frecencyData = this.loadFrecencyData();
     this.autocompleteService = new AutocompleteService(frecencyData);
+    this.instanceRegistry = instanceRegistry;
     process.on('exit', () => {
       if (this.frecencySaveTimer) {
         clearTimeout(this.frecencySaveTimer);
@@ -201,6 +205,9 @@ export class WebSocketImproviseHandler implements HandlerContext {
         return handleRemoveTab(this, ws, tabId, workingDir);
       case 'markTabViewed':
         return handleMarkTabViewed(this, ws, tabId, workingDir);
+      case 'setTabEngine':
+        if (permission === 'view') return;
+        return handleSetTabEngine(this, ws, msg, tabId, workingDir);
       case 'getSettings':
         return handleGetSettings(this, ws);
       case 'updateSettings':
@@ -208,6 +215,8 @@ export class WebSocketImproviseHandler implements HandlerContext {
         return handleUpdateSettings(this, ws, msg);
       case 'listSkills':
         return handleListSkills(this, ws, workingDir);
+      case 'shutdownInstance':
+        return this.handleShutdownInstance(ws, permission);
     }
 
     // Dispatch table lookup for domain handlers
@@ -380,6 +389,54 @@ export class WebSocketImproviseHandler implements HandlerContext {
 
   cleanupSession(sessionId: string): void {
     this.sessions.delete(sessionId);
+  }
+
+  /**
+   * Handle a `shutdownInstance` control message from a web client.
+   *
+   * Authorization: only the orchestra owner may shut down. The relay tags
+   * shared (view-only) users with `_permission: 'view'`; absence means the
+   * requester is the owner whose CLI this is. View-only requests are
+   * rejected with a `forbidden` error rather than silently dropped so the
+   * UI can surface "you're not the owner" to non-owners.
+   *
+   * Idempotency: a shutdown already in progress is acked (broadcast +
+   * exit timer were already scheduled) but does not stack a second timer.
+   */
+  private handleShutdownInstance(ws: WSContext, permission: 'view' | undefined): void {
+    if (permission === 'view') {
+      console.log('[WebSocketImproviseHandler] Rejecting shutdownInstance from view-only user');
+      this.send(ws, {
+        type: 'error',
+        data: {
+          code: 'forbidden',
+          message: 'Only the owner can shut down this instance.'
+        }
+      });
+      return;
+    }
+
+    if (this.shutdownInProgress) {
+      console.log('[WebSocketImproviseHandler] shutdownInstance already in progress — ignoring duplicate request');
+      return;
+    }
+    this.shutdownInProgress = true;
+
+    // The CLI knows the request came from the owner (the relay only forwards
+    // owner traffic without a `_permission` tag), but does not receive the
+    // owner's userId on the wire. Logged as 'owner' for the audit trail.
+    console.log('[WebSocketImproviseHandler] shutdownInstance requested by owner — broadcasting shuttingDown and exiting');
+
+    this.broadcastToAll({ type: 'shuttingDown', data: { reason: 'user-requested' } });
+
+    // Mirrors the HTTP /api/shutdown route's 100ms delay so the broadcast
+    // has a chance to flush before process.exit tears down the socket.
+    setTimeout(() => {
+      if (this.instanceRegistry) {
+        this.instanceRegistry.unregister();
+      }
+      process.exit(0);
+    }, 100);
   }
 
 }

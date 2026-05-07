@@ -91,6 +91,7 @@ function getSessionById(workingDir: string, sessionId: string): Record<string, u
           startedAt: historyData.startedAt,
           lastActivityAt: historyData.lastActivityAt,
           totalTokens: historyData.totalTokens,
+          engine: historyData.engine || 'claude-code',
           movementCount: historyData.movements?.length || 0,
           title: firstPrompt.slice(0, 80) + (firstPrompt.length > 80 ? '...' : ''),
           movements: historyData.movements || [],
@@ -171,11 +172,13 @@ function buildSessionSummary(historyData: Record<string, unknown>): Record<strin
   const movementPreviews = (movements || []).slice(0, 3).map((m: Record<string, unknown>) => ({
     userPrompt: (typeof m.userPrompt === 'string' ? m.userPrompt : '').slice(0, 100) || ''
   }));
+  const engine = typeof historyData.engine === 'string' && historyData.engine ? historyData.engine : 'claude-code';
   return {
     sessionId: historyData.sessionId,
     startedAt: historyData.startedAt,
     lastActivityAt: historyData.lastActivityAt,
     totalTokens: historyData.totalTokens,
+    engine,
     movementCount: movements?.length || 0,
     title: firstPrompt.slice(0, 80) + (firstPrompt.length > 80 ? '...' : ''),
     movements: movementPreviews

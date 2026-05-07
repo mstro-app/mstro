@@ -52,6 +52,15 @@ export interface QualityHistoryEntry {
     maintainability: { score: number; grade: string };
   };
   directories: HistoryDirectoryEntry[];
+  /**
+   * Wall-clock duration of the CLI scan that produced this entry, in
+   * milliseconds. Older entries persisted before the ETA rollout will not
+   * include this field, in which case the ETA estimator falls back to the
+   * heuristic until enough samples accumulate.
+   */
+  scanDurationMs?: number;
+  /** Wall-clock duration of the AI review pass, when one ran for this entry. */
+  reviewDurationMs?: number;
 }
 
 interface QualityHistory {
@@ -257,6 +266,12 @@ export class QualityPersistence {
       if (categoryScores) lastEntry.categoryScores = categoryScores;
       if (issueDensity !== undefined) lastEntry.issueDensity = issueDensity;
       if (dimensionScores) lastEntry.dimensionScores = dimensionScores;
+      // Carry through whichever duration is present on this report. We
+      // overwrite — the latest scan/review is the most accurate sample for
+      // this directory. (Multi-dir merges within the 60s window write each
+      // dir's duration in turn; the final entry reflects the last write.)
+      if (typeof results.scanDurationMs === 'number') lastEntry.scanDurationMs = results.scanDurationMs;
+      if (typeof results.reviewDurationMs === 'number') lastEntry.reviewDurationMs = results.reviewDurationMs;
     } else {
       history.push({
         timestamp: now.toISOString(),
@@ -266,6 +281,8 @@ export class QualityPersistence {
         categoryScores,
         dimensionScores,
         directories: [dirEntry],
+        scanDurationMs: results.scanDurationMs,
+        reviewDurationMs: results.reviewDurationMs,
       });
     }
 

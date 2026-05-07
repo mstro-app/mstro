@@ -287,6 +287,7 @@ export function parseIssue(content: string, filePath: string): Issue {
     reviewGate: (['none', 'auto', 'required'].includes(String(fm.review_gate)) ? String(fm.review_gate) : 'auto') as Issue['reviewGate'],
     outputType: (['code', 'document', 'auto'].includes(String(fm.output_type)) ? String(fm.output_type) : 'auto') as Issue['outputType'],
     outputFile: optionalString(fm.output_file),
+    agents: toStringArray(fm.agents),
     body,
     path: filePath,
   };

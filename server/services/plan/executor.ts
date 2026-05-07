@@ -265,7 +265,6 @@ export class PlanExecutor extends EventEmitter {
   /** Run waves until done, paused, stopped, or stalled. */
   private async runWaveLoop(): Promise<'done' | 'stalled' | 'dead'> {
     let consecutiveZeroCompletions = 0;
-    const maxParallel = await getBoardMaxParallelAgents(this.context.pmDir, this.effectiveBoardId(), this.emitWarn);
 
     while (!this.shouldStop && !this.shouldPause) {
       const readyIssues = await this.pickReadyIssues();
@@ -274,6 +273,9 @@ export class PlanExecutor extends EventEmitter {
         return await this.hasDeadIssues() ? 'dead' : 'done';
       }
 
+      // Re-read on each wave so users can scale agents up/down mid-execution
+      // without restarting — the new value takes effect at the next wave boundary.
+      const maxParallel = await getBoardMaxParallelAgents(this.context.pmDir, this.effectiveBoardId(), this.emitWarn);
       const completedCount = await this.executeWave(readyIssues.slice(0, maxParallel));
 
       if (completedCount > 0) {

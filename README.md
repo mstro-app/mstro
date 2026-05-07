@@ -17,7 +17,7 @@
 </div>
 
 <div align="center">
-  <img src="https://mstro.app/screenshots/chat-desktop.png" alt="Mstro chat and IDE running in the browser" width="900" />
+  <img src="https://mstro.app/screenshots/pm-desktop.png" alt="Mstro PM board running in the browser" width="900" />
 </div>
 
 ---

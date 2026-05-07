@@ -39,7 +39,9 @@ export function loadHistory(historyPath: string, sessionId: string): SessionHist
   if (existsSync(historyPath)) {
     try {
       const data = readFileSync(historyPath, 'utf-8');
-      return JSON.parse(data) as SessionHistory;
+      const parsed = JSON.parse(data) as SessionHistory;
+      if (!parsed.engine) parsed.engine = 'claude-code';
+      return parsed;
     } catch (error) {
       herror('Failed to load history:', error);
     }
@@ -51,6 +53,7 @@ export function loadHistory(historyPath: string, sessionId: string): SessionHist
     lastActivityAt: now,
     totalTokens: 0,
     movements: [],
+    engine: 'claude-code',
   };
 }
 

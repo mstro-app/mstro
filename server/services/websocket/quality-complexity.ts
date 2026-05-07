@@ -1,7 +1,7 @@
 // Copyright (c) 2025-present Mstro, Inc. All rights reserved.
 
 import { extname, relative } from 'node:path';
-import { chunkFileList, filesByExt, runCommand, type SourceFile } from './quality-tools.js';
+import { chunkFileList, filesByExt, isTestFile, runCommand, type SourceFile } from './quality-tools.js';
 import { biomeDiagToFinding, type Ecosystem, FUNCTION_LENGTH_THRESHOLD, isBiomeComplexityDiagnostic, isEslintComplexityRule, type QualityFinding } from './quality-types.js';
 
 const NODE_COMPLEXITY_EXTS = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'];
@@ -16,6 +16,26 @@ interface FunctionInfo {
   file: string;
   startLine: number;
   lines: number;
+  /** Approximate cyclomatic complexity (count of decision points). */
+  branches: number;
+}
+
+/**
+ * Decision-point keywords that approximate cyclomatic complexity. We count
+ * occurrences as a cheap proxy — McCabe's exact metric requires AST parsing,
+ * but the keyword count is highly correlated and good enough to distinguish
+ * "long but linear" (a flat sequence of statements) from "long and branchy"
+ * (deeply nested control flow).
+ *
+ * The user's task 2 requirement: "a 1000 line file might be just fine, not
+ * a violation at all, while another 1000 line file might be a severe mix of
+ * concerns" — same applies to functions. A long config-builder with one
+ * return statement is fine; a long monster with 40 if-branches is not.
+ */
+const BRANCH_KEYWORDS = /\b(?:if|else if|elif|for|while|case|catch|\?\s*\w|&&|\|\||\?\?)\b/g;
+
+function countBranches(body: string): number {
+  return (body.match(BRANCH_KEYWORDS) || []).length;
 }
 
 const JS_FUNC_PATTERN = /^(\s*)(export\s+)?(async\s+)?function\s+(\w+)|^(\s*)(export\s+)?(const|let|var)\s+(\w+)\s*=\s*(async\s+)?\(|^(\s*)(public|private|protected)?\s*(async\s+)?(\w+)\s*\(/;
@@ -56,11 +76,15 @@ function extractJsFunctions(file: SourceFile): FunctionInfo[] {
     braceDepth += countBraceDeltas(lines[i]);
 
     if (currentFunc && braceDepth <= funcStartBraceDepth && i > currentFunc.startLine - 1) {
+      const startLine = currentFunc.startLine;
+      const endLine = i + 1;
+      const body = lines.slice(startLine - 1, endLine).join('\n');
       functions.push({
         name: currentFunc.name,
         file: file.relativePath,
-        startLine: currentFunc.startLine,
-        lines: i + 1 - currentFunc.startLine + 1,
+        startLine,
+        lines: endLine - startLine + 1,
+        branches: countBranches(body),
       });
       currentFunc = null;
     }
@@ -75,35 +99,29 @@ function extractPyFunctions(file: SourceFile): FunctionInfo[] {
   const defPattern = /^(\s*)(async\s+)?def\s+(\w+)/;
   let currentFunc: { name: string; startLine: number; indent: number } | null = null;
 
+  const recordFunction = (name: string, startLine: number, endLine: number) => {
+    const body = lines.slice(startLine - 1, endLine).join('\n');
+    functions.push({
+      name,
+      file: file.relativePath,
+      startLine,
+      lines: endLine - startLine + 1,
+      branches: countBranches(body),
+    });
+  };
+
   for (let i = 0; i < lines.length; i++) {
     const match = defPattern.exec(lines[i]);
     if (match) {
-      if (currentFunc) {
-        functions.push({
-          name: currentFunc.name,
-          file: file.relativePath,
-          startLine: currentFunc.startLine,
-          lines: i - currentFunc.startLine + 1,
-        });
-      }
+      if (currentFunc) recordFunction(currentFunc.name, currentFunc.startLine, i);
       currentFunc = { name: match[3], startLine: i + 1, indent: match[1].length };
     } else if (currentFunc && lines[i].trim() && !lines[i].startsWith(' '.repeat(currentFunc.indent + 1)) && !lines[i].startsWith('\t')) {
-      functions.push({
-        name: currentFunc.name,
-        file: file.relativePath,
-        startLine: currentFunc.startLine,
-        lines: i - currentFunc.startLine + 1,
-      });
+      recordFunction(currentFunc.name, currentFunc.startLine, i);
       currentFunc = null;
     }
   }
   if (currentFunc) {
-    functions.push({
-      name: currentFunc.name,
-      file: file.relativePath,
-      startLine: currentFunc.startLine,
-      lines: lines.length - currentFunc.startLine + 1,
-    });
+    recordFunction(currentFunc.name, currentFunc.startLine, lines.length);
   }
 
   return functions;
@@ -116,9 +134,37 @@ function extractFunctions(file: SourceFile): FunctionInfo[] {
   return [];
 }
 
+/**
+ * Map a function's branch density (decision points per N lines) to a
+ * severity level for the function-length finding. Returns `null` to suppress
+ * the finding for a long but linear function — e.g., a config-builder with
+ * one return statement and 200 lines of property assignments.
+ *
+ * Heuristic: McCabe's cyclomatic complexity threshold is ~10. Above that,
+ * functions are hard to test. We grade severity by branches-per-50-lines so
+ * a 100-line function with 5 branches looks the same as a 50-line function
+ * with 5 branches (both ~industry "consider refactoring" zone).
+ *
+ * Functions absurdly long (>5x threshold) emit a finding regardless of
+ * branchiness — a 250-line function is too much to read in one sitting even
+ * if it's "linear."
+ */
+function severityFromBranchiness(branches: number, lines: number): QualityFinding['severity'] | null {
+  const branchesPer50 = (branches * 50) / Math.max(1, lines);
+  const isAbsurd = lines > FUNCTION_LENGTH_THRESHOLD * 5;
+  if (branchesPer50 < 3 && !isAbsurd) return null; // Long but linear — not really a violation.
+  if (branchesPer50 < 6) return 'low';
+  if (branchesPer50 < 10) return 'medium';
+  return 'high';
+}
+
 export function analyzeFunctionLength(files: SourceFile[]): { score: number; findings: QualityFinding[]; issueCount: number } {
   const allFunctions: FunctionInfo[] = [];
   for (const file of files) {
+    // Test files are exempt: a long `it()`/`describe()` body is normal and
+    // splitting it produces churn without improving readability. Linting
+    // and other quality checks still apply — only structural-length defers.
+    if (isTestFile(file.relativePath)) continue;
     allFunctions.push(...extractFunctions(file));
   }
 
@@ -133,13 +179,21 @@ export function analyzeFunctionLength(files: SourceFile[]): { score: number; fin
     totalScore += funcScore;
 
     if (func.lines > FUNCTION_LENGTH_THRESHOLD) {
+      const severity = severityFromBranchiness(func.branches, func.lines);
+      if (!severity) continue; // Long but linear — not flagged.
+
       findings.push({
-        severity: func.lines > FUNCTION_LENGTH_THRESHOLD * 3 ? 'high' : func.lines > FUNCTION_LENGTH_THRESHOLD * 2 ? 'medium' : 'low',
+        severity,
         category: 'function-length',
         file: func.file,
         line: func.startLine,
-        title: `${func.name}() has ${func.lines} lines (threshold: ${FUNCTION_LENGTH_THRESHOLD})`,
-        description: `Function "${func.name}" exceeds the recommended length by ${func.lines - FUNCTION_LENGTH_THRESHOLD} lines.`,
+        title: `${func.name}() has ${func.lines} lines, ~${func.branches} branches`,
+        description:
+          `Function "${func.name}" exceeds the ${FUNCTION_LENGTH_THRESHOLD}-line threshold by ${func.lines - FUNCTION_LENGTH_THRESHOLD} lines ` +
+          `with approximately ${func.branches} decision points (cyclomatic complexity proxy). ` +
+          (severity === 'high'
+            ? 'High branchiness makes this hard to test and review — extract sub-functions or simplify control flow.'
+            : 'Long but with manageable branching — consider extracting helpers if the function does multiple things.'),
       });
     }
   }

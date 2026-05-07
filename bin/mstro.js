@@ -13,11 +13,12 @@
  *   mstro whoami              # Show current user
  *   mstro status              # Show connection status
  *   mstro -p 4105             # Start on specific port (overrides auto port)
+ *   mstro --detached          # Start in background; survives terminal close
  *   mstro --help              # Show help
  */
 
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -294,6 +295,7 @@ function showHelp() {
   log('    mstro status                Show connection and auth status', colors.dim);
   log('    mstro telemetry [on|off]    Enable/disable anonymous telemetry', colors.dim);
   log('    mstro -p 4105               Start on specific port (overrides auto port)', colors.dim);
+  log('    mstro --detached            Start in background, return prompt (survives terminal close)', colors.dim);
   log('    mstro setup-terminal        Enable web terminal (compiles native module)', colors.dim);
   log('    mstro --version             Show version number', colors.dim);
   log('    mstro --help                Show this help message', colors.dim);
@@ -301,13 +303,46 @@ function showHelp() {
   log('  Options:', colors.bold);
   log('    --port, -p <port>           Override automatic port selection', colors.dim);
   log('    --working-dir, -w <dir>     Set working directory', colors.dim);
-  log('    --staging                   Connect to the staging server', colors.dim);
+  log('    --detached                  Run in background and exit, leaving server alive', colors.dim);
   log('    --verbose, -v               Enable verbose output', colors.dim);
   log('');
   log('  Authentication:', colors.bold);
   log('    Running "mstro" will prompt you to log in automatically if needed.', colors.dim);
   log('    Once logged in, machines sync automatically with your web dashboard.', colors.dim);
   log('');
+}
+
+function runNpmScriptDetached(script, args = [], envOverrides = {}) {
+  const logDir = join(homedir(), '.mstro', 'logs');
+  if (!existsSync(logDir)) mkdirSync(logDir, { recursive: true });
+  const logPath = join(logDir, `mstro-${new Date().toISOString().replace(/[:.]/g, '-')}.log`);
+  const logFd = openSync(logPath, 'a');
+
+  const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  const child = spawn(npmCmd, ['run', '--silent', script, ...args], {
+    cwd: CLIENT_ROOT,
+    stdio: ['ignore', logFd, logFd],
+    env: { ...process.env, MSTRO_WORKING_DIR: USER_CWD, ...envOverrides },
+    detached: true,
+    ...(process.platform === 'win32' ? { windowsHide: true } : {}),
+  });
+
+  child.on('error', (err) => {
+    log(`Error: ${err.message}`, colors.red);
+    closeSync(logFd);
+    process.exit(1);
+  });
+
+  // Detach: parent exits, child keeps running independently of the terminal session.
+  child.unref();
+  closeSync(logFd);
+
+  log('\n  Mstro started in background', colors.bold + colors.green);
+  log(`  PID:  ${child.pid}`, colors.dim);
+  log(`  Log:  ${logPath}`, colors.dim);
+  log(`  Stop: kill ${child.pid}`, colors.dim);
+  log('  Status: mstro status\n', colors.dim);
+  process.exit(0);
 }
 
 function runNpmScript(script, args = [], envOverrides = {}) {
@@ -590,7 +625,22 @@ async function ensurePtySetup() {
   }
 }
 
-async function startServer(envOverrides) {
+async function startServer(envOverrides, { detached = false } = {}) {
+  if (detached) {
+    if (!isLoggedIn()) {
+      log('\n  Not logged in.', colors.red);
+      log('  Run "mstro login" first, then retry "mstro --detached".\n', colors.dim);
+      process.exit(1);
+    }
+    const ptyAvailable = await isNodePtyAvailable();
+    if (!ptyAvailable) {
+      log('\n  Note: terminal support not enabled.', colors.yellow);
+      log('  Run "mstro setup-terminal" if you want the in-browser terminal.', colors.dim);
+    }
+    runNpmScriptDetached('start', [], envOverrides);
+    return;
+  }
+
   await ensureLoggedIn();
 
   await ensurePtySetup();
@@ -676,7 +726,8 @@ async function main() {
   }
 
   // Default: start server
-  await startServer(envOverrides);
+  const detached = args.includes('--detached');
+  await startServer(envOverrides, { detached });
 }
 
 main();

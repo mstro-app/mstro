@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-GITHUB_URL="https://github.com/mstro-app/mstro.git"
+GITHUB_URL="https://github.com/mstroapp/mstro.git"
 
 cd "$(git rev-parse --show-toplevel)"
 

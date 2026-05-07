@@ -1,6 +1,6 @@
 {
   "name": "mstro-app",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "description": "Browser-based IDE + AI agent orchestration CLI. Run Claude Code in parallel across git worktrees, auto-approve safe tools with the Security Bouncer, and control long-running AI work from any device at app.mstro.app.",
   "type": "module",
   "license": "PolyForm-Noncommercial-1.0.0",

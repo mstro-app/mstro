@@ -248,6 +248,9 @@ export function buildOutputHistory(session: ImprovisationSessionManager): Array<
  */
 export function setupSessionListeners(ctx: HandlerContext, session: ImprovisationSessionManager, _ws: WSContext, tabId: string): void {
   session.removeAllListeners();
+  // Bind tabId before listeners — the headless runner reads it at executePrompt
+  // time to wire AskUserQuestion routing back to this tab's web clients.
+  session.setTabId(tabId);
   const engine = resolveEngineForSession(session);
 
   session.on('onHistoryPersisted', () => {

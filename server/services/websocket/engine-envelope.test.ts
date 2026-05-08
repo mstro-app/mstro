@@ -98,6 +98,11 @@ class FakeSession extends EventEmitter {
   destroy(): void {
     // no-op
   }
+
+  setTabId(_tabId: string): void {
+    // no-op for the fake; the real session uses this to thread the tab id
+    // into AskUserQuestion routing, which isn't exercised by these tests.
+  }
 }
 
 /** A minimal HandlerContext that captures all sent/broadcast responses. */

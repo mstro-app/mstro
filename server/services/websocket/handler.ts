@@ -15,6 +15,7 @@ import type { ImprovisationSessionManager } from '../../cli/improvisation-sessio
 import type { InstanceRegistry } from '../instances.js';
 import { captureException } from '../sentry.js';
 import { getPTYManager } from '../terminal/pty-manager.js';
+import { resolvePendingQuestion } from './ask-user-question-bridge.js';
 import { AutocompleteService } from './autocomplete.js';
 import { FileDownloadHandler } from './file-download-handler.js';
 import { handleFileExplorerMessage, handleFileMessage } from './file-explorer-handlers.js';
@@ -217,6 +218,9 @@ export class WebSocketImproviseHandler implements HandlerContext {
         return handleListSkills(this, ws, workingDir);
       case 'shutdownInstance':
         return this.handleShutdownInstance(ws, permission);
+      case 'askUserQuestionResponse':
+        if (permission === 'view') return;
+        return this.handleAskUserQuestionResponse(msg, tabId);
     }
 
     // Dispatch table lookup for domain handlers
@@ -389,6 +393,32 @@ export class WebSocketImproviseHandler implements HandlerContext {
 
   cleanupSession(sessionId: string): void {
     this.sessions.delete(sessionId);
+  }
+
+  /**
+   * Resolve a pending AskUserQuestion call with the user's answers. The
+   * bouncer subprocess is awaiting on the bridge promise; calling
+   * `resolvePendingQuestion` releases it so Claude resumes with the answers.
+   * Stale toolUseIds are no-ops — likely the question already timed out or
+   * was cancelled, and a stale web client is replaying its submission.
+   */
+  private handleAskUserQuestionResponse(msg: WebSocketMessage, tabId: string): void {
+    const data = msg.data as { toolUseId?: unknown; answers?: unknown } | undefined;
+    const toolUseId = typeof data?.toolUseId === 'string' ? data.toolUseId : '';
+    const answersIn = data?.answers;
+    if (!toolUseId) return;
+
+    // Only accept a flat string-string map; coerce safely so a malformed
+    // payload doesn't crash the bridge.
+    const answers: Record<string, string> = {};
+    if (answersIn && typeof answersIn === 'object' && !Array.isArray(answersIn)) {
+      for (const [k, v] of Object.entries(answersIn as Record<string, unknown>)) {
+        if (typeof v === 'string') answers[k] = v;
+      }
+    }
+
+    void tabId; // tabId is informational; the toolUseId is the unique key
+    resolvePendingQuestion(toolUseId, answers);
   }
 
   /**

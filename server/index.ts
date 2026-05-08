@@ -20,6 +20,7 @@ import {
   createFileRoutes,
   createImproviseRoutes,
   createInstanceRoutes,
+  createInternalRoutes,
   createNotificationRoutes,
   createShutdownRoute
 } from './routes/index.js'
@@ -34,6 +35,7 @@ import { AnalyticsEvents, initAnalytics, shutdownAnalytics, trackEvent } from '.
 import { AuthService } from './services/auth.js'
 import { FileService } from './services/files.js'
 import { InstanceRegistry, type MstroInstance } from './services/instances.js'
+import { setCurrentMstroPort } from './services/runtime-info.js'
 import { captureException, flushSentry, initSentry } from './services/sentry.js'
 import { getPTYManager, reloadPty } from './services/terminal/pty-manager.js'
 import { WebSocketImproviseHandler } from './services/websocket/index.js'
@@ -107,6 +109,11 @@ app.route('/api/shutdown', createShutdownRoute(instanceRegistry))
 app.route('/api/improvise', createImproviseRoutes(WORKING_DIR))
 app.route('/api/files', createFileRoutes(fileService))
 app.route('/api/notifications', createNotificationRoutes(WORKING_DIR))
+// Internal routes are gated by the per-process bouncer secret (see
+// ask-user-question-bridge.ts). Not under /api/* so the session-token
+// middleware doesn't gate them — bouncers are subprocesses that don't have
+// the user session token, but they DO inherit the bouncer secret env var.
+app.route('/internal', createInternalRoutes(wsHandler))
 
 app.post('/api/reload-pty', async (c) => {
   const success = await reloadPty()
@@ -160,6 +167,7 @@ async function startServer() {
   await initAnalytics()
 
   const port = await findAvailablePort(REQUESTED_PORT, 20)
+  setCurrentMstroPort(port)
   _currentInstance = instanceRegistry.register(port, WORKING_DIR)
 
   const server = serve({ fetch: app.fetch, port })

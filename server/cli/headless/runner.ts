@@ -8,6 +8,8 @@
  */
 
 import type { ChildProcess } from 'node:child_process';
+import { getCurrentMstroPort } from '../../services/runtime-info.js';
+import { getBouncerSecret } from '../../services/websocket/ask-user-question-bridge.js';
 import { type ClaudeInvokerOptions, executeClaudeCommand } from './claude-invoker.js';
 import { estimateTokensFromOutput } from './output-utils.js';
 import { enrichPromptWithContext } from './prompt-utils.js';
@@ -18,6 +20,22 @@ import type {
   ResolvedHeadlessConfig,
   SessionResult,
 } from './types.js';
+
+/**
+ * Process-wide singletons used to wire AskUserQuestion routing. Both return
+ * undefined if the server hasn't started yet (e.g. unit-test contexts that
+ * construct HeadlessRunner directly), in which case AskUserQuestion falls
+ * back to legacy "no answers" behavior.
+ */
+function readDefaultMstroPort(): number | undefined {
+  return getCurrentMstroPort();
+}
+
+function readDefaultBouncerSecret(): string | undefined {
+  // The bridge module's secret is generated at module-eval time, so it's
+  // always defined. We still null-coalesce in the caller for symmetry.
+  return getBouncerSecret();
+}
 
 // Re-export types for backward compatibility
 export type { ExecutionCheckpoint, HeadlessConfig, ImageAttachment, SessionResult, SessionState, ToolTimeoutProfile, ToolUseEvent } from './types.js';
@@ -129,6 +147,9 @@ export class HeadlessRunner {
       onToolTimeout: config.onToolTimeout,
       extraEnv: config.extraEnv,
       deployMode: config.deployMode,
+      tabId: config.tabId,
+      mstroPort: config.mstroPort ?? readDefaultMstroPort(),
+      bouncerSecret: config.bouncerSecret ?? readDefaultBouncerSecret(),
     };
   }
 

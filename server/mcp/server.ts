@@ -63,6 +63,51 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 });
 
 /**
+ * Bridge AskUserQuestion to the running CLI server. Claude pauses on this
+ * tool until we return; the CLI server pushes the questions to the web UI
+ * via WebSocket, awaits the user's answers, and returns them here.
+ *
+ * On any failure (server unreachable, timeout, no tab routing context) we
+ * return `behavior: allow` with the input unchanged. Claude treats it as
+ * "no answers" and proceeds with its own guesses — same fallback as before
+ * we had this integration. Better than blocking the run.
+ */
+async function bridgeAskUserQuestion(
+  input: Record<string, unknown>,
+): Promise<{ behavior: 'allow'; updatedInput: Record<string, unknown> }> {
+  const port = process.env.MSTRO_PORT;
+  const tabId = process.env.MSTRO_TAB_ID;
+  const secret = process.env.MSTRO_BOUNCER_SECRET;
+  const toolUseId = process.env.MSTRO_CURRENT_TOOL_USE_ID || `aq-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+  if (!port || !tabId || !secret) {
+    console.error('[MCP Bouncer] AskUserQuestion: missing routing context (port/tabId/secret) — passing through with no answers');
+    return { behavior: 'allow', updatedInput: input };
+  }
+
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/internal/ask-user-question`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-mstro-bouncer-secret': secret },
+      body: JSON.stringify({ toolUseId, tabId, questions: input.questions }),
+    });
+    if (!res.ok) {
+      console.error(`[MCP Bouncer] AskUserQuestion bridge returned ${res.status} — passing through with no answers`);
+      return { behavior: 'allow', updatedInput: input };
+    }
+    const json = (await res.json()) as { answers?: Record<string, string> };
+    const answers = json.answers && typeof json.answers === 'object' ? json.answers : {};
+    return {
+      behavior: 'allow',
+      updatedInput: { questions: input.questions, answers },
+    };
+  } catch (err) {
+    console.error(`[MCP Bouncer] AskUserQuestion bridge failed: ${err instanceof Error ? err.message : String(err)} — passing through with no answers`);
+    return { behavior: 'allow', updatedInput: input };
+  }
+}
+
+/**
  * Handle tool calls (approval_prompt)
  */
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -74,6 +119,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     tool_name: string;
     input: Record<string, unknown>;
   };
+
+  // AskUserQuestion is a clarifying-question tool — Claude needs the user's
+  // answers in `updatedInput.answers`, not a yes/no permission decision. Skip
+  // the security review entirely (the prior pattern fast-path also auto-allowed
+  // this) and route to the web UI bridge for real interactive answering.
+  if (tool_name === 'AskUserQuestion') {
+    console.error('[MCP Bouncer] AskUserQuestion received — bridging to web UI');
+    const response = await bridgeAskUserQuestion(input);
+    return {
+      content: [{ type: 'text', text: JSON.stringify(response) }],
+    };
+  }
 
   console.error(`[MCP Bouncer] Analyzing ${tool_name} request...`);
 

@@ -129,6 +129,18 @@ export interface HeadlessConfig {
   disallowedTools?: string[];
   /** Enable deploy-mode patterns in the bouncer (stricter rules for end-user-driven sessions) */
   deployMode?: boolean;
+  /**
+   * Tab id used to route AskUserQuestion calls back to the right web client.
+   * When set together with `mstroPort` and `bouncerSecret`, the MCP bouncer
+   * pauses Claude on AskUserQuestion and waits for the user to answer in the
+   * web UI before resuming. When unset (e.g. CLI ad-hoc runs), the bouncer
+   * falls back to legacy behavior (allow with no answers).
+   */
+  tabId?: string;
+  /** CLI server port for the AskUserQuestion bridge. Pairs with `tabId`. */
+  mstroPort?: number;
+  /** Per-process bouncer secret for the AskUserQuestion bridge. Pairs with `tabId`. */
+  bouncerSecret?: string;
 }
 
 export interface SessionState {
@@ -215,7 +227,7 @@ export interface ExecutionResult {
 }
 
 /** Resolved config with all defaults applied */
-export type ResolvedHeadlessConfig = Omit<Required<HeadlessConfig>, 'outputCallback' | 'thinkingCallback' | 'toolUseCallback' | 'tokenUsageCallback' | 'continueSession' | 'claudeSessionId' | 'imageAttachments' | 'model' | 'effortLevel' | 'toolTimeoutProfiles' | 'onToolTimeout' | 'extraEnv' | 'disallowedTools' | 'deployMode'> & {
+export type ResolvedHeadlessConfig = Omit<Required<HeadlessConfig>, 'outputCallback' | 'thinkingCallback' | 'toolUseCallback' | 'tokenUsageCallback' | 'continueSession' | 'claudeSessionId' | 'imageAttachments' | 'model' | 'effortLevel' | 'toolTimeoutProfiles' | 'onToolTimeout' | 'extraEnv' | 'disallowedTools' | 'deployMode' | 'tabId' | 'mstroPort' | 'bouncerSecret'> & {
   outputCallback?: (text: string) => void;
   thinkingCallback?: (text: string) => void;
   toolUseCallback?: (event: ToolUseEvent) => void;
@@ -230,6 +242,9 @@ export type ResolvedHeadlessConfig = Omit<Required<HeadlessConfig>, 'outputCallb
   extraEnv?: Record<string, string>;
   disallowedTools?: string[];
   deployMode?: boolean;
+  tabId?: string;
+  mstroPort?: number;
+  bouncerSecret?: string;
 };
 
 

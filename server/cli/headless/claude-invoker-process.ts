@@ -138,7 +138,15 @@ export async function spawnAndRegister(
   runningProcesses: Map<number, ChildProcess>,
   perfStart: number,
 ): Promise<ChildProcess> {
-  const mcpConfigPath = generateMcpConfig(config.workingDir, config.verbose, prompt, randomUUID(), config.deployMode);
+  const askUserQuestionRouting = (config.tabId && config.mstroPort && config.bouncerSecret)
+    ? { tabId: config.tabId, port: config.mstroPort, bouncerSecret: config.bouncerSecret }
+    : undefined;
+  const mcpConfigPath = generateMcpConfig(config.workingDir, config.verbose, {
+    userPrompt: prompt,
+    sessionId: randomUUID(),
+    deployMode: config.deployMode,
+    askUserQuestionRouting,
+  });
 
   if (!mcpConfigPath && config.outputCallback) {
     config.outputCallback(

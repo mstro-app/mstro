@@ -19,7 +19,7 @@ export interface WSContext {
   _ws?: unknown
 }
 
-const CoreMessages = ['execute', 'cancel', 'getHistory', 'getSessions', 'getSessionsCount', 'deleteSession', 'getSessionById', 'clearHistory', 'searchHistory', 'new', 'autocomplete', 'readFile', 'ping', 'initTab', 'resumeSession', 'approve', 'reject', 'recordSelection', 'requestNotificationSummary'] as const;
+const CoreMessages = ['execute', 'cancel', 'getHistory', 'getSessions', 'getSessionsCount', 'deleteSession', 'getSessionById', 'clearHistory', 'searchHistory', 'new', 'autocomplete', 'readFile', 'ping', 'initTab', 'resumeSession', 'approve', 'reject', 'recordSelection', 'requestNotificationSummary', 'askUserQuestionResponse'] as const;
 
 const TerminalMessages = ['terminalInit', 'terminalReconnect', 'terminalList', 'terminalInput', 'terminalResize', 'terminalClose'] as const;
 
@@ -108,7 +108,7 @@ export interface WebSocketMessage {
   _permission?: 'view';
 }
 
-const CoreResponseMessages = ['output', 'thinking', 'movementStart', 'movementComplete', 'movementError', 'sessionUpdate', 'history', 'sessions', 'sessionsCount', 'sessionDeleted', 'sessionData', 'historyCleared', 'searchResults', 'newSession', 'autocomplete', 'fileContent', 'error', 'pong', 'tabInitialized', 'approvalRequired', 'toolUse', 'streamingTokens', 'notificationSummary', 'executeAck', 'clientOffline', 'clientAuthExpired'] as const;
+const CoreResponseMessages = ['output', 'thinking', 'movementStart', 'movementComplete', 'movementError', 'sessionUpdate', 'history', 'sessions', 'sessionsCount', 'sessionDeleted', 'sessionData', 'historyCleared', 'searchResults', 'newSession', 'autocomplete', 'fileContent', 'error', 'pong', 'tabInitialized', 'approvalRequired', 'toolUse', 'streamingTokens', 'notificationSummary', 'executeAck', 'clientOffline', 'clientAuthExpired', 'askUserQuestion', 'askUserQuestionDismissed'] as const;
 
 const TerminalResponseMessages = ['terminalOutput', 'terminalReady', 'terminalExit', 'terminalError', 'terminalList', 'terminalScrollback', 'terminalCreated', 'terminalClosed'] as const;
 
@@ -191,6 +191,52 @@ export interface WebSocketResponse {
 export interface ConnectionData {
   tabId: string;
   workingDir: string;
+}
+
+// ============================================================================
+// AskUserQuestion Types
+// ============================================================================
+
+/**
+ * Single option Claude offers in an AskUserQuestion call. Mirrors the
+ * Claude Agent SDK shape so we can pass-through with no translation.
+ */
+export interface AskUserQuestionOption {
+  label: string;
+  description: string;
+  /** Optional HTML/Markdown preview snippet (when previewFormat is set). */
+  preview?: string;
+}
+
+/**
+ * One question in an AskUserQuestion call. Per Claude SDK: each call
+ * carries 1–4 questions, each question 2–4 options. Header is a short
+ * label (≤12 chars) used for compact display.
+ */
+export interface AskUserQuestionItem {
+  question: string;
+  header: string;
+  options: AskUserQuestionOption[];
+  multiSelect: boolean;
+}
+
+/** Outbound payload (cli → web) when Claude pauses on an AskUserQuestion. */
+export interface AskUserQuestionPayload {
+  toolUseId: string;
+  questions: AskUserQuestionItem[];
+}
+
+/** Outbound payload (cli → web) when a pending question is no longer answerable. */
+export interface AskUserQuestionDismissedPayload {
+  toolUseId: string;
+  reason: 'timeout' | 'cancelled' | 'session-ended';
+}
+
+/** Inbound payload (web → cli) carrying the user's selections. */
+export interface AskUserQuestionResponseData {
+  toolUseId: string;
+  /** Map of question text → selected label(s) (joined with ", " for multi-select). */
+  answers: Record<string, string>;
 }
 
 export interface SkillEntry {

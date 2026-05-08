@@ -22,6 +22,13 @@ export interface ImprovisationOptions {
    * Unsupported levels gracefully fall back to the highest supported level per model.
    */
   effortLevel?: string;
+  /**
+   * Web tab id this session is bound to. Used for AskUserQuestion routing —
+   * the MCP bouncer pauses Claude on AskUserQuestion and the bridge fans the
+   * questions out to this tab's web clients. Optional: when unset the
+   * bouncer falls back to legacy behavior (allow with no answers).
+   */
+  tabId?: string;
 }
 
 // File attachment for multimodal prompts (images)

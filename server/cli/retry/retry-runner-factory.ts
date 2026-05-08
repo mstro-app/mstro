@@ -31,6 +31,7 @@ export function createExecutionRunner(
     noColor: session.options.noColor,
     model: session.options.model,
     effortLevel: session.options.effortLevel,
+    tabId: session.options.tabId,
     improvisationMode: true,
     movementNumber: sequenceNumber,
     continueSession: useResume,

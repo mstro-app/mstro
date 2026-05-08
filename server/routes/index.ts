@@ -9,4 +9,5 @@
 export { createFileRoutes } from './files.js'
 export { createImproviseRoutes } from './improvise.js'
 export { createInstanceRoutes, createShutdownRoute } from './instances.js'
+export { createInternalRoutes } from './internal.js'
 export { createNotificationRoutes } from './notifications.js'

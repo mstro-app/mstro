@@ -628,6 +628,15 @@ export class ImprovisationSessionManager extends EventEmitter {
   }
 
   /**
+   * Bind this session to a web tab. Used so the headless runner can route
+   * AskUserQuestion calls back to that tab's web clients via the bridge.
+   * Idempotent and safe to call repeatedly across reconnects.
+   */
+  setTabId(tabId: string): void {
+    this.options.tabId = tabId;
+  }
+
+  /**
    * AI engine that produced this session. Read from SessionHistory (populated
    * on load/creation). Defaults to 'claude-code' if the history record is
    * missing the field (older sessions).

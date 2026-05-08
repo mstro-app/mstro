@@ -59,15 +59,35 @@ function truncatePrompt(prompt: string): string {
 }
 
 /**
+ * Routing context for the AskUserQuestion bridge. The bouncer subprocess
+ * uses these env vars to call back into the CLI server when Claude pauses
+ * on AskUserQuestion. Optional — without them the bouncer falls back to
+ * passing the tool through with no answers (same as legacy behavior).
+ */
+export interface AskUserQuestionRouting {
+  /** Local CLI server port (e.g. 4101). */
+  port: number;
+  /** Tab the question should be routed to in the web UI. */
+  tabId: string;
+  /** Per-process bouncer secret from `getBouncerSecret()`. */
+  bouncerSecret: string;
+}
+
+export interface GenerateMcpConfigOptions {
+  userPrompt?: string;
+  /** Unique sessionId for the per-session config file name (filename only). */
+  sessionId?: string;
+  deployMode?: boolean;
+  askUserQuestionRouting?: AskUserQuestionRouting;
+}
+
+/**
  * Generate MCP config with bouncer + user's MCP servers from ~/.claude.json.
  * Writes to ~/.mstro/mcp-config-{sessionId}.json for use with --mcp-config flag.
  * Per-session files prevent concurrent sessions from overwriting each other's config.
- *
- * @param userPrompt — The user's original prompt, passed to the bouncer so its
- *   AI layer can distinguish user-requested operations from prompt injection.
- * @param sessionId — Unique session identifier for per-session config isolation.
  */
-export function generateMcpConfig(workingDir: string, verbose: boolean = false, userPrompt?: string, sessionId?: string, deployMode?: boolean): string | null {
+export function generateMcpConfig(workingDir: string, verbose: boolean = false, options: GenerateMcpConfigOptions = {}): string | null {
+  const { userPrompt, sessionId, deployMode, askUserQuestionRouting } = options;
   try {
     if (!existsSync(MCP_SERVER_PATH)) {
       herror(`[${new Date().toISOString()}] MCP server not found at ${MCP_SERVER_PATH}`);
@@ -85,6 +105,11 @@ export function generateMcpConfig(workingDir: string, verbose: boolean = false, 
       bouncerEnv.BOUNCER_USER_PROMPT = userPrompt.length > MAX_USER_PROMPT_LENGTH
         ? truncatePrompt(userPrompt)
         : userPrompt;
+    }
+    if (askUserQuestionRouting) {
+      bouncerEnv.MSTRO_PORT = String(askUserQuestionRouting.port);
+      bouncerEnv.MSTRO_TAB_ID = askUserQuestionRouting.tabId;
+      bouncerEnv.MSTRO_BOUNCER_SECRET = askUserQuestionRouting.bouncerSecret;
     }
 
     const mcpServers: Record<string, unknown> = {
